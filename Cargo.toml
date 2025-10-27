@@ -1,0 +1,26 @@
+[package]
+name = "convert_genome"
+version = "0.1.0"
+edition = "2024"
+authors = ["Convert Genome Contributors"]
+description = "Convert DTC-style genome files to VCF or BCF"
+license = "MIT OR Apache-2.0"
+repository = "https://example.com/convert_genome"
+documentation = "https://example.com/convert_genome/docs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+noodles = { version = "0.101", features = ["bcf", "vcf", "fasta", "bgzf", "core"] }
+rayon = "1.10"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+assert_fs = "1.1"
+pretty_assertions = "1.4"
+serde_json = "1.0"
+tempfile = "3.13"
