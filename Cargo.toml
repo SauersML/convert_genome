@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Convert Genome Contributors"]
 description = "Convert DTC-style genome files to VCF or BCF"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/SauersML/convert_genome"
 documentation = "https://github.com/SauersML/convert_genome"
 
