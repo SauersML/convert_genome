@@ -37,6 +37,9 @@ jobs:
       - name: Test
         run: cargo test --release
 
+      - name: Clean before publish
+        run: cargo clean
+
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_KEY }}
