@@ -25,6 +25,10 @@ tempfile = "3.13"
 url = "2.5"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 
+[build-dependencies]
+grep = "0.3"
+walkdir = "2.5"
+
 [dev-dependencies]
 assert_cmd = "2.0"
 assert_fs = "1.1"
