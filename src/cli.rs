@@ -105,17 +105,16 @@ fn init_logging(level: &str) -> Result<()> {
     Ok(())
 }
 
-fn derive_sample_name(path: &PathBuf) -> Option<String> {
-    if let Some(raw) = path.to_str() {
-        if raw.contains("://") {
-            if let Ok(url) = Url::parse(raw) {
-                return url
-                    .path_segments()
-                    .and_then(|segments| segments.last())
-                    .filter(|segment| !segment.is_empty())
-                    .map(|segment| segment.replace('.', "_"));
-            }
-        }
+fn derive_sample_name(path: &Path) -> Option<String> {
+    if let Some(raw) = path.to_str()
+        && raw.contains("://")
+        && let Ok(url) = Url::parse(raw)
+    {
+        return url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| segment.replace('.', "_"));
     }
 
     path.file_stem()
