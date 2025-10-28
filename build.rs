@@ -760,6 +760,9 @@ fn manually_check_for_unused_variables() {
 }
 
 fn manual_lint_arguments(build_path: &Path) -> Vec<OsString> {
+    let out_dir = std::env::var_os("OUT_DIR").unwrap_or_else(|| OsString::from("target"));
+    let out_path = PathBuf::from(out_dir).join("build_lint_check");
+    
     vec![
         OsString::from("--edition"),
         OsString::from("2021"),
@@ -773,6 +776,8 @@ fn manual_lint_arguments(build_path: &Path) -> Vec<OsString> {
         OsString::from("bin"),
         OsString::from("--error-format"),
         OsString::from("human"),
+        OsString::from("-o"),
+        out_path.into_os_string(),
         build_path.as_os_str().to_os_string(),
     ]
 }
