@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test (debug)
+        run: cargo test --all-features
+
+      - name: Test (release)
+        run: cargo test --release
+
+      - name: Benchmarks
+        run: cargo bench --no-fail-fast -- --warm-up-time 0 --measurement-time 1
+
+      - name: Tarpaulin coverage
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions-rs/tarpaulin@v0.1
+        with:
+          args: '--out Xml'

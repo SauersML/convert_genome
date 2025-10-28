@@ -32,6 +32,7 @@ use noodles::{
         },
     },
 };
+use rayon::prelude::*;
 use thiserror::Error;
 use time::{OffsetDateTime, macros::format_description};
 
@@ -150,9 +151,8 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         "starting conversion",
     );
 
-    let mut reference =
-        ReferenceGenome::open(&config.reference_fasta, config.reference_fai.clone())
-            .with_context(|| "failed to open reference genome")?;
+    let reference = ReferenceGenome::open(&config.reference_fasta, config.reference_fai.clone())
+        .with_context(|| "failed to open reference genome")?;
 
     let header = build_header(&config, &reference)?;
 
@@ -173,7 +173,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 .with_context(|| "failed to write VCF header")?;
             process_records(
                 dtc_reader,
-                &mut reference,
+                &reference,
                 &mut writer,
                 &header,
                 &config,
@@ -189,7 +189,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 .with_context(|| "failed to write BCF header")?;
             process_records(
                 dtc_reader,
-                &mut reference,
+                &reference,
                 &mut writer,
                 &header,
                 &config,
@@ -203,7 +203,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
 fn process_records<R, W>(
     records: R,
-    reference: &mut ReferenceGenome,
+    reference: &ReferenceGenome,
     writer: &mut W,
     header: &vcf::Header,
     config: &ConversionConfig,
@@ -213,47 +213,68 @@ where
     R: IntoIterator<Item = Result<DtcRecord, dtc::ParseError>>,
     W: VariantWriter,
 {
+    let mut prepared = Vec::new();
+
     for result in records {
         match result {
             Ok(record) => {
                 summary.total_records += 1;
-                match convert_record(&record, reference, config) {
-                    Ok(Some((vcf_record, has_alt))) => {
-                        writer.write_variant(header, &vcf_record).with_context(|| {
-                            format!(
-                                "failed to write record {}:{}",
-                                record.chromosome, record.position
-                            )
-                        })?;
-                        summary.record_emission(has_alt);
-                    }
-                    Ok(None) => {
-                        summary.skipped_reference_sites += 1;
-                    }
-                    Err(RecordConversionError::UnknownContig { chromosome }) => {
-                        summary.unknown_chromosomes += 1;
-                        tracing::warn!(target: "convert_genome", %chromosome, "skipping unknown chromosome");
-                    }
-                    Err(RecordConversionError::MissingGenotype { .. }) => {
-                        summary.missing_genotype_records += 1;
-                    }
-                    Err(RecordConversionError::InvalidGenotype { genotype, .. }) => {
-                        summary.invalid_genotypes += 1;
-                        tracing::warn!(%genotype, "skipping invalid genotype");
-                    }
-                    Err(RecordConversionError::Reference { source, .. }) => {
-                        summary.reference_failures += 1;
-                        tracing::warn!(error = %source, "reference lookup failed");
-                    }
-                    Err(RecordConversionError::Position(e)) => {
-                        summary.reference_failures += 1;
-                        tracing::warn!(error = %e, "invalid position");
-                    }
-                }
+                let sort_key = reference
+                    .resolve_contig_name(&record.chromosome)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| record.chromosome.clone());
+                prepared.push((record, sort_key));
             }
             Err(e) => {
                 summary.parse_errors += 1;
                 tracing::warn!(error = %e, "failed to parse input line");
+            }
+        }
+    }
+
+    prepared.sort_by(|(a_record, a_key), (b_record, b_key)| {
+        a_key
+            .cmp(b_key)
+            .then_with(|| a_record.position.cmp(&b_record.position))
+    });
+
+    let conversions: Vec<_> = prepared
+        .par_iter()
+        .map(|(record, _)| convert_record(record, reference, config))
+        .collect();
+
+    for ((record, _), result) in prepared.iter().zip(conversions.into_iter()) {
+        match result {
+            Ok(Some((vcf_record, has_alt))) => {
+                writer.write_variant(header, &vcf_record).with_context(|| {
+                    format!(
+                        "failed to write record {}:{}",
+                        record.chromosome, record.position
+                    )
+                })?;
+                summary.record_emission(has_alt);
+            }
+            Ok(None) => {
+                summary.skipped_reference_sites += 1;
+            }
+            Err(RecordConversionError::UnknownContig { chromosome }) => {
+                summary.unknown_chromosomes += 1;
+                tracing::warn!(target: "convert_genome", %chromosome, "skipping unknown chromosome");
+            }
+            Err(RecordConversionError::MissingGenotype { .. }) => {
+                summary.missing_genotype_records += 1;
+            }
+            Err(RecordConversionError::InvalidGenotype { genotype, .. }) => {
+                summary.invalid_genotypes += 1;
+                tracing::warn!(%genotype, "skipping invalid genotype");
+            }
+            Err(RecordConversionError::Reference { source, .. }) => {
+                summary.reference_failures += 1;
+                tracing::warn!(error = %source, "reference lookup failed");
+            }
+            Err(RecordConversionError::Position(e)) => {
+                summary.reference_failures += 1;
+                tracing::warn!(error = %e, "invalid position");
             }
         }
     }
@@ -263,20 +284,21 @@ where
 
 fn convert_record(
     record: &DtcRecord,
-    reference: &mut ReferenceGenome,
+    reference: &ReferenceGenome,
     config: &ConversionConfig,
 ) -> Result<Option<(RecordBuf, bool)>, RecordConversionError> {
+    let chromosome = record.chromosome.as_str();
     let canonical_chrom = reference
-        .resolve_contig_name(&record.chromosome)
+        .resolve_contig_name(chromosome)
         .ok_or_else(|| RecordConversionError::UnknownContig {
-            chromosome: record.chromosome.clone(),
+            chromosome: chromosome.to_string(),
         })?
         .to_string();
 
     let reference_base = reference
-        .base(&record.chromosome, record.position)
+        .base(chromosome, record.position)
         .map_err(|source| RecordConversionError::Reference {
-            chromosome: record.chromosome.clone(),
+            chromosome: chromosome.to_string(),
             position: record.position,
             source,
         })?;
@@ -284,7 +306,7 @@ fn convert_record(
     let allele_states = parse_genotype(&record.genotype);
     if allele_states.is_empty() {
         return Err(RecordConversionError::MissingGenotype {
-            chromosome: record.chromosome.clone(),
+            chromosome: chromosome.to_string(),
             position: record.position,
         });
     }
@@ -304,7 +326,7 @@ fn convert_record(
     let genotype_string =
         format_genotype(&allele_states, reference_base, &alt_bases).map_err(|genotype| {
             RecordConversionError::InvalidGenotype {
-                chromosome: record.chromosome.clone(),
+                chromosome: chromosome.to_string(),
                 position: record.position,
                 genotype,
             }
@@ -317,7 +339,7 @@ fn convert_record(
 
     let position =
         usize::try_from(record.position).map_err(|_| RecordConversionError::Reference {
-            chromosome: record.chromosome.clone(),
+            chromosome: chromosome.to_string(),
             position: record.position,
             source: ReferenceError::PositionOutOfBounds {
                 contig: canonical_chrom.clone(),
@@ -353,7 +375,7 @@ fn convert_record(
         .parse::<variant::record_buf::samples::sample::value::Genotype>()
         .map(SampleValue::from)
         .map_err(|_| RecordConversionError::InvalidGenotype {
-            chromosome: record.chromosome.clone(),
+            chromosome: chromosome.to_string(),
             position: record.position,
             genotype: genotype_string.clone(),
         })?;

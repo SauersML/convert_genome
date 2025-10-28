@@ -5,20 +5,22 @@ edition = "2024"
 authors = ["Convert Genome Contributors"]
 description = "Convert DTC-style genome files to VCF or BCF"
 license = "MIT OR Apache-2.0"
-repository = "https://example.com/convert_genome"
-documentation = "https://example.com/convert_genome/docs"
+repository = "https://github.com/SauersML/convert_genome"
+documentation = "https://github.com/SauersML/convert_genome"
 
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
-noodles = { version = "0.101", features = ["bcf", "vcf", "fasta", "bgzf", "core"] }
-rayon = "1.10"
-thiserror = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-time = { version = "0.3", features = ["formatting", "macros"] }
 curl = "0.4"
 flate2 = "1.0"
+lru = "0.12"
+noodles = { version = "0.101", features = ["bcf", "vcf", "fasta", "bgzf", "core"] }
+parking_lot = "0.12"
+rayon = "1.10"
+thiserror = "1.0"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tempfile = "3.13"
 url = "2.5"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
@@ -26,5 +28,11 @@ zip = { version = "0.6", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 assert_cmd = "2.0"
 assert_fs = "1.1"
+criterion = { version = "0.5", features = ["html_reports"] }
 pretty_assertions = "1.4"
+proptest = "1.4"
 serde_json = "1.0"
+
+[[bench]]
+name = "conversion"
+harness = false
