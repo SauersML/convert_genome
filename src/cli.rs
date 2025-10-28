@@ -1,10 +1,14 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, fmt};
+use url::Url;
 
-use crate::{ConversionConfig, ConversionSummary, OutputFormat, convert_dtc_file};
+use crate::{
+    ConversionConfig, ConversionSummary, OutputFormat, convert_dtc_file,
+    remote::{self, RemoteResource},
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Convert DTC genotype text files to VCF or BCF", long_about = None)]
@@ -56,10 +60,28 @@ pub fn run() -> Result<()> {
         .or_else(|| derive_sample_name(&cli.input))
         .unwrap_or_else(|| String::from("sample"));
 
+    let mut resources = ResourceManager::new();
+    let input_origin = cli.input.to_string_lossy().to_string();
+    let reference_origin = cli.reference.to_string_lossy().to_string();
+    let reference_fai_origin = cli
+        .reference_fai
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
+
+    let resolved_input = resources.resolve(&cli.input)?;
+    let resolved_reference = resources.resolve(&cli.reference)?;
+    let resolved_reference_fai = match &cli.reference_fai {
+        Some(path) => Some(resources.resolve(path)?),
+        None => None,
+    };
+
     let config = ConversionConfig {
-        input: cli.input.clone(),
-        reference_fasta: cli.reference.clone(),
-        reference_fai: cli.reference_fai.clone(),
+        input: resolved_input,
+        input_origin,
+        reference_fasta: resolved_reference,
+        reference_origin,
+        reference_fai: resolved_reference_fai,
+        reference_fai_origin,
         output: cli.output.clone(),
         output_format: cli.format,
         sample_id,
@@ -84,9 +106,58 @@ fn init_logging(level: &str) -> Result<()> {
 }
 
 fn derive_sample_name(path: &PathBuf) -> Option<String> {
+    if let Some(raw) = path.to_str() {
+        if raw.contains("://") {
+            if let Ok(url) = Url::parse(raw) {
+                return url
+                    .path_segments()
+                    .and_then(|segments| segments.last())
+                    .filter(|segment| !segment.is_empty())
+                    .map(|segment| segment.replace('.', "_"));
+            }
+        }
+    }
+
     path.file_stem()
         .map(|s| s.to_string_lossy().replace('.', "_"))
         .filter(|s| !s.is_empty())
+}
+
+struct ResourceManager {
+    remotes: Vec<RemoteResource>,
+}
+
+impl ResourceManager {
+    fn new() -> Self {
+        Self {
+            remotes: Vec::new(),
+        }
+    }
+
+    fn resolve<P>(&mut self, path: P) -> Result<PathBuf>
+    where
+        P: AsRef<Path>,
+    {
+        let path = path.as_ref();
+        let raw = path.to_string_lossy();
+        if let Some(url) = parse_url(&raw) {
+            let resource = remote::fetch_remote_resource(&url)
+                .with_context(|| format!("failed to fetch {url}"))?;
+            let local_path = resource.local_path().to_path_buf();
+            self.remotes.push(resource);
+            Ok(local_path)
+        } else {
+            Ok(path.to_path_buf())
+        }
+    }
+}
+
+fn parse_url(raw: &str) -> Option<Url> {
+    if raw.contains("://") {
+        Url::parse(raw).ok()
+    } else {
+        None
+    }
 }
 
 fn print_summary(summary: &ConversionSummary) {
