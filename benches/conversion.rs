@@ -86,7 +86,7 @@ fn benchmark_dtc_parsing(c: &mut Criterion) {
 fn benchmark_conversion(c: &mut Criterion) {
     let fixtures = Fixtures::new(25_000);
     let mut group = c.benchmark_group("conversion_pipeline");
-    group.throughput(Throughput::Elements(25_000 as u64));
+    group.throughput(Throughput::Elements(25_000_u64));
 
     group.bench_function(BenchmarkId::new("parallel", 25_000), |b| {
         b.iter(|| {

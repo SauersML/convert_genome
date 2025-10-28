@@ -24,8 +24,8 @@ proptest! {
     #[test]
     fn reader_handles_arbitrary_input(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
         let cursor = Cursor::new(data);
-        let mut reader = dtc::Reader::new(cursor);
-        while let Some(record) = reader.next() {
+        let reader = dtc::Reader::new(cursor);
+        for record in reader {
             let _ = record;
         }
     }

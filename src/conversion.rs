@@ -555,7 +555,7 @@ mod tests {
         };
 
         let header = build_header(&config, &reference).unwrap();
-        assert!(header.contigs().len() >= 1);
+        assert!(!header.contigs().is_empty());
         assert!(header.other_records().contains_key("source"));
         assert!(header.other_records().contains_key("reference"));
     }
