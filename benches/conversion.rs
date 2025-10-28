@@ -3,7 +3,8 @@ use std::{fs, io::Write, path::PathBuf};
 use convert_genome::dtc;
 use convert_genome::reference::ReferenceGenome;
 use convert_genome::{ConversionConfig, OutputFormat, convert_dtc_file};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use rayon::ThreadPoolBuilder;
 
 struct Fixtures {

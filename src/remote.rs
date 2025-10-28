@@ -22,6 +22,10 @@ impl RemoteResource {
     pub fn local_path(&self) -> &Path {
         &self.local_path
     }
+
+    pub fn temp_dir(&self) -> &TempDir {
+        &self.temp_dir
+    }
 }
 
 pub fn fetch_remote_resource(url: &Url) -> Result<RemoteResource> {
@@ -185,7 +189,7 @@ mod tests {
         {
             let file = File::create(&zip_path).unwrap();
             let mut zip = ZipWriter::new(file);
-            let options = zip::write::FileOptions::default();
+            let options = zip::write::FileOptions::<()>::default();
             zip.start_file("test.fa", options).unwrap();
             zip.write_all(b">chr1\nACGT\n").unwrap();
             zip.finish().unwrap();
@@ -212,7 +216,7 @@ mod tests {
         {
             let file = File::create(&nested_zip).unwrap();
             let mut zip = ZipWriter::new(file);
-            let options = zip::write::FileOptions::default();
+            let options = zip::write::FileOptions::<()>::default();
             let data = fs::read(&inner_gz_path).unwrap();
             zip.start_file("inner.fa.gz", options).unwrap();
             zip.write_all(&data).unwrap();
