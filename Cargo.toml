@@ -13,27 +13,27 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 noodles = { version = "0.101", features = ["bcf", "vcf", "fasta", "bgzf", "core"] }
 parking_lot = "0.12"
-rayon = "1.10"
-thiserror = "1.0"
+rayon = "1.11"
+thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 curl = "0.4"
-flate2 = "1.0"
-lru = "0.12"
-tempfile = "3.13"
+flate2 = "1.1"
+lru = "0.16"
+tempfile = "3.23"
 url = "2.5"
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
-grep = "0.3"
+grep = "0.4"
 walkdir = "2.5"
 
 [dev-dependencies]
 assert_cmd = "2.0"
 assert_fs = "1.1"
-criterion = "0.5"
-proptest = "1.4"
+criterion = "0.7"
+proptest = "1.9"
 pretty_assertions = "1.4"
 serde_json = "1.0"
 

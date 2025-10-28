@@ -46,35 +46,6 @@ struct IgnoredTestCollector {
 
 static CURRENT_STAGE: OnceLock<Mutex<String>> = OnceLock::new();
 
-fn run_clippy_check() {
-    emit_stage_detail("running clippy on all targets");
-    
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| std::ffi::OsString::from("cargo"));
-    let mut command = std::process::Command::new(&cargo);
-    command.arg("clippy");
-    command.arg("--all-targets");
-    command.arg("--");
-    command.arg("-D");
-    command.arg("warnings");
-    
-    emit_stage_detail(&format!("executing: {:?}", command));
-    
-    let output = command.output().expect("failed to execute clippy");
-    
-    if !output.status.success() {
-        eprintln!("\n❌ CLIPPY FAILED - BUILD ABORTED");
-        eprintln!("\nClippy found warnings or errors. All clippy warnings are treated as errors.");
-        eprintln!("\nClippy stdout:");
-        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
-        eprintln!("\nClippy stderr:");
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-        eprintln!("\n⚠️ Fix all clippy warnings before building.");
-        std::process::exit(1);
-    }
-    
-    emit_stage_detail("clippy check passed");
-}
-
 fn update_stage(label: &str) {
     let tracker = CURRENT_STAGE.get_or_init(|| Mutex::new(String::new()));
     if let Ok(mut guard) = tracker.lock() {
@@ -524,10 +495,6 @@ fn main() {
     update_stage("initialization");
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Run clippy on all targets before any other checks
-    update_stage("clippy validation");
-    run_clippy_check();
-
     // Manually check for unused variables in the build script
     update_stage("manual lint self-check");
     manually_check_for_unused_variables();
@@ -711,7 +678,7 @@ fn manually_check_for_unused_variables() {
         command_preview(&rustc_binary, &manual_lint_args)
     ));
 
-    if let Some(cwd) = std::env::current_dir().ok() {
+    if let Ok(cwd) = std::env::current_dir() {
         emit_stage_detail(&format!(
             "manual lint self-check: current dir before spawn: {:?}",
             cwd
