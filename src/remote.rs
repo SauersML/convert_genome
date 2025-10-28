@@ -30,7 +30,7 @@ pub fn fetch_remote_resource(url: &Url) -> Result<RemoteResource> {
     let temp_dir = TempDir::new().context("failed to create temporary directory for download")?;
     let filename = url
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .filter(|segment| !segment.is_empty())
         .map(|segment| segment.to_string())
         .unwrap_or_else(|| String::from("download"));

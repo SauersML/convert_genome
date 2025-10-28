@@ -427,8 +427,7 @@ fn format_genotype(
                 }
             }
         })
-        .collect::<Result<_, _>>()
-        .map_err(|missing| missing)?;
+        .collect::<Result<_, _>>()?;
 
     if codes.len() == 1 {
         Ok(codes[0].clone())
