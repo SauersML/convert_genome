@@ -53,8 +53,11 @@ pub enum OutputFormat {
 #[derive(Debug, Clone)]
 pub struct ConversionConfig {
     pub input: PathBuf,
+    pub input_origin: String,
     pub reference_fasta: PathBuf,
+    pub reference_origin: String,
     pub reference_fai: Option<PathBuf>,
+    pub reference_fai_origin: Option<String>,
     pub output: PathBuf,
     pub output_format: OutputFormat,
     pub sample_id: String,
@@ -138,7 +141,9 @@ where
 pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     tracing::info!(
         output_format = ?config.output_format,
-        reference = %config.reference_fasta.display(),
+        reference_source = %config.reference_origin,
+        reference_path = %config.reference_fasta.display(),
+        input_source = %config.input_origin,
         output = %config.output.display(),
         sample_id = %config.sample_id,
         include_reference = config.include_reference_sites,
@@ -434,7 +439,11 @@ fn build_header(config: &ConversionConfig, reference: &ReferenceGenome) -> Resul
         insert_other_record(&mut header, "assembly", config.assembly.clone())?;
     }
 
-    let reference_uri = format!("file://{}", config.reference_fasta.display());
+    let reference_uri = if is_remote_source(&config.reference_origin) {
+        config.reference_origin.clone()
+    } else {
+        format!("file://{}", config.reference_fasta.display())
+    };
     insert_other_record(&mut header, "reference", reference_uri)?;
 
     let date_format = format_description!("%Y%m%d");
@@ -454,6 +463,10 @@ fn insert_other_record(header: &mut vcf::Header, key: &str, value: String) -> Re
         .other_records_mut()
         .insert(key, Collection::Unstructured(vec![value]));
     Ok(())
+}
+
+fn is_remote_source(raw: &str) -> bool {
+    raw.contains("://")
 }
 
 #[cfg(test)]
@@ -490,8 +503,11 @@ mod tests {
         let reference = ReferenceGenome::open(fasta_path.path(), None).unwrap();
         let config = ConversionConfig {
             input: PathBuf::from("input.txt"),
+            input_origin: String::from("input.txt"),
             reference_fasta: fasta_path.path().to_path_buf(),
+            reference_origin: fasta_path.path().to_string_lossy().to_string(),
             reference_fai: None,
+            reference_fai_origin: None,
             output: PathBuf::from("out.vcf"),
             output_format: OutputFormat::Vcf,
             sample_id: String::from("sample"),
