@@ -1,13 +1,17 @@
 use std::{
     collections::HashMap,
     fs, io,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use lru::LruCache;
 use noodles::{
     core::{Position, Region},
     fasta::{self, fai},
 };
+use parking_lot::Mutex;
 use std::str::Utf8Error;
 use thiserror::Error;
 
@@ -17,11 +21,14 @@ pub struct ReferenceContig {
     pub length: u64,
 }
 
+const CACHE_CAPACITY: usize = 128 * 1024;
+
 pub struct ReferenceGenome {
     path: PathBuf,
-    reader: fasta::io::IndexedReader<fasta::io::BufReader<fs::File>>,
+    reader: Arc<Mutex<fasta::io::IndexedReader<fasta::io::BufReader<fs::File>>>>,
     contigs: Vec<ReferenceContig>,
     alias_to_index: HashMap<String, usize>,
+    cache: Arc<Mutex<LruCache<(String, u64), u8>>>,
 }
 
 #[derive(Debug, Error)]
@@ -79,9 +86,12 @@ impl ReferenceGenome {
 
         Ok(Self {
             path: canonical,
-            reader,
+            reader: Arc::new(Mutex::new(reader)),
             contigs,
             alias_to_index,
+            cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(CACHE_CAPACITY).expect("cache capacity must be non-zero"),
+            ))),
         })
     }
 
@@ -105,7 +115,16 @@ impl ReferenceGenome {
         self.alias_to_index.get(&key).map(|&idx| &self.contigs[idx])
     }
 
-    pub fn base(&mut self, query: &str, position: u64) -> Result<char, ReferenceError> {
+    pub fn contig_index(&self, query: &str) -> Option<usize> {
+        let key = canonical_key(query);
+        self.alias_to_index.get(&key).copied()
+    }
+
+    pub fn cache_usage(&self) -> usize {
+        self.cache.lock().len()
+    }
+
+    pub fn base(&self, query: &str, position: u64) -> Result<char, ReferenceError> {
         let contig = self
             .contig(query)
             .ok_or_else(|| ReferenceError::UnknownContig {
@@ -126,12 +145,34 @@ impl ReferenceGenome {
             length: contig.length,
         })?;
 
+        let key = (contig.name.clone(), position);
+
+        if let Some(&cached) = self.cache.lock().get(&key) {
+            return Ok(char::from(cached));
+        }
+
         let start = Position::try_from(pos)?;
         let region = Region::new(contig.name.clone(), start..=start);
-        let record = self.reader.query(&region)?;
+        let record = self.reader.lock().query(&region)?;
         let seq = record.sequence();
         let base = seq.as_ref().first().copied().unwrap_or(b'N');
-        Ok(char::from(base).to_ascii_uppercase())
+        let base_char = char::from(base).to_ascii_uppercase();
+
+        self.cache.lock().put(key, base_char as u8);
+
+        Ok(base_char)
+    }
+}
+
+impl Clone for ReferenceGenome {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            reader: Arc::clone(&self.reader),
+            contigs: self.contigs.clone(),
+            alias_to_index: self.alias_to_index.clone(),
+            cache: Arc::clone(&self.cache),
+        }
     }
 }
 
@@ -183,7 +224,7 @@ mod tests {
         writeln!(file, "ACGT").unwrap();
         drop(file);
 
-        let mut reference = ReferenceGenome::open(&fasta_path, None).unwrap();
+        let reference = ReferenceGenome::open(&fasta_path, None).unwrap();
         assert_eq!(reference.base("1", 2).unwrap(), 'C');
         assert!(reference.base("1", 0).is_err());
     }
