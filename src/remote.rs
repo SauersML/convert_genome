@@ -14,7 +14,7 @@ use zip::ZipArchive;
 const FASTA_EXTENSIONS: &[&str] = &["fa", "fasta", "fna", "fa.gz", "fasta.gz", "fna.gz"];
 
 pub struct RemoteResource {
-    _temp_dir: TempDir,
+    temp_dir: TempDir,
     local_path: PathBuf,
 }
 
@@ -41,7 +41,7 @@ pub fn fetch_remote_resource(url: &Url) -> Result<RemoteResource> {
     let prepared = prepare_downloaded_file(temp_dir.path(), &download_path)?;
 
     Ok(RemoteResource {
-        _temp_dir: temp_dir,
+        temp_dir,
         local_path: prepared,
     })
 }
