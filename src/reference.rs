@@ -26,7 +26,7 @@ pub struct ReferenceGenome {
     reader: Arc<Mutex<fasta::io::IndexedReader<fasta::io::BufReader<fs::File>>>>,
     contigs: Vec<ReferenceContig>,
     alias_to_index: HashMap<String, usize>,
-    cache: Arc<Mutex<LruCache<(String, u64), u8>>>,
+    cache: Arc<Mutex<LruCache<(usize, u64), u8>>>,
 }
 
 #[derive(Debug, Error)]
@@ -113,17 +113,26 @@ impl ReferenceGenome {
         self.alias_to_index.get(&key).map(|&idx| &self.contigs[idx])
     }
 
+    /// Returns the index of the contig matching the query, if found.
+    pub fn contig_index(&self, query: &str) -> Option<usize> {
+        let key = canonical_key(query);
+        self.alias_to_index.get(&key).copied()
+    }
+
     #[doc(hidden)]
     pub fn cache_len(&self) -> usize {
         self.cache.lock().len()
     }
 
     pub fn base(&self, query: &str, position: u64) -> Result<char, ReferenceError> {
-        let contig = self
-            .contig(query)
+        let canonical = canonical_key(query);
+        let contig_idx = *self
+            .alias_to_index
+            .get(&canonical)
             .ok_or_else(|| ReferenceError::UnknownContig {
                 query: query.to_string(),
             })?;
+        let contig = &self.contigs[contig_idx];
 
         if position == 0 || position > contig.length {
             return Err(ReferenceError::PositionOutOfBounds {
@@ -131,6 +140,12 @@ impl ReferenceGenome {
                 position,
                 length: contig.length,
             });
+        }
+
+        let key = (contig_idx, position);
+
+        if let Some(&cached) = self.cache.lock().get(&key) {
+            return Ok(char::from(cached).to_ascii_uppercase());
         }
 
         let pos = usize::try_from(position).map_err(|_| ReferenceError::PositionOutOfBounds {
@@ -141,11 +156,6 @@ impl ReferenceGenome {
 
         let start = Position::try_from(pos)?;
         let region = Region::new(contig.name.clone(), start..=start);
-        let key = (contig.name.clone(), position);
-
-        if let Some(&cached) = self.cache.lock().get(&key) {
-            return Ok(char::from(cached).to_ascii_uppercase());
-        }
 
         let base = {
             let mut reader = self.reader.lock();

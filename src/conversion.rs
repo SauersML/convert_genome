@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{self, BufReader},
     path::PathBuf,
@@ -79,6 +80,7 @@ pub struct ConversionSummary {
     pub unknown_chromosomes: usize,
     pub reference_failures: usize,
     pub invalid_genotypes: usize,
+    pub indel_records: usize,
     pub parse_errors: usize,
 }
 
@@ -102,6 +104,12 @@ pub enum RecordConversionError {
     MissingGenotype { chromosome: String, position: u64 },
     #[error("invalid genotype '{genotype}' at {chromosome}:{position}")]
     InvalidGenotype {
+        chromosome: String,
+        position: u64,
+        genotype: String,
+    },
+    #[error("indel-like genotype '{genotype}' at {chromosome}:{position} (not supported)")]
+    IndelGenotype {
         chromosome: String,
         position: u64,
         genotype: String,
@@ -229,12 +237,29 @@ where
         }
     }
 
-    parsed_records.par_sort_by(|a, b| match a.chromosome.cmp(&b.chromosome) {
-        std::cmp::Ordering::Equal => a.position.cmp(&b.position),
-        other => other,
+    // Issue 2B fix: Sort by contig index (matching header order) instead of lexicographic string
+    parsed_records.par_sort_by(|a, b| {
+        let idx_a = reference.contig_index(&a.chromosome).unwrap_or(usize::MAX);
+        let idx_b = reference.contig_index(&b.chromosome).unwrap_or(usize::MAX);
+        match idx_a.cmp(&idx_b) {
+            std::cmp::Ordering::Equal => a.position.cmp(&b.position),
+            other => other,
+        }
     });
 
-    let shared_reference = reference.clone();
+    // Issue 3A fix: Pre-fetch all reference bases single-threaded to avoid mutex contention
+    // during the parallel conversion phase.
+    let prefetched_bases: HashMap<(String, u64), char> = parsed_records
+        .iter()
+        .filter_map(|r| {
+            reference
+                .base(&r.chromosome, r.position)
+                .ok()
+                .map(|base| ((r.chromosome.clone(), r.position), base))
+        })
+        .collect();
+
+    let prefetched = Arc::new(prefetched_bases);
     let shared_config = Arc::new(config.clone());
 
     let converted: Vec<_> = parsed_records
@@ -242,7 +267,7 @@ where
         .map(|record| {
             (
                 record,
-                convert_record(record, &shared_reference, shared_config.as_ref()),
+                convert_record_with_base(record, reference, shared_config.as_ref(), &prefetched),
             )
         })
         .collect();
@@ -272,6 +297,10 @@ where
                 summary.invalid_genotypes += 1;
                 tracing::warn!(%genotype, "skipping invalid genotype");
             }
+            Err(RecordConversionError::IndelGenotype { genotype, .. }) => {
+                summary.indel_records += 1;
+                tracing::warn!(%genotype, "skipping indel-like genotype (not supported)");
+            }
             Err(RecordConversionError::Reference { source, .. }) => {
                 summary.reference_failures += 1;
                 tracing::warn!(error = %source, "reference lookup failed");
@@ -286,10 +315,14 @@ where
     Ok(())
 }
 
-fn convert_record(
+
+/// Convert a DTC record to VCF using pre-fetched reference bases.
+/// This avoids mutex contention during parallel processing.
+fn convert_record_with_base(
     record: &DtcRecord,
     reference: &ReferenceGenome,
     config: &ConversionConfig,
+    prefetched: &HashMap<(String, u64), char>,
 ) -> Result<Option<(RecordBuf, bool)>, RecordConversionError> {
     let chromosome = record.chromosome.as_str();
     let canonical_chrom = reference.resolve_contig_name(chromosome).ok_or_else(|| {
@@ -299,16 +332,29 @@ fn convert_record(
     })?;
     let canonical_name = canonical_chrom.to_string();
 
-    let reference_base = reference
-        .base(chromosome, record.position)
-        .map_err(|source| RecordConversionError::Reference {
+    // Issue 2A: Detect indel-like genotypes early and skip them
+    if is_indel_like(&record.genotype) {
+        return Err(RecordConversionError::IndelGenotype {
             chromosome: record.chromosome.clone(),
             position: record.position,
-            source,
+            genotype: record.genotype.clone(),
+        });
+    }
+
+    // Use pre-fetched base to avoid mutex contention (Issue 3A fix)
+    let reference_base = prefetched
+        .get(&(record.chromosome.clone(), record.position))
+        .copied()
+        .ok_or_else(|| RecordConversionError::Reference {
+            chromosome: record.chromosome.clone(),
+            position: record.position,
+            source: ReferenceError::UnknownContig {
+                query: record.chromosome.clone(),
+            },
         })?;
 
     let allele_states = parse_genotype(&record.genotype);
-    if allele_states.is_empty() {
+    if allele_states.is_empty() || allele_states.iter().all(|a| a.is_none()) {
         return Err(RecordConversionError::MissingGenotype {
             chromosome: record.chromosome.clone(),
             position: record.position,
@@ -392,14 +438,33 @@ fn convert_record(
     Ok(Some((vcf_record, !alt_bases.is_empty())))
 }
 
+/// Parse a genotype string into allele states.
+/// Only valid nucleotide bases (A, C, G, T, N) are preserved.
+/// Invalid characters are treated as None (no-call).
 fn parse_genotype(raw: &str) -> Vec<Option<char>> {
     raw.trim()
         .chars()
         .map(|c| match c {
             '-' => None,
-            other => Some(other.to_ascii_uppercase()),
+            other => {
+                let upper = other.to_ascii_uppercase();
+                if matches!(upper, 'A' | 'C' | 'G' | 'T' | 'N') {
+                    Some(upper)
+                } else {
+                    // Invalid base (e.g., 'I', 'D') treated as no-call
+                    None
+                }
+            }
         })
         .collect()
+}
+
+/// Check if a raw genotype string contains indel-like characters.
+fn is_indel_like(raw: &str) -> bool {
+    let trimmed = raw.trim().to_ascii_uppercase();
+    // Detect common indel indicators: I, D, or genotype length > 2 (e.g., "AAG")
+    trimmed.chars().any(|c| matches!(c, 'I' | 'D'))
+        || trimmed.chars().filter(|c| matches!(c, 'A' | 'C' | 'G' | 'T' | 'N')).count() > 2
 }
 
 fn format_genotype(

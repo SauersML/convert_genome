@@ -182,6 +182,13 @@ fn print_summary(summary: &ConversionSummary) {
         );
     }
 
+    if summary.indel_records > 0 {
+        println!(
+            "Skipped {count} indel-like genotypes (not supported).",
+            count = summary.indel_records
+        );
+    }
+
     if summary.unknown_chromosomes > 0
         || summary.reference_failures > 0
         || summary.invalid_genotypes > 0

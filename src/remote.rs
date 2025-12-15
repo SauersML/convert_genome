@@ -143,7 +143,17 @@ fn extract_zip_archive(base_dir: &Path, path: &Path) -> Result<PathBuf> {
 
     let mut entry = archive.by_index(index)?;
     let output_name = selected_name
-        .and_then(|name| name.file_name().map(|os| os.to_owned()))
+        .and_then(|name| {
+            if name.components().count() > 1 {
+                tracing::warn!(
+                    target: "convert_genome",
+                    "zip entry path '{}' flattened to '{}'",
+                    name.display(),
+                    name.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                );
+            }
+            name.file_name().map(|os| os.to_owned())
+        })
         .unwrap_or_else(|| entry.name().into());
     let mut output_path = base_dir.to_path_buf();
     output_path.push(output_name);
