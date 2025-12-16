@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::cli::Sex;
 use crate::dtc::{self, Allele, Record as DtcRecord};
