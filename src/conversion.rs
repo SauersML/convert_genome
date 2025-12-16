@@ -336,29 +336,33 @@ where
 
                     let samples = final_record.samples();
                     // Assume single sample for conversion tool
-                    if let Some(Some(Value::String(gt_str))) = samples.values().next().and_then(|sample| sample.get(format_key::GENOTYPE)) {
-                             // Parse GT
-                             let indices = crate::plink::parse_gt_indices(gt_str);
-                            let get_allele = |idx: Option<usize>| -> String {
-                                match idx {
-                                    Some(0) => record_ref.clone(),
-                                    Some(i) => record_alts
-                                        .get(i - 1)
-                                        .cloned()
-                                        .unwrap_or_else(|| ".".to_string()),
-                                    None => ".".to_string(),
-                                }
-                            };
-
-                            if let (Some(_), Some(_)) = indices {
-                                // Diploid
-                                user_bases.push(get_allele(indices.0));
-                                user_bases.push(get_allele(indices.1));
-                            } else if let (Some(_), None) = indices {
-                                // Haploid
-                                user_bases.push(get_allele(indices.0));
+                    if let Some(Some(Value::String(gt_str))) = samples
+                        .values()
+                        .next()
+                        .and_then(|sample| sample.get(format_key::GENOTYPE))
+                    {
+                        // Parse GT
+                        let indices = crate::plink::parse_gt_indices(gt_str);
+                        let get_allele = |idx: Option<usize>| -> String {
+                            match idx {
+                                Some(0) => record_ref.clone(),
+                                Some(i) => record_alts
+                                    .get(i - 1)
+                                    .cloned()
+                                    .unwrap_or_else(|| ".".to_string()),
+                                None => ".".to_string(),
                             }
+                        };
+
+                        if let (Some(_), Some(_)) = indices {
+                            // Diploid
+                            user_bases.push(get_allele(indices.0));
+                            user_bases.push(get_allele(indices.1));
+                        } else if let (Some(_), None) = indices {
+                            // Haploid
+                            user_bases.push(get_allele(indices.0));
                         }
+                    }
 
                     // Only harmonize if we have valid bases
                     if !user_bases.is_empty() && !user_bases.contains(&".".to_string()) {
