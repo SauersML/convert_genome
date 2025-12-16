@@ -357,9 +357,6 @@ where
                             }
                         };
 
-                        // ---------------------------------------------------------
-                        // REMAPPING LOGIC FOR VCF FIELDS (AD, AC, AF)
-                        // ---------------------------------------------------------
                         // Initialize variables to hold the new record components
                         let mut final_ref = final_record.reference_bases().to_string();
                         let mut final_alts = final_record.alternate_bases().clone();
