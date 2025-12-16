@@ -120,30 +120,18 @@ pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<String> {
     }
 }
 
-/// Detect build from DTC file by creating a temporary VCF.
+/// Detect build from DTC records using check_build.
 ///
-/// This writes a minimal VCF with positions and reference alleles looked up
-/// from the provided reference genome, then runs check_build on it.
+/// Builds Variant list from records with reference bases, then checks against hg19/hg38.
 pub fn detect_build_from_dtc(
     records: &[DtcRecord],
     reference: &crate::reference::ReferenceGenome,
 ) -> Result<String> {
-    use std::io::Write;
+    // Build Variant list for check_build (max 1000 for speed)
+    let mut variants = Vec::with_capacity(1000);
 
-    // Create temporary VCF with first N variants
-    let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
-    let vcf_path = temp_dir.path().join("build_check.vcf");
-
-    let mut vcf_file = std::fs::File::create(&vcf_path).context("Failed to create temp VCF")?;
-
-    // Write minimal VCF header
-    writeln!(vcf_file, "##fileformat=VCFv4.2")?;
-    writeln!(vcf_file, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO")?;
-
-    // Write first 1000 variants with valid reference lookups
-    let mut written = 0;
     for rec in records.iter().take(5000) {
-        if written >= 1000 {
+        if variants.len() >= 1000 {
             break;
         }
 
@@ -163,28 +151,35 @@ pub fn detect_build_from_dtc(
         if let Ok(ref_base) = reference.base(&rec.chromosome, rec.position) {
             let ref_base = ref_base.to_ascii_uppercase();
             if matches!(ref_base, 'A' | 'C' | 'G' | 'T') {
-                writeln!(
-                    vcf_file,
-                    "{}\t{}\t.\t{}\t.\t.\t.\t.",
-                    rec.chromosome, rec.position, ref_base
-                )?;
-                written += 1;
+                variants.push(check_build::Variant {
+                    chrom: rec.chromosome.clone(),
+                    pos: rec.position,
+                    ref_base: ref_base.to_string(),
+                });
             }
         }
     }
 
-    vcf_file.flush()?;
-    drop(vcf_file);
-
-    if written < 100 {
+    if variants.len() < 100 {
         tracing::warn!(
             "Only {} variants with valid reference bases for build detection",
-            written
+            variants.len()
         );
     }
 
-    // Run check_build on the temp VCF
-    detect_build_from_vcf(&vcf_path)
+    let result = check_build::detect_build_from_positions(&variants)
+        .map_err(|e| anyhow::anyhow!("Build detection failed: {}", e))?;
+
+    tracing::info!(
+        "Build detection: hg19={:.1}%, hg38={:.1}%",
+        result.hg19_match_rate,
+        result.hg38_match_rate
+    );
+
+    match result.better_match() {
+        Some(check_build::Reference::Hg19) => Ok("GRCh37".to_string()),
+        Some(check_build::Reference::Hg38) | None => Ok("GRCh38".to_string()),
+    }
 }
 
 /// Classify chromosome string into Chromosome enum for infer_sex.
