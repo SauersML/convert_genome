@@ -27,7 +27,7 @@ use noodles::vcf::{
     variant::{
         io::Write as VariantRecordWrite,
         record::samples::keys::key as format_key,
-        record_buf::{RecordBuf, AlternateBases, Samples, samples::sample::Value},
+        record_buf::{AlternateBases, RecordBuf, Samples, samples::sample::Value},
     },
 };
 // rayon removed
@@ -315,148 +315,177 @@ where
                 // Apply panel harmonization if panel is provided
                 if let Some(panel_cell) = panel {
                     let chrom = final_record.reference_sequence_name().to_string();
-                    let pos = final_record
-                        .variant_start()
-                        .map(usize::from)
-                        .unwrap_or(0) as u64;
+                    let pos = final_record.variant_start().map(usize::from).unwrap_or(0) as u64;
                     let ref_base = final_record.reference_bases().to_string();
-                    
+
                     // Collect alleles from the record
                     let mut user_bases = Vec::new();
-                    
+
                     // Decode GT to get actual bases
                     // For now, assume diploid/haploid from GT indices
                     // We need the ACTUAL bases the user has called, e.g. ["A", "G"]
                     // We can get these by mapping GT indices to record alleles.
-                    
-                    let record_alts: Vec<String> = final_record.alternate_bases()
-                        .as_ref().iter().map(|s| s.to_string()).collect();
+
+                    let record_alts: Vec<String> = final_record
+                        .alternate_bases()
+                        .as_ref()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
                     let record_ref = &ref_base;
-                        
+
                     let samples = final_record.samples();
                     // Assume single sample for conversion tool
                     if let Some(sample) = samples.values().next() {
-                         if let Some(Some(Value::String(gt_str))) = sample.get(format_key::GENOTYPE) {
-                             // Parse GT
-                             let indices = crate::plink::parse_gt_indices(gt_str);
-                             let get_allele = |idx: Option<usize>| -> String {
-                                 match idx {
-                                     Some(0) => record_ref.clone(),
-                                     Some(i) => record_alts.get(i-1).cloned().unwrap_or_else(|| ".".to_string()),
-                                     None => ".".to_string(),
-                                 }
-                             };
-                             
-                             if let (Some(_), Some(_)) = indices {
-                                 // Diploid
-                                 user_bases.push(get_allele(indices.0));
-                                 user_bases.push(get_allele(indices.1));
-                             } else if let (Some(_), None) = indices {
-                                 // Haploid
-                                 user_bases.push(get_allele(indices.0));
-                             }
+                        if let Some(Some(Value::String(gt_str))) = sample.get(format_key::GENOTYPE)
+                        {
+                            // Parse GT
+                            let indices = crate::plink::parse_gt_indices(gt_str);
+                            let get_allele = |idx: Option<usize>| -> String {
+                                match idx {
+                                    Some(0) => record_ref.clone(),
+                                    Some(i) => record_alts
+                                        .get(i - 1)
+                                        .cloned()
+                                        .unwrap_or_else(|| ".".to_string()),
+                                    None => ".".to_string(),
+                                }
+                            };
+
+                            if let (Some(_), Some(_)) = indices {
+                                // Diploid
+                                user_bases.push(get_allele(indices.0));
+                                user_bases.push(get_allele(indices.1));
+                            } else if let (Some(_), None) = indices {
+                                // Haploid
+                                user_bases.push(get_allele(indices.0));
+                            }
                         }
                     }
-                    
+
                     // Only harmonize if we have valid bases
                     if !user_bases.is_empty() && !user_bases.contains(&".".to_string()) {
-                         let mut panel = panel_cell.borrow_mut();
-                         let result = crate::harmonize::harmonize_genotype(
-                             &user_bases,
-                             record_ref, // Use record REF as reference (it should match genome if standardized)
-                             &chrom,
-                             pos,
-                             &mut panel
-                         );
-                         
-                         match result {
-                             crate::harmonize::HarmonizationResult::Success { gt_indices } => {
-                                 // We have new indices into the PANEL alleles.
-                                 // We need to update the record to reflect this.
-                                 // The panel already tracks the alleles.
-                                 // To make the VCF self-contained, we should put the relevant alleles into the record.
-                                 // But simplistically, if we want to match the panel, we might want to put *all* panel alleles?
-                                 // Or just the ones we use?
-                                 // Using just the ones we use is safer for VCF size.
-                                 
-                                 // Get the actual alleles from the panel
-                                 if let Some(site) = panel.get_original(&chrom, pos) {
-                                     let panel_alts = crate::harmonize::get_merged_alts(site, panel.added_alts(&chrom, pos));
-                                     let panel_ref = &site.ref_allele;
-                                     
-                                     // Construct new record alleles: PanelRef + UsedAlts
-                                     // Actually, to use GT indices from panel directly, we'd need all panel alleles.
-                                     // But that's bloated.
-                                     // Let's reconstruct the User's genotype using harmonized bases, then rebuild record.
-                                     
-                                     let get_panel_allele = |idx: usize| -> String {
-                                         if idx == 0 {
-                                             panel_ref.clone()
-                                         } else {
-                                             panel_alts.get(idx - 1).cloned().unwrap_or(".".to_string())
-                                         }
-                                     };
-                                     
-                                     let a1 = get_panel_allele(gt_indices.0);
-                                     let a2 = get_panel_allele(gt_indices.1);
-                                     
-                                     // New Ref is Panel Ref
-                                     let new_ref = panel_ref.clone();
-                                     
-                                     // Map a1, a2 to 0, 1, 2...
-                                     // 0 is new_ref.
-                                     // Collect unique ALTs needed.
-                                     let mut needed_alts = Vec::new();
-                                     if a1 != new_ref && a1 != "." && !needed_alts.contains(&a1) { needed_alts.push(a1.clone()); }
-                                     if a2 != new_ref && a2 != "." && !needed_alts.contains(&a2) { needed_alts.push(a2.clone()); }
-                                     
-                                     // Sort needed alts to be deterministic? Or just keep order.
-                                     let new_alts = needed_alts;
-                                     
-                                     // Calculate new GT indices based on new_alts
-                                     let get_new_idx = |allele: &str| -> usize {
-                                         if allele == new_ref { 0 }
-                                         else {
-                                             new_alts.iter().position(|a| a == allele).map(|i| i + 1).unwrap_or(0) // Should exist
-                                         }
-                                     };
-                                     
-                                     let new_gt_str = if user_bases.len() == 2 {
-                                         format!("{}/{}", get_new_idx(&a1), get_new_idx(&a2))
-                                     } else {
-                                         format!("{}", get_new_idx(&a1))
-                                     };
-                                     
-                                     // Update Record
-                                     *final_record.reference_bases_mut() = new_ref;
-                                     *final_record.alternate_bases_mut() = AlternateBases::from(new_alts);
-                                     
-                                     // Update GT sample
-                                     // We need to preserve other fields (GQ, DP) but replace GT.
-                                     // We can use the same logic as flip_sample_genotypes but with arbitrary string
-                                     
-                                     let samples = final_record.samples().clone(); // cloning to iterate
-                                     let mut new_sample_values = Vec::new();
-                                     
-                                     for sample in samples.values() {
-                                          let mut values = Vec::new();
-                                          for (key, value) in samples.keys().as_ref().iter().zip(sample.values()) {
-                                              if key == &format_key::GENOTYPE {
-                                                  values.push(Some(Value::String(new_gt_str.clone())));
-                                              } else {
-                                                  values.push(value.clone());
-                                              }
-                                          }
-                                          new_sample_values.push(values);
-                                     }
-                                     *final_record.samples_mut() = Samples::new(samples.keys().clone(), new_sample_values);
-                                 }
-                             }
-                             _ => {
-                                 // Skip or Log?
-                                 tracing::debug!("Harmonization failed/skipped at {}:{}", chrom, pos);
-                             }
-                         }
+                        let mut panel = panel_cell.borrow_mut();
+                        let result = crate::harmonize::harmonize_genotype(
+                            &user_bases,
+                            record_ref, // Use record REF as reference (it should match genome if standardized)
+                            &chrom,
+                            pos,
+                            &mut panel,
+                        );
+
+                        match result {
+                            crate::harmonize::HarmonizationResult::Success { gt_indices } => {
+                                // We have new indices into the PANEL alleles.
+                                // We need to update the record to reflect this.
+                                // The panel already tracks the alleles.
+                                // To make the VCF self-contained, we should put the relevant alleles into the record.
+                                // But simplistically, if we want to match the panel, we might want to put *all* panel alleles?
+                                // Or just the ones we use?
+                                // Using just the ones we use is safer for VCF size.
+
+                                // Get the actual alleles from the panel
+                                if let Some(site) = panel.get_original(&chrom, pos) {
+                                    let panel_alts = crate::harmonize::get_merged_alts(
+                                        site,
+                                        panel.added_alts(&chrom, pos),
+                                    );
+                                    let panel_ref = &site.ref_allele;
+
+                                    // Construct new record alleles: PanelRef + UsedAlts
+                                    // Actually, to use GT indices from panel directly, we'd need all panel alleles.
+                                    // But that's bloated.
+                                    // Let's reconstruct the User's genotype using harmonized bases, then rebuild record.
+
+                                    let get_panel_allele = |idx: usize| -> String {
+                                        if idx == 0 {
+                                            panel_ref.clone()
+                                        } else {
+                                            panel_alts
+                                                .get(idx - 1)
+                                                .cloned()
+                                                .unwrap_or(".".to_string())
+                                        }
+                                    };
+
+                                    let a1 = get_panel_allele(gt_indices.0);
+                                    let a2 = get_panel_allele(gt_indices.1);
+
+                                    // New Ref is Panel Ref
+                                    let new_ref = panel_ref.clone();
+
+                                    // Map a1, a2 to 0, 1, 2...
+                                    // 0 is new_ref.
+                                    // Collect unique ALTs needed.
+                                    let mut needed_alts = Vec::new();
+                                    if a1 != new_ref && a1 != "." && !needed_alts.contains(&a1) {
+                                        needed_alts.push(a1.clone());
+                                    }
+                                    if a2 != new_ref && a2 != "." && !needed_alts.contains(&a2) {
+                                        needed_alts.push(a2.clone());
+                                    }
+
+                                    // Sort needed alts to be deterministic? Or just keep order.
+                                    let new_alts = needed_alts;
+
+                                    // Calculate new GT indices based on new_alts
+                                    let get_new_idx = |allele: &str| -> usize {
+                                        if allele == new_ref {
+                                            0
+                                        } else {
+                                            new_alts
+                                                .iter()
+                                                .position(|a| a == allele)
+                                                .map(|i| i + 1)
+                                                .unwrap_or(0) // Should exist
+                                        }
+                                    };
+
+                                    let new_gt_str = if user_bases.len() == 2 {
+                                        format!("{}/{}", get_new_idx(&a1), get_new_idx(&a2))
+                                    } else {
+                                        format!("{}", get_new_idx(&a1))
+                                    };
+
+                                    // Update Record
+                                    *final_record.reference_bases_mut() = new_ref;
+                                    *final_record.alternate_bases_mut() =
+                                        AlternateBases::from(new_alts);
+
+                                    // Update GT sample
+                                    // We need to preserve other fields (GQ, DP) but replace GT.
+                                    // We can use the same logic as flip_sample_genotypes but with arbitrary string
+
+                                    let samples = final_record.samples().clone(); // cloning to iterate
+                                    let mut new_sample_values = Vec::new();
+
+                                    for sample in samples.values() {
+                                        let mut values = Vec::new();
+                                        for (key, value) in
+                                            samples.keys().as_ref().iter().zip(sample.values())
+                                        {
+                                            if key == &format_key::GENOTYPE {
+                                                values
+                                                    .push(Some(Value::String(new_gt_str.clone())));
+                                            } else {
+                                                values.push(value.clone());
+                                            }
+                                        }
+                                        new_sample_values.push(values);
+                                    }
+                                    *final_record.samples_mut() =
+                                        Samples::new(samples.keys().clone(), new_sample_values);
+                                }
+                            }
+                            _ => {
+                                // Skip or Log?
+                                tracing::debug!(
+                                    "Harmonization failed/skipped at {}:{}",
+                                    chrom,
+                                    pos
+                                );
+                            }
+                        }
                     }
                 }
                 summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
@@ -668,20 +697,23 @@ pub fn standardize_record(
         // Validation: For Indels, check at least the first base matches reference
         // (VCF spec requires POS to be the position of the first base of REF)
         if input_ref.len() > 1 {
-             let first_char = input_ref.chars().next().unwrap();
-             let ref_first_char = ref_base_str.chars().next().unwrap(); // ref_base is usually single char from .base() call
-             
-             // Wait, reference.base() returns a single char at `pos`.
-             // If input_ref="TGT", first base 'T' must match ref_base 'T'.
-             if first_char != ref_first_char {
-                 tracing::warn!(
-                     "Indel REF mismatch at {}:{}: user REF={} but reference base={}. Skipping.",
-                     canonical_name, pos, input_ref, ref_first_char
-                 );
-                 return Ok(None);
-             }
+            let first_char = input_ref.chars().next().unwrap();
+            let ref_first_char = ref_base_str.chars().next().unwrap(); // ref_base is usually single char from .base() call
+
+            // Wait, reference.base() returns a single char at `pos`.
+            // If input_ref="TGT", first base 'T' must match ref_base 'T'.
+            if first_char != ref_first_char {
+                tracing::warn!(
+                    "Indel REF mismatch at {}:{}: user REF={} but reference base={}. Skipping.",
+                    canonical_name,
+                    pos,
+                    input_ref,
+                    ref_first_char
+                );
+                return Ok(None);
+            }
         }
-        
+
         let alt_bases: Vec<String> = record
             .alternate_bases()
             .as_ref()
@@ -763,37 +795,36 @@ fn flip_sample_genotypes(
     for key in keys.as_ref().iter() {
         if key == format_key::GENOTYPE {
             new_keys_vec.push(key.clone());
-        } else if key == "GQ" 
-               || key == "DP" 
-               || key == "MIN_DP" {
+        } else if key == "GQ" || key == "DP" || key == "MIN_DP" {
             new_keys_vec.push(key.clone());
         } else {
-             tracing::debug!("Dropping field {} during polarization", key);
+            tracing::debug!("Dropping field {} during polarization", key);
         }
     }
-    
+
     // Create new keys object
-    let new_keys: noodles::vcf::variant::record_buf::samples::Keys = new_keys_vec.into_iter().collect();
+    let new_keys: noodles::vcf::variant::record_buf::samples::Keys =
+        new_keys_vec.into_iter().collect();
 
     let mut new_values = Vec::new();
 
     for sample in samples.values() {
         let mut new_sample_vals = Vec::new();
-        
+
         // Iterate through valid keys and extract values from original sample
         // Iterate through valid keys and extract values from original sample
         for key in new_keys.as_ref().iter() {
-           let val_opt = sample.get(key).flatten().cloned();
-           
-           if key == &format_key::GENOTYPE {
-               if let Some(Value::String(gt_str)) = &val_opt {
-                   new_sample_vals.push(Some(Value::String(flip_gt_string(gt_str))));
-               } else {
-                   new_sample_vals.push(val_opt);
-               }
-           } else {
-               new_sample_vals.push(val_opt);
-           }
+            let val_opt = sample.get(key).flatten().cloned();
+
+            if key == &format_key::GENOTYPE {
+                if let Some(Value::String(gt_str)) = &val_opt {
+                    new_sample_vals.push(Some(Value::String(flip_gt_string(gt_str))));
+                } else {
+                    new_sample_vals.push(val_opt);
+                }
+            } else {
+                new_sample_vals.push(val_opt);
+            }
         }
         new_values.push(new_sample_vals);
     }
