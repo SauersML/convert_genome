@@ -128,7 +128,9 @@ where
 }
 
 impl VariantWriter for PlinkWriter {
-    fn write_variant(&mut self, _header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
+    fn write_variant(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
+        // Header not used for PLINK format but required by trait
+        let _ = header;
         self.write_variant(record)
     }
 }
@@ -433,7 +435,7 @@ pub fn standardize_record(
     let ref_base_str = ref_base.to_string();
     
     // 3. Check if allele polarization is needed
-    let (final_ref, final_alts, _needs_flip) = if input_ref.len() == 1 && input_ref != ref_base_str {
+    let (final_ref, final_alts, needs_flip) = if input_ref.len() == 1 && input_ref != ref_base_str {
         // Single-base REF doesn't match reference - need to polarize
         let alt_bases: Vec<String> = record.alternate_bases()
             .as_ref()
@@ -478,9 +480,16 @@ pub fn standardize_record(
         record.ids().clone()
     };
     
-    // 5. Keep samples as-is for now (GT flipping is complex and can be added later)
-    // TODO: Implement GT flipping when allele polarization occurs
-    let samples = record.samples().clone();
+    // 5. Apply GT flipping if allele polarization occurred
+    let samples = if needs_flip.is_some() {
+        tracing::debug!(
+            chrom = %canonical_name, pos = pos,
+            "Allele polarization applied, flipping GT indices"
+        );
+        flip_sample_genotypes(record.samples())
+    } else {
+        record.samples().clone()
+    };
     
     // 6. Check ploidy and enforce if needed
     let ploidy = determine_ploidy(&canonical_name, pos, config.sex, config.par_boundaries.as_ref());
@@ -513,8 +522,55 @@ pub fn standardize_record(
     
     Ok(Some(builder.build()))
 }
-// Note: flip_genotypes and enforce_haploid_samples functions removed temporarily.
-// GT manipulation is complex with noodles API and will be implemented in a follow-up.
+
+/// Flip genotype indices in all samples (0↔1 swap for biallelic sites)
+/// For biallelic sites where ref/alt were swapped, we need to flip 0↔1 in GT
+fn flip_sample_genotypes(samples: &noodles::vcf::variant::record_buf::Samples) -> noodles::vcf::variant::record_buf::Samples {
+    use noodles::vcf::variant::record_buf::samples::sample::Value;
+    use noodles::vcf::variant::record_buf::Samples;
+    use noodles::vcf::variant::record::samples::keys::key;
+    
+    let keys = samples.keys().clone();
+    let mut new_values: Vec<Vec<Option<Value>>> = Vec::new();
+    
+    for sample in samples.values() {
+        // Try to get the GT field and flip it
+        if let Some(gt_val) = sample.get(key::GENOTYPE) {
+            let mut new_sample_vals: Vec<Option<Value>> = Vec::new();
+            
+            // Preserve all fields but flip GT
+            for field_val in sample.values() {
+                new_sample_vals.push(field_val.clone());
+            }
+            
+            // Find and flip GT (it should be the first field typically)
+            if let Some(Value::String(gt_str)) = gt_val {
+                // Replace the GT value with flipped version
+                if !new_sample_vals.is_empty() {
+                    new_sample_vals[0] = Some(Value::String(flip_gt_string(&gt_str)));
+                }
+            }
+            
+            new_values.push(new_sample_vals);
+        } else {
+            // No GT field, keep sample as-is
+            new_values.push(sample.values().iter().map(|v| v.clone()).collect());
+        }
+    }
+    
+    Samples::new(keys, new_values)
+}
+
+/// Flip genotype indices in a GT string (e.g., "0/1" -> "1/0", "0|0" -> "1|1")
+fn flip_gt_string(gt: &str) -> String {
+    gt.chars()
+        .map(|c| match c {
+            '0' => '1',
+            '1' => '0',
+            other => other, // Preserve separators (/, |) and other indices (2, 3, .)
+        })
+        .collect()
+}
 
 #[doc(hidden)]
 pub fn format_genotype_for_tests(

@@ -45,7 +45,7 @@ fn test_plink_writer_spec_example() {
         .set_samples(samples_buf)
         .build();
 
-    // SNP 2: 1 2 0 0 1 0 (A A, 0 0, 1 2, A A, 2 2, 2 2)
+    // Snp 2: genotypes (HomAlt, Missing, Het, HomAlt, HomAlt, HomAlt)
     // Expected bytes: E7 0F
     
     let samples2 = vec![

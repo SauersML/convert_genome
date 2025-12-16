@@ -24,6 +24,7 @@ pub enum InputFormat {
 
 impl InputFormat {
     pub fn detect(path: &std::path::Path) -> Self {
+        // First check file extension
         if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
             match ext.to_lowercase().as_str() {
                 "vcf" | "vcf.gz" => return Self::Vcf,
@@ -32,8 +33,24 @@ impl InputFormat {
                 _ => {}
             }
         }
-        // TODO: magic bytes check
-        Self::Dtc // Default fallback
+        
+        // Check magic bytes for BCF (starts with 'BCF' = 0x42 0x43 0x46)
+        if let Ok(file) = std::fs::File::open(path) {
+            use std::io::Read;
+            let mut reader = std::io::BufReader::new(file);
+            let mut magic = [0u8; 3];
+            if reader.read_exact(&mut magic).is_ok() {
+                if &magic == b"BCF" {
+                    return Self::Bcf;
+                }
+                // VCF files typically start with '#' (0x23) for header
+                if magic[0] == b'#' {
+                    return Self::Vcf;
+                }
+            }
+        }
+        
+        Self::Dtc // Default fallback for text formats
     }
 }
 
@@ -232,9 +249,9 @@ impl DtcSource {
         let has_ins = alt_bases.iter().any(|b| b == "INS");
         
         if has_del || has_ins {
-             // IMPRECISE
+             // Mark as imprecise structural variant
              info_map.insert(String::from("IMPRECISE"), Some(noodles::vcf::variant::record_buf::info::field::Value::Flag));
-             // SVTYPE
+             // Set structural variant type
              let svtype = if has_del && has_ins { "COMPLEX" } else if has_del { "DEL" } else { "INS" };
              info_map.insert(String::from("SVTYPE"), Some(noodles::vcf::variant::record_buf::info::field::Value::String(svtype.into())));
         }
