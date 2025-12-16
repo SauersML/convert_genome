@@ -272,13 +272,16 @@ impl PaddedPanel {
         let key = (chrom.to_string(), pos);
 
         if let Some(site) = self.original.get(chrom, pos) {
-            // Site exists in panel
+            // Site exists in panel - USE CANONICAL CHROM NAME FROM SITE
+            // This ensures added_alts is keyed by "chr1" even if user passed "1"
+            let canonical_key = (site.chrom.clone(), pos);
+            
             if let Some(idx) = site.allele_index(allele) {
                 return idx;
             }
 
             // Allele not in panel - add it
-            let added = self.added_alts.entry(key).or_default();
+            let added = self.added_alts.entry(canonical_key).or_default();
 
             // Check if we already added this allele
             for (i, added_alt) in added.iter().enumerate() {

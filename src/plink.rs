@@ -76,7 +76,8 @@ impl PlinkWriter {
         // Existing logic handled 1 ALT.
         // Let's handle 0 ALTs by writing a monomorphic site (ALT=".")
         if alt_bases.is_empty() {
-            return self.write_biallelic_variant(record, 0, None, ".");
+            // Monomorphic sites are not useful for PLINK/Beagle and writing "." as ALT is invalid.
+            return Ok(());
         }
 
         // Iterate over all ALT alleles (1-based index)

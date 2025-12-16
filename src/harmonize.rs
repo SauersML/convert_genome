@@ -80,7 +80,7 @@ pub fn harmonize_genotype(
             let comp = complement_seq(base);
             if comp.eq_ignore_ascii_case(ref_base) {
                 needs_flip = true;
-                validated_bases.push(ref_base.to_uppercase());
+                validated_bases.push(base.to_uppercase());
             } else {
                 // User has a variant allele (or complement of variant)
                 validated_bases.push(base.to_uppercase());

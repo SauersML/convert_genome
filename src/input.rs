@@ -24,13 +24,14 @@ pub enum InputFormat {
 impl InputFormat {
     pub fn detect(path: &std::path::Path) -> Self {
         // First check file extension
-        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-            match ext.to_lowercase().as_str() {
-                "vcf" | "vcf.gz" => return Self::Vcf,
-                "bcf" => return Self::Bcf,
-                "txt" | "csv" | "tsv" => return Self::Dtc,
-                _ => {}
-            }
+        if let Some(filename) = path.file_name().map(|n| n.to_string_lossy().to_lowercase()) {
+             if filename.ends_with(".vcf.gz") || filename.ends_with(".vcf") {
+                 return Self::Vcf;
+             } else if filename.ends_with(".bcf") || filename.ends_with(".bcf.gz") {
+                 return Self::Bcf;
+             } else if filename.ends_with(".txt") || filename.ends_with(".csv") || filename.ends_with(".tsv") {
+                 return Self::Dtc;
+             }
         }
 
         // Check magic bytes for BCF (starts with 'BCF' = 0x42 0x43 0x46)

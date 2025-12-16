@@ -341,8 +341,19 @@ where
                         .next()
                         .and_then(|sample| sample.get(format_key::GENOTYPE))
                     {
-                        // Parse GT
-                        let indices = crate::plink::parse_gt_indices(gt_str);
+                        // Parse GT - Handle Haploid vs Diploid carefully
+                        let is_diploid_str = gt_str.contains('/') || gt_str.contains('|');
+                        let indices = if is_diploid_str {
+                            crate::plink::parse_gt_indices(gt_str)
+                        } else {
+                            // Haploid: treat as (Some(idx), None)
+                            if let Ok(idx) = gt_str.parse::<usize>() {
+                                (Some(idx), None)
+                            } else {
+                                (None, None)
+                            }
+                        };
+
                         let get_allele = |idx: Option<usize>| -> String {
                             match idx {
                                 Some(0) => record_ref.clone(),
@@ -662,7 +673,7 @@ pub fn standardize_record(
     let ref_base_str = ref_base.to_string();
 
     // 3. Check if allele polarization is needed
-    let (final_ref, final_alts, needs_flip) = if input_ref.len() == 1 && input_ref != ref_base_str {
+    let (final_ref, final_alts, needs_remap) = if input_ref.len() == 1 && input_ref != ref_base_str {
         // Single-base REF doesn't match reference - need to polarize
         let alt_bases: Vec<String> = record
             .alternate_bases()
@@ -675,12 +686,26 @@ pub fn standardize_record(
         if let Some(flip_idx) = alt_bases.iter().position(|a| a == &ref_base_str) {
             // Swap: new REF = ref_base, new ALTs = [old_ref] + (old_alts - ref_base)
             let mut new_alts = vec![input_ref.clone()];
+            let mut mapping = std::collections::HashMap::new();
+
+            // Mapping Logic:
+            // Old REF (Index 0) -> New Index 1 (it becomes the first ALT)
+            mapping.insert(0, 1);
+            
+            // Old ALT that matches Reference (Index flip_idx + 1) -> New Index 0 (REF)
+            mapping.insert(flip_idx + 1, 0);
+
+            let mut next_new_idx = 2;
             for (i, alt) in alt_bases.iter().enumerate() {
                 if i != flip_idx {
                     new_alts.push(alt.clone());
+                    // Old ALT index was i + 1. New index is next_new_idx.
+                    mapping.insert(i + 1, next_new_idx);
+                    next_new_idx += 1;
                 }
             }
-            (ref_base_str.clone(), new_alts, Some(flip_idx + 1)) // +1 because ALT indices are 1-based
+            
+            (ref_base_str.clone(), new_alts, Some(mapping)) 
         } else {
             // Cannot polarize - REF/ALT don't contain reference base
             tracing::warn!(
@@ -737,13 +762,13 @@ pub fn standardize_record(
         record.ids().clone()
     };
 
-    // 5. Apply GT flipping if allele polarization occurred
-    let samples = if needs_flip.is_some() {
+    // 5. Apply GT remapping if allele polarization occurred
+    let samples = if let Some(mapping) = needs_remap {
         tracing::debug!(
             chrom = %canonical_name, pos = pos,
-            "Allele polarization applied, flipping GT indices"
+            "Allele polarization applied, remapping GT indices: {:?}", mapping
         );
-        flip_sample_genotypes(record.samples())
+        remap_sample_genotypes(record.samples(), &mapping)
     } else {
         record.samples().clone()
     };
@@ -785,10 +810,10 @@ pub fn standardize_record(
     Ok(Some(builder.build()))
 }
 
-/// Flip genotype indices in all samples (0↔1 swap for biallelic sites)
-/// For biallelic sites where ref/alt were swapped, we need to flip 0↔1 in GT
-fn flip_sample_genotypes(
+/// Remap genotype indices in all samples based on mapping
+fn remap_sample_genotypes(
     samples: &noodles::vcf::variant::record_buf::Samples,
+    mapping: &std::collections::HashMap<usize, usize>,
 ) -> noodles::vcf::variant::record_buf::Samples {
     let keys = samples.keys();
     let mut new_keys_vec = Vec::new();
@@ -811,13 +836,12 @@ fn flip_sample_genotypes(
         let mut new_sample_vals = Vec::new();
 
         // Iterate through valid keys and extract values from original sample
-        // Iterate through valid keys and extract values from original sample
         for key in new_keys.as_ref().iter() {
             let val_opt = sample.get(key).flatten().cloned();
 
             if key == format_key::GENOTYPE {
                 if let Some(Value::String(gt_str)) = &val_opt {
-                    new_sample_vals.push(Some(Value::String(flip_gt_string(gt_str))));
+                    new_sample_vals.push(Some(Value::String(remap_gt_string(gt_str, mapping))));
                 } else {
                     new_sample_vals.push(val_opt);
                 }
@@ -831,15 +855,59 @@ fn flip_sample_genotypes(
     Samples::new(new_keys, new_values)
 }
 
-/// Flip genotype indices in a GT string (e.g., "0/1" -> "1/0", "0|0" -> "1|1")
-fn flip_gt_string(gt: &str) -> String {
-    gt.chars()
-        .map(|c| match c {
-            '0' => '1',
-            '1' => '0',
-            other => other, // Preserve separators (/, |) and other indices (2, 3, .)
-        })
-        .collect()
+/// Remap genotype indices in a GT string (e.g., "0/1" -> "1/0")
+/// Handles standard separators (/, |) and ignores '.'
+fn remap_gt_string(gt: &str, mapping: &std::collections::HashMap<usize, usize>) -> String {
+    // Split by separators, map, join back? 
+    // Or char-by-char if single digits? 
+    // GT might have multi-digit indices (e.g. 10). Char mapping is unsafe.
+    // Parse fully.
+    
+    // Simple parser for VCF GT string:
+    // Split on first separator to detect phase?
+    // Actually, VCF GT is usually integers separated by / or |.
+    
+    // We can use a regex or manual scan.
+    // Manual scan is safer and faster.
+    let mut result = String::with_capacity(gt.len());
+    let mut current_num = String::new();
+    
+    for c in gt.chars() {
+        if c.is_ascii_digit() {
+            current_num.push(c);
+        } else {
+            // End of number
+            if !current_num.is_empty() {
+                if let Ok(idx) = current_num.parse::<usize>() {
+                   if let Some(new_idx) = mapping.get(&idx) {
+                       result.push_str(&new_idx.to_string());
+                   } else {
+                       // Keep original validity? Or warn?
+                       // If mapping incomplete, keep original (risky) or map to .?
+                       result.push_str(&current_num); 
+                   }
+                } else {
+                    result.push_str(&current_num);
+                }
+                current_num.clear();
+            }
+            result.push(c);
+        }
+    }
+    // Final number
+    if !current_num.is_empty() {
+        if let Ok(idx) = current_num.parse::<usize>() {
+           if let Some(new_idx) = mapping.get(&idx) {
+               result.push_str(&new_idx.to_string());
+           } else {
+               result.push_str(&current_num); 
+           }
+        } else {
+            result.push_str(&current_num);
+        }
+    }
+    
+    result
 }
 
 #[doc(hidden)]
