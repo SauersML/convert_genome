@@ -133,18 +133,11 @@ impl VariantWriter for PlinkWriter {
     }
 }
 
-/// Pre-scan a DTC file to infer sex from variant patterns.
-/// This reads the file once to collect chromosome/heterozygosity data,
-/// then uses the infer_sex library to determine biological sex.
-fn prescan_dtc_for_sex(input: &PathBuf, assembly: &str) -> Result<Sex> {
-    use std::io::BufRead;
-
-    let file = fs::File::open(input).with_context(|| {
-        format!(
-            "failed to open input for sex inference: {}",
-            input.display()
-        )
-    })?;
+/// Pre-scan a DTC file to collect records for inference.
+/// This reads the file once and returns records for both build and sex inference.
+fn prescan_dtc_records(input: &PathBuf) -> Result<Vec<dtc::Record>> {
+    let file = fs::File::open(input)
+        .with_context(|| format!("failed to open input for inference: {}", input.display()))?;
     let reader = BufReader::new(file);
     let dtc_reader = dtc::Reader::new(reader);
 
@@ -165,7 +158,7 @@ fn prescan_dtc_for_sex(input: &PathBuf, assembly: &str) -> Result<Sex> {
         }
     }
 
-    crate::inference::infer_sex_from_records(&records, assembly)
+    Ok(records)
 }
 
 /// Convert the provided direct-to-consumer genotype file into VCF or BCF.
@@ -186,13 +179,48 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     let reference = ReferenceGenome::open(&config.reference_fasta, config.reference_fai.clone())
         .with_context(|| "failed to open reference genome")?;
 
-    // Infer sex if not provided (DTC format only for now)
+    // Auto-detect build and sex if not provided (DTC format only for now)
     let mut config = config;
-    if config.sex.is_none() && matches!(config.input_format, crate::input::InputFormat::Dtc) {
-        tracing::info!("Sex not specified, inferring from input data...");
-        let inferred = prescan_dtc_for_sex(&config.input, &config.assembly)?;
-        tracing::info!("Inferred sex: {:?}", inferred);
-        config.sex = Some(inferred);
+    if matches!(config.input_format, crate::input::InputFormat::Dtc) {
+        // Pre-scan DTC file for inference (done once, used for both)
+        let prescan_records = prescan_dtc_records(&config.input)?;
+
+        // Detect build if using default GRCh38 - check if it actually matches
+        if config.assembly == "GRCh38" {
+            tracing::info!("Verifying genome build with check_build...");
+            match crate::inference::detect_build_from_dtc(&prescan_records, &reference) {
+                Ok(detected) => {
+                    if detected != config.assembly {
+                        tracing::warn!(
+                            "Detected build {} differs from default {}. Using detected build.",
+                            detected,
+                            config.assembly
+                        );
+                        config.assembly = detected;
+                    } else {
+                        tracing::info!("Build verified: {}", config.assembly);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Build detection failed: {}. Using default GRCh38.", e);
+                }
+            }
+        }
+
+        // Infer sex if not provided
+        if config.sex.is_none() {
+            tracing::info!("Sex not specified, inferring from input data...");
+            match crate::inference::infer_sex_from_records(&prescan_records, &config.assembly) {
+                Ok(inferred) => {
+                    tracing::info!("Inferred sex: {:?}", inferred);
+                    config.sex = Some(inferred);
+                }
+                Err(e) => {
+                    tracing::warn!("Sex inference failed: {}. Defaulting to Female.", e);
+                    config.sex = Some(Sex::Female);
+                }
+            }
+        }
     }
 
     // Load panel if provided
