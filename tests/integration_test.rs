@@ -37,7 +37,7 @@ fn base_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> Conversio
         sex: convert_genome::cli::Sex::Female,
         par_boundaries: None,
         standardize: false,
-        ref_panel: None,
+        panel: None,
     }
 }
 

@@ -71,7 +71,7 @@ pub struct ConversionConfig {
     pub sex: Sex,
     pub par_boundaries: Option<ParBoundaries>,
     pub standardize: bool,
-    pub ref_panel: Option<PathBuf>,
+    pub panel: Option<PathBuf>,
 }
 
 // ConversionSummary moved to crate root
@@ -142,11 +142,27 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         input = %config.input.display(),
         output = %config.output.display(),
         sample_id = %config.sample_id,
+        panel = ?config.panel,
+        standardize = config.standardize,
         "starting conversion",
     );
 
     let reference = ReferenceGenome::open(&config.reference_fasta, config.reference_fai.clone())
         .with_context(|| "failed to open reference genome")?;
+
+    // Load panel if provided
+    let padded_panel: Option<std::cell::RefCell<crate::panel::PaddedPanel>> =
+        if let Some(panel_path) = &config.panel {
+            tracing::info!(panel = %panel_path.display(), "loading reference panel");
+            let panel_index = crate::panel::PanelIndex::load(panel_path)
+                .with_context(|| format!("failed to load panel {}", panel_path.display()))?;
+            tracing::info!(sites = panel_index.len(), "panel loaded");
+            Some(std::cell::RefCell::new(crate::panel::PaddedPanel::new(
+                panel_index,
+            )))
+        } else {
+            None
+        };
 
     let header = build_header(&config, &reference)?;
 
@@ -200,6 +216,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 &header,
                 &config,
                 &mut summary,
+                padded_panel.as_ref(),
             )?;
         }
         OutputFormat::Bcf => {
@@ -216,6 +233,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 &header,
                 &config,
                 &mut summary,
+                padded_panel.as_ref(),
             )?;
         }
         OutputFormat::Plink => {
@@ -233,7 +251,29 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 &header,
                 &config,
                 &mut summary,
+                padded_panel.as_ref(),
             )?;
+        }
+    }
+
+    // Write padded panel if we have one and output_dir is set
+    if let (Some(panel), Some(output_dir)) = (&padded_panel, &config.output_dir) {
+        let panel = panel.borrow();
+        if panel.modified_site_count() > 0 || panel.novel_site_count() > 0 {
+            let panel_output = output_dir.join("panel.vcf");
+            tracing::info!(
+                path = %panel_output.display(),
+                modified = panel.modified_site_count(),
+                novel = panel.novel_site_count(),
+                "writing padded panel"
+            );
+
+            if let Some(original_panel_path) = &config.panel {
+                crate::panel_writer::write_padded_panel(original_panel_path, &panel, &panel_output)
+                    .with_context(|| "failed to write padded panel")?;
+            }
+        } else {
+            tracing::info!("no panel modifications needed, skipping padded panel output");
         }
     }
 
@@ -247,6 +287,7 @@ fn process_records<S, W>(
     header: &vcf::Header,
     config: &ConversionConfig,
     summary: &mut crate::ConversionSummary,
+    panel: Option<&std::cell::RefCell<crate::panel::PaddedPanel>>,
 ) -> Result<()>
 where
     S: crate::input::VariantSource,
@@ -269,6 +310,41 @@ where
                 } else {
                     record
                 };
+
+                // Apply panel harmonization if panel is provided
+                if let Some(panel_cell) = panel {
+                    let chrom = final_record.reference_sequence_name().to_string();
+                    let pos = final_record.variant_start().map(usize::from).unwrap_or(0) as u64;
+                    let ref_base = final_record.reference_bases().to_string();
+
+                    // Collect alleles from the record
+                    let mut alleles: Vec<String> = vec![ref_base.clone()];
+                    for alt in final_record.alternate_bases().as_ref().iter() {
+                        alleles.push(alt.to_string());
+                    }
+
+                    // Register alleles with the panel (this tracks novel alleles)
+                    let mut panel = panel_cell.borrow_mut();
+                    for allele in &alleles {
+                        panel.get_or_add_allele_index(&chrom, pos, allele, &ref_base);
+                    }
+
+                    // If the panel has this site, update record's REF/ALT to match panel encoding
+                    if let Some(site) = panel.get_original(&chrom, pos) {
+                        // Use panel's REF if it differs
+                        if !site.ref_allele.eq_ignore_ascii_case(&ref_base) {
+                            // The panel has a different REF - this means we might need to remap
+                            // For now, just log and continue (full remapping is complex)
+                            tracing::debug!(
+                                "Panel REF ({}) differs from user REF ({}) at {}:{}",
+                                site.ref_allele,
+                                ref_base,
+                                chrom,
+                                pos
+                            );
+                        }
+                    }
+                }
 
                 summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
 
@@ -804,7 +880,7 @@ mod tests {
             sex: Sex::Female,
             par_boundaries: None,
             standardize: false,
-            ref_panel: None,
+            panel: None,
         };
 
         let header = build_header(&config, &reference).unwrap();
@@ -843,7 +919,7 @@ mod tests {
             sex: Sex::Female,
             par_boundaries: None,
             standardize: false,
-            ref_panel: None,
+            panel: None,
         };
 
         let header = build_header(&config, &reference).unwrap();

@@ -49,8 +49,8 @@ struct Cli {
     reference_fai: Option<PathBuf>,
 
     /// Reference panel VCF/BCF for allele harmonization (Beagle compatibility)
-    #[arg(long, value_name = "PANEL")]
-    ref_panel: Option<PathBuf>,
+    #[arg(long, value_name = "FILE")]
+    panel: Option<PathBuf>,
 
     /// Sample identifier to embed in the VCF header
     #[arg(long, value_name = "SAMPLE")]
@@ -84,7 +84,7 @@ pub fn run() -> Result<()> {
     init_logging(&cli.log_level)?;
 
     // Validate output arguments
-    let output = match (&cli.output, &cli.output_dir, &cli.ref_panel) {
+    let output = match (&cli.output, &cli.output_dir, &cli.panel) {
         (Some(output), None, _) => output.clone(),
         (None, Some(dir), Some(_)) => {
             // Panel mode - create output directory and use genotypes.vcf as output
@@ -123,7 +123,7 @@ pub fn run() -> Result<()> {
     };
 
     // Resolve panel if provided
-    let resolved_panel = match &cli.ref_panel {
+    let resolved_panel = match &cli.panel {
         Some(path) => Some(resources.resolve(path)?),
         None => None,
     };
@@ -151,7 +151,7 @@ pub fn run() -> Result<()> {
         sex: cli.sex,
         par_boundaries: crate::reference::ParBoundaries::new(&cli.assembly),
         standardize: cli.standardize,
-        ref_panel: resolved_panel,
+        panel: resolved_panel,
     };
 
     let summary = convert_dtc_file(config)?;
