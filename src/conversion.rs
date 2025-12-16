@@ -179,6 +179,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     let reference = ReferenceGenome::open(&config.reference_fasta, config.reference_fai.clone())
         .with_context(|| "failed to open reference genome")?;
 
+    // Track inference results for the report
+    let mut sex_inferred = false;
+    let mut build_detection: Option<crate::report::BuildDetection> = None;
+    let original_sex_provided = config.sex.is_some();
+
     // Auto-detect build and sex if not provided (DTC format only for now)
     let mut config = config;
     if matches!(config.input_format, crate::input::InputFormat::Dtc) {
@@ -196,10 +201,16 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                             detected,
                             config.assembly
                         );
-                        config.assembly = detected;
+                        config.assembly = detected.clone();
                     } else {
                         tracing::info!("Build verified: {}", config.assembly);
                     }
+                    // Note: We don't have match rates here, would need to modify inference module
+                    build_detection = Some(crate::report::BuildDetection {
+                        detected_build: detected,
+                        hg19_match_rate: 0.0,
+                        hg38_match_rate: 0.0,
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("Build detection failed: {}. Using default GRCh38.", e);
@@ -214,14 +225,17 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 Ok(inferred) => {
                     tracing::info!("Inferred sex: {:?}", inferred);
                     config.sex = Some(inferred);
+                    sex_inferred = true;
                 }
                 Err(e) => {
                     tracing::warn!("Sex inference failed: {}. Defaulting to Female.", e);
                     config.sex = Some(Sex::Female);
+                    sex_inferred = true;
                 }
             }
         }
     }
+    let _ = original_sex_provided; // silence unused warning for now
 
     // Load panel if provided
     let padded_panel: Option<std::cell::RefCell<crate::panel::PaddedPanel>> =
@@ -348,6 +362,26 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         } else {
             tracing::info!("no panel modifications needed, skipping padded panel output");
         }
+    }
+
+    // Build and write the run report
+    let report_builder = crate::report::RunReportBuilder {
+        input_path: config.input.display().to_string(),
+        input_format: Some(config.input_format),
+        input_origin: config.input_origin.clone(),
+        output_path: config.output.display().to_string(),
+        output_format: Some(config.output_format),
+        reference_path: config.reference_fasta.display().to_string(),
+        reference_origin: config.reference_origin.clone(),
+        assembly: config.assembly.clone(),
+        sample_id: config.sample_id.clone(),
+        sex: config.sex,
+        sex_inferred,
+        build_detection,
+    };
+    let report = report_builder.build(&summary);
+    if let Err(e) = report.write(&config.output) {
+        tracing::warn!("Failed to write run report: {}", e);
     }
 
     Ok(summary)

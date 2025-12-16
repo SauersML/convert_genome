@@ -9,6 +9,7 @@ pub mod panel_writer;
 pub mod plink;
 pub mod reference;
 pub mod remote;
+pub mod report;
 
 pub use conversion::{ConversionConfig, OutputFormat, convert_dtc_file};
 
