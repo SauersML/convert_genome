@@ -157,12 +157,12 @@ impl RunReportBuilder {
             timestamp,
             input: InputInfo {
                 path: self.input_path,
-                format: format!("{:?}", self.input_format.unwrap_or(InputFormat::Auto)),
+                format: format_name(self.input_format),
                 origin: self.input_origin,
             },
             output: OutputInfo {
                 path: self.output_path,
-                format: format!("{:?}", self.output_format.unwrap_or(OutputFormat::Vcf)),
+                format: output_format_name(self.output_format),
             },
             reference: ReferenceInfo {
                 path: self.reference_path,
@@ -171,11 +171,36 @@ impl RunReportBuilder {
             },
             sample: SampleInfo {
                 id: self.sample_id,
-                sex: format!("{:?}", self.sex.unwrap_or(Sex::Female)),
+                sex: sex_name(self.sex),
                 sex_inferred: self.sex_inferred,
             },
             build_detection: self.build_detection,
             statistics: Statistics::from(summary),
         }
+    }
+}
+
+fn format_name(f: Option<InputFormat>) -> String {
+    match f {
+        Some(InputFormat::Dtc) => "dtc".to_string(),
+        Some(InputFormat::Vcf) => "vcf".to_string(),
+        Some(InputFormat::Bcf) => "bcf".to_string(),
+        Some(InputFormat::Auto) | None => "auto".to_string(),
+    }
+}
+
+fn output_format_name(f: Option<OutputFormat>) -> String {
+    match f {
+        Some(OutputFormat::Vcf) => "vcf".to_string(),
+        Some(OutputFormat::Bcf) => "bcf".to_string(),
+        Some(OutputFormat::Plink) => "plink".to_string(),
+        None => "vcf".to_string(),
+    }
+}
+
+fn sex_name(s: Option<Sex>) -> String {
+    match s {
+        Some(Sex::Male) => "male".to_string(),
+        Some(Sex::Female) | None => "female".to_string(),
     }
 }
