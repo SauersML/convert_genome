@@ -35,9 +35,11 @@ pub fn is_ambiguous_snp(allele1: &str, allele2: &str) -> bool {
 /// Result of harmonizing a user genotype against a panel.
 #[derive(Debug, Clone)]
 pub enum HarmonizationResult {
-    /// Successfully mapped to panel alleles.
-    /// Contains (allele1_index, allele2_index) in panel encoding.
-    Success { gt_indices: (usize, usize) },
+    /// Diploid genotype mapped to panel alleles.
+    Diploid(usize, usize),
+
+    /// Haploid genotype mapped to panel alleles.
+    Haploid(usize),
 
     /// User alleles don't match reference genome and can't be strand-flipped.
     InvalidAlleles {
@@ -49,17 +51,56 @@ pub enum HarmonizationResult {
     Skip { reason: String },
 }
 
-/// Harmonize user bases against a reference panel site.
-///
-/// # Arguments
-/// * `user_bases` - The actual bases the user has (e.g., ["A", "G"])
-/// * `ref_base` - The reference genome base at this position
-/// * `chrom` - Chromosome name
-/// * `pos` - Position
-/// * `panel` - Mutable reference to the padded panel for tracking modifications
-///
-/// # Returns
-/// * `HarmonizationResult` indicating success or failure with allele indices
+/// Harmonize a list of alleles against the panel.
+/// Returns the panel allele indices for each input allele.
+/// Handles strand flipping if necessary.
+pub fn harmonize_alleles(
+    alleles: &[String],
+    ref_base: &str,
+    chrom: &str,
+    pos: u64,
+    panel: &mut PaddedPanel,
+) -> Result<Vec<usize>, String> {
+    // Validate user bases against reference
+    let mut validated_bases = Vec::with_capacity(alleles.len());
+    let mut has_ref_match = false;
+    let mut has_ref_comp_match = false;
+
+    // Check strict matching first
+    for base in alleles {
+        if base.eq_ignore_ascii_case(ref_base) {
+            has_ref_match = true;
+        } else if base.len() == 1 && ref_base.len() == 1 {
+            let comp = complement_seq(base);
+            if comp.eq_ignore_ascii_case(ref_base) {
+                has_ref_comp_match = true;
+            }
+        }
+    }
+
+    // Apply flip decision
+    // Priority: No Flip (Direct Match) > Flip (Comp Match)
+    let needs_flip = !has_ref_match && has_ref_comp_match;
+
+    for base in alleles {
+        if needs_flip {
+            validated_bases.push(complement_seq(base));
+        } else {
+            validated_bases.push(base.to_uppercase());
+        }
+    }
+
+    // Map to indices
+    let mut indices = Vec::with_capacity(validated_bases.len());
+    for base in validated_bases {
+        let idx = panel.get_or_add_allele_index(chrom, pos, &base, ref_base);
+        indices.push(idx);
+    }
+    
+    Ok(indices)
+}
+
+/// Harmonize user GENOTYPE (called alleles) against a reference panel site.
 pub fn harmonize_genotype(
     user_bases: &[String],
     ref_base: &str,
@@ -67,56 +108,18 @@ pub fn harmonize_genotype(
     pos: u64,
     panel: &mut PaddedPanel,
 ) -> HarmonizationResult {
-    // Validate user bases against reference
-    let mut validated_bases = Vec::with_capacity(user_bases.len());
-    let mut needs_flip = false;
-
-    for base in user_bases {
-        if base.eq_ignore_ascii_case(ref_base) {
-            // Matches reference - good
-            validated_bases.push(base.to_uppercase());
-        } else if base.len() == 1 && ref_base.len() == 1 {
-            // Check if complement matches reference
-            let comp = complement_seq(base);
-            if comp.eq_ignore_ascii_case(ref_base) {
-                needs_flip = true;
-                validated_bases.push(base.to_uppercase());
-            } else {
-                // User has a variant allele (or complement of variant)
-                validated_bases.push(base.to_uppercase());
+    match harmonize_alleles(user_bases, ref_base, chrom, pos, panel) {
+        Ok(indices) => {
+            match indices.len() {
+                1 => HarmonizationResult::Haploid(indices[0]),
+                2 => HarmonizationResult::Diploid(indices[0], indices[1]),
+                _ => HarmonizationResult::InvalidAlleles {
+                    user_bases: user_bases.to_vec(),
+                    ref_base: ref_base.to_string(),
+                },
             }
-        } else {
-            // Indel - keep as-is
-            validated_bases.push(base.to_uppercase());
-        }
-    }
-
-    // Apply strand flip if detected (complement all bases)
-    if needs_flip {
-        validated_bases = validated_bases.iter().map(|b| complement_seq(b)).collect();
-    }
-
-    // Now map each base to panel allele index
-    let mut gt_indices = Vec::with_capacity(validated_bases.len());
-
-    for base in &validated_bases {
-        let idx = panel.get_or_add_allele_index(chrom, pos, base, ref_base);
-        gt_indices.push(idx);
-    }
-
-    if gt_indices.len() >= 2 {
-        HarmonizationResult::Success {
-            gt_indices: (gt_indices[0], gt_indices[1]),
-        }
-    } else if gt_indices.len() == 1 {
-        // Haploid
-        HarmonizationResult::Success {
-            gt_indices: (gt_indices[0], gt_indices[0]),
-        }
-    } else {
-        HarmonizationResult::Skip {
-            reason: "No bases to process".to_string(),
-        }
+        },
+        Err(e) => HarmonizationResult::Skip { reason: e },
     }
 }
 
@@ -157,5 +160,84 @@ mod tests {
         assert!(!is_ambiguous_snp("A", "G"));
         assert!(!is_ambiguous_snp("A", "C"));
         assert!(!is_ambiguous_snp("AT", "TA")); // Not SNPs
+    }
+
+    #[test]
+    fn test_ambiguous_flip_prevention() {
+        let chrom = "1";
+        let pos = 100;
+        let original_index = crate::panel::PanelIndex::default();
+        let mut panel = PaddedPanel::new(original_index);
+
+        // Ref=A. Input=["A", "T"].
+        // "A" matches Ref. "T" matches Comp(Ref).
+        // Ambiguous. Priority: Fwd match ("A") -> No Flip.
+        let res = harmonize_genotype(
+            &vec!["A".to_string(), "T".to_string()],
+            "A",
+            chrom,
+            pos,
+            &mut panel,
+        );
+        match res {
+            HarmonizationResult::Diploid(idx1, idx2) => {
+                // Should return indices for A and T.
+                // A is Ref (0). T is novel (1).
+                // If it flipped, it would be T (0) and A (1).
+                // Or rather, if flipped:
+                // Input [A, T] -> [T, A].
+                // Ref=A.
+                // T -> Ambiguous? No, T is not Ref.
+                // Panel indices depend on what we added.
+                // Since panel is empty, we add.
+                // If NO FLIP: Uses A (Ref) and T (Alt).
+                // If FLIP: Uses T (Ref Comp -> A -> Ref) and A (Ref match -> T -> Alt).
+                // WAIT.
+                // If NO FLIP: input A, T. A is Ref. T is Alt.
+                // Indices: A->0. T->1 (added). Result (0, 1).
+
+                // If FLIP: input A, T -> flip -> T, A.
+                // T is Alt. A is Ref.
+                // Indices: T->1 (added), A->0. Result (1, 0).
+
+                // We expect (0, 1) or (1, 0) depending on input order.
+                // Input order is [A, T]. Result should be (0, 1).
+                assert_eq!(idx1, 0, "First allele should be Ref (A)");
+                assert_eq!(idx2, 1, "Second allele should be Alt (T)");
+            }
+            _ => panic!("Expected Diploid result"),
+        }
+    }
+
+    #[test]
+    fn test_flip_when_no_ref_match() {
+        let chrom = "1";
+        let pos = 100;
+        let original_index = crate::panel::PanelIndex::default();
+        let mut panel = PaddedPanel::new(original_index);
+
+        // Ref=A. Input=["T", "C"].
+        // "T" matches Comp(Ref)=A. "C" matches Comp(G).
+        // No direct Ref match ("A").
+        // Has Ref Comp match ("T" -> "A").
+        // Decision: FLIP.
+        // Flipped: T->A, C->G.
+        // Result: [A, G].
+        // A is Ref (0). G is novel (1).
+        // Expect (0, 1).
+        let res = harmonize_genotype(
+            &vec!["T".to_string(), "C".to_string()],
+            "A",
+            chrom,
+            pos,
+            &mut panel,
+        );
+        match res {
+            HarmonizationResult::Diploid(idx1, idx2) => {
+                assert_eq!(idx1, 0, "First allele should be flipped to Ref (A)");
+                assert_eq!(idx2, 1, "Second allele should be flipped to Alt (G)");
+            }
+            _ => panic!("Expected Diploid result"),
+        }
     }
 }

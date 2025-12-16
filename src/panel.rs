@@ -49,6 +49,15 @@ pub struct PanelIndex {
     chrom_order: Vec<String>,
 }
 
+impl Default for PanelIndex {
+    fn default() -> Self {
+        Self {
+            sites: HashMap::new(),
+            chrom_order: Vec::new(),
+        }
+    }
+}
+
 impl PanelIndex {
     /// Load a panel index from a VCF file.
     /// Only loads site definitions (chrom, pos, ref, alt), not genotypes.
@@ -270,12 +279,11 @@ impl PaddedPanel {
         ref_base: &str,
     ) -> usize {
         let key = (chrom.to_string(), pos);
-
         if let Some(site) = self.original.get(chrom, pos) {
             // Site exists in panel - USE CANONICAL CHROM NAME FROM SITE
             // This ensures added_alts is keyed by "chr1" even if user passed "1"
             let canonical_key = (site.chrom.clone(), pos);
-            
+
             if let Some(idx) = site.allele_index(allele) {
                 return idx;
             }
