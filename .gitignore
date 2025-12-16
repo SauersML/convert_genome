@@ -2,3 +2,4 @@
 Cargo.lock
 build
 fuzz/target/
+Cargo.lock
