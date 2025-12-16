@@ -48,7 +48,7 @@ impl Fixtures {
             sample_id: "BENCH".into(),
             assembly: "GRCh38".into(),
             include_reference_sites: true,
-            sex: convert_genome::cli::Sex::Female,
+            sex: Some(convert_genome::cli::Sex::Female),
             par_boundaries: None,
             standardize: false,
             panel: None,

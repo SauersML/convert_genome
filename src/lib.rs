@@ -2,6 +2,7 @@ pub mod cli;
 pub mod conversion;
 pub mod dtc;
 pub mod harmonize;
+pub mod inference;
 pub mod input;
 pub mod panel;
 pub mod panel_writer;

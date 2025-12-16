@@ -10,7 +10,7 @@ use clap::ValueEnum;
 
 /// Get optional max records limit from environment variable.
 /// Set `CONVERT_GENOME_MAX_RECORDS=N` to limit buffered records (for OOM protection).
-fn get_max_records_limit() -> Option<usize> {
+pub fn get_max_records_limit() -> Option<usize> {
     std::env::var("CONVERT_GENOME_MAX_RECORDS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -192,7 +192,7 @@ impl DtcSource {
         let ploidy = determine_ploidy(
             &canonical_name,
             position,
-            self.config.sex,
+            self.config.sex.unwrap_or(crate::cli::Sex::Female),
             self.config.par_boundaries.as_ref(),
         );
 

@@ -69,7 +69,7 @@ pub struct ConversionConfig {
     pub sample_id: String,
     pub assembly: String,
     pub include_reference_sites: bool,
-    pub sex: Sex,
+    pub sex: Option<Sex>,
     pub par_boundaries: Option<ParBoundaries>,
     pub standardize: bool,
     pub panel: Option<PathBuf>,
@@ -133,6 +133,41 @@ impl VariantWriter for PlinkWriter {
     }
 }
 
+/// Pre-scan a DTC file to infer sex from variant patterns.
+/// This reads the file once to collect chromosome/heterozygosity data,
+/// then uses the infer_sex library to determine biological sex.
+fn prescan_dtc_for_sex(input: &PathBuf, assembly: &str) -> Result<Sex> {
+    use std::io::BufRead;
+
+    let file = fs::File::open(input).with_context(|| {
+        format!(
+            "failed to open input for sex inference: {}",
+            input.display()
+        )
+    })?;
+    let reader = BufReader::new(file);
+    let dtc_reader = dtc::Reader::new(reader);
+
+    // Collect records (using same max_records limit for safety)
+    let max_records = crate::input::get_max_records_limit();
+    let mut records = Vec::new();
+    let mut records_read = 0;
+
+    for res in dtc_reader {
+        if let Some(limit) = max_records {
+            if records_read >= limit {
+                break;
+            }
+        }
+        if let Ok(rec) = res {
+            records.push(rec);
+            records_read += 1;
+        }
+    }
+
+    crate::inference::infer_sex_from_records(&records, assembly)
+}
+
 /// Convert the provided direct-to-consumer genotype file into VCF or BCF.
 /// Convert the provided input file into VCF, BCF, or PLINK.
 pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
@@ -150,6 +185,15 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
     let reference = ReferenceGenome::open(&config.reference_fasta, config.reference_fai.clone())
         .with_context(|| "failed to open reference genome")?;
+
+    // Infer sex if not provided (DTC format only for now)
+    let mut config = config;
+    if config.sex.is_none() && matches!(config.input_format, crate::input::InputFormat::Dtc) {
+        tracing::info!("Sex not specified, inferring from input data...");
+        let inferred = prescan_dtc_for_sex(&config.input, &config.assembly)?;
+        tracing::info!("Inferred sex: {:?}", inferred);
+        config.sex = Some(inferred);
+    }
 
     // Load panel if provided
     let padded_panel: Option<std::cell::RefCell<crate::panel::PaddedPanel>> =
@@ -242,7 +286,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 PlinkWriter::new(&config.output).context("failed to create PLINK writer")?;
 
             writer
-                .write_fam(&config.sample_id, config.sex)
+                .write_fam(&config.sample_id, config.sex.expect("sex should be set"))
                 .context("failed to write FAM file")?;
 
             process_records(
@@ -620,7 +664,7 @@ pub fn standardize_record(
     let ploidy = determine_ploidy(
         &canonical_name,
         pos,
-        config.sex,
+        config.sex.unwrap_or(Sex::Female),
         config.par_boundaries.as_ref(),
     );
     if ploidy == Ploidy::Zero {
@@ -977,7 +1021,7 @@ mod tests {
             sample_id: "SAMPLE".to_string(),
             assembly: "GRCh38".to_string(),
             include_reference_sites: true,
-            sex: Sex::Female,
+            sex: Some(Sex::Female),
             par_boundaries: None,
             standardize: false,
             panel: None,
@@ -1016,7 +1060,7 @@ mod tests {
             sample_id: String::from("sample"),
             assembly: String::from("GRCh38"),
             include_reference_sites: true,
-            sex: Sex::Female,
+            sex: Some(Sex::Female),
             par_boundaries: None,
             standardize: false,
             panel: None,

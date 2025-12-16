@@ -74,9 +74,9 @@ struct Cli {
     #[arg(long, default_value = "info")]
     log_level: String,
 
-    /// Sex of the sample (required for correct X/Y ploidy)
+    /// Sex of the sample (auto-detected if not specified)
     #[arg(long, value_enum)]
-    sex: Sex,
+    sex: Option<Sex>,
 }
 
 pub fn run() -> Result<()> {
