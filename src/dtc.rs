@@ -19,6 +19,51 @@ impl Record {
     pub fn is_missing(&self) -> bool {
         self.genotype.trim().is_empty() || self.genotype == "--"
     }
+
+    pub fn parse_alleles(&self) -> Result<Vec<Allele>, crate::conversion::RecordConversionError> {
+        // We return Vec<Allele>. Error type?
+        // Logic currently doesn't fail, just returns Missing for garbage.
+        // So Ok(...) always?
+        Ok(parse_genotype(&self.genotype))
+    }
+}
+
+/// Represents an allele from DTC genotype data.
+/// DTC data can contain SNPs (A,C,G,T), deletions (D), insertions (I), or missing (-).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Allele {
+    Base(String),
+    Deletion,
+    Insertion,
+    Missing,
+}
+
+/// Parse a genotype string into Allele states.
+pub fn parse_genotype(raw: &str) -> Vec<Allele> {
+    let trimmed = raw.trim();
+
+    if trimmed.contains('/') {
+        trimmed
+            .split('/')
+            .map(|s| match s.trim() {
+                "D" => Allele::Deletion,
+                "I" => Allele::Insertion,
+                "-" | "0" | "?" => Allele::Missing,
+                val => Allele::Base(val.to_string()),
+            })
+            .collect()
+    } else {
+        trimmed
+            .chars()
+            .map(|c| match c.to_ascii_uppercase() {
+                'A' | 'C' | 'G' | 'T' | 'N' => Allele::Base(c.to_string()),
+                'D' => Allele::Deletion,
+                'I' => Allele::Insertion,
+                '-' | '0' | '?' => Allele::Missing,
+                _ => Allele::Missing, // Treat garbage as missing
+            })
+            .collect()
+    }
 }
 
 /// Iterator over DTC records in a raw genotype text file.

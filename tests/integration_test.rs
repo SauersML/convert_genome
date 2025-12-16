@@ -22,16 +22,19 @@ fn write_dtc(dir: &TempDir, contents: &str) -> Result<PathBuf> {
 fn base_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> ConversionConfig {
     ConversionConfig {
         input: input.clone(),
+        input_format: convert_genome::input::InputFormat::Dtc,
         input_origin: input.to_string_lossy().to_string(),
         reference_fasta: reference.clone(),
         reference_origin: reference.to_string_lossy().to_string(),
         reference_fai: None,
         reference_fai_origin: None,
         output,
-        output_format: OutputFormat::Vcf,
+        output_format: convert_genome::OutputFormat::Vcf,
         sample_id: "SAMPLE".into(),
         assembly: "GRCh38".into(),
         include_reference_sites: true,
+        sex: convert_genome::cli::Sex::Female,
+        par_boundaries: None,
     }
 }
 

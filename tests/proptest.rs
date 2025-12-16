@@ -31,7 +31,7 @@ proptest! {
     }
 }
 
-use convert_genome::conversion::DtcAllele;
+use convert_genome::dtc::Allele as DtcAllele;
 
 proptest! {
     #[test]

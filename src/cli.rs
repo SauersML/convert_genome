@@ -6,8 +6,9 @@ use tracing_subscriber::{EnvFilter, fmt};
 use url::Url;
 
 use crate::{
-    ConversionConfig, ConversionSummary, OutputFormat, convert_dtc_file,
+    ConversionConfig, convert_dtc_file, ConversionSummary, OutputFormat,
     remote::{self, RemoteResource},
+    input::InputFormat,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, clap::ValueEnum)]
@@ -21,7 +22,12 @@ pub enum Sex {
 struct Cli {
     /// Input DTC genotype file (23andMe, LivingDNA, etc.)
     #[arg(value_name = "INPUT")]
+    #[arg(value_name = "INPUT")]
     input: PathBuf,
+
+    /// Input file format (auto-detected if not specified)
+    #[arg(long, value_enum, default_value_t = InputFormat::Auto)]
+    input_format: InputFormat,
 
     /// Reference genome FASTA (GRCh38)
     #[arg(value_name = "REFERENCE")]
@@ -85,8 +91,15 @@ pub fn run() -> Result<()> {
         None => None,
     };
 
+    let input_format = if matches!(cli.input_format, InputFormat::Auto) {
+        InputFormat::detect(&resolved_input)
+    } else {
+        cli.input_format
+    };
+
     let config = ConversionConfig {
         input: resolved_input,
+        input_format,
         input_origin,
         reference_fasta: resolved_reference,
         reference_origin,

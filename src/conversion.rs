@@ -2,7 +2,6 @@ use std::{
     fs,
     io::{self, BufReader},
     path::PathBuf,
-    sync::Arc,
 };
 use crate::reference::ParBoundaries;
 use crate::cli::Sex;
@@ -11,7 +10,6 @@ use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
 use noodles::bcf;
 use noodles::{
-    core::Position,
     vcf::{
         self,
         header::{
@@ -29,14 +27,9 @@ use noodles::{
             },
         },
         variant::{
-            self as variant, RecordBuf,
             io::Write as VariantRecordWrite,
             record::samples::keys::key as format_key,
-            record_buf::{
-                AlternateBases, Filters, Ids, Info,
-                info::field::Value as InfoFieldValue,
-                samples::{Keys, Samples, sample::Value as SampleValue},
-            },
+            record_buf::RecordBuf,
         },
     },
 };
@@ -45,8 +38,10 @@ use thiserror::Error;
 use time::{OffsetDateTime, macros::format_description};
 
 use crate::{
-    dtc::{self, Record as DtcRecord},
+    dtc::{self, Allele as DtcAllele, parse_genotype},
     reference::{ReferenceError, ReferenceGenome},
+    plink::PlinkWriter,
+    ConversionSummary,
 };
 
 /// Supported output formats for the converter.
@@ -56,12 +51,15 @@ pub enum OutputFormat {
     Vcf,
     /// Binary Call Format output.
     Bcf,
+    /// PLINK 1.9 binary output (.bed, .bim, .fam).
+    Plink,
 }
 
 /// Configuration required to drive a conversion.
 #[derive(Debug, Clone)]
 pub struct ConversionConfig {
     pub input: PathBuf,
+    pub input_format: crate::input::InputFormat,
     pub input_origin: String,
     pub reference_fasta: PathBuf,
     pub reference_origin: String,
@@ -76,42 +74,10 @@ pub struct ConversionConfig {
     pub par_boundaries: Option<ParBoundaries>,
 }
 
-/// Statistics describing the results of a conversion run.
-#[derive(Debug, Default, Clone)]
-pub struct ConversionSummary {
-    pub total_records: usize,
-    pub emitted_records: usize,
-    pub variant_records: usize,
-    pub reference_records: usize,
-    pub missing_genotype_records: usize,
-    pub skipped_reference_sites: usize,
-    pub unknown_chromosomes: usize,
-    pub reference_failures: usize,
-    pub invalid_genotypes: usize,
-    pub symbolic_allele_records: usize,
-    pub parse_errors: usize,
-}
+// ConversionSummary moved to crate root
 
-impl ConversionSummary {
-    fn record_emission(&mut self, has_alt: bool) {
-        self.emitted_records += 1;
-        if has_alt {
-            self.variant_records += 1;
-        } else {
-            self.reference_records += 1;
-        }
-    }
-}
 
-/// Represents an allele from DTC genotype data.
-/// DTC data can contain SNPs (A,C,G,T), deletions (D), insertions (I), or missing (-).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DtcAllele {
-    Base(String),
-    Deletion,
-    Insertion,
-    Missing,
-}
+// DtcAllele moved to dtc.rs
 
 /// Errors raised while converting an individual record.
 #[derive(Debug, Error)]
@@ -159,16 +125,22 @@ where
     }
 }
 
+impl VariantWriter for PlinkWriter {
+    fn write_variant(&mut self, _header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
+        self.write_variant(record)
+    }
+}
+
 /// Convert the provided direct-to-consumer genotype file into VCF or BCF.
+/// Convert the provided input file into VCF, BCF, or PLINK.
 pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     tracing::info!(
+        input_format = ?config.input_format,
         output_format = ?config.output_format,
-        reference_source = %config.reference_origin,
-        reference_path = %config.reference_fasta.display(),
-        input_source = %config.input_origin,
+        reference = %config.reference_fasta.display(),
+        input = %config.input.display(),
         output = %config.output.display(),
         sample_id = %config.sample_id,
-        include_reference = config.include_reference_sites,
         "starting conversion",
     );
 
@@ -177,12 +149,24 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
     let header = build_header(&config, &reference)?;
 
-    let input = fs::File::open(&config.input)
-        .with_context(|| format!("failed to open input {}", config.input.display()))?;
-    let reader = BufReader::new(input);
-    let dtc_reader = dtc::Reader::new(reader);
+    // Instantiate Source Iterator
+    let mut source: Box<dyn crate::input::VariantSource> = match config.input_format {
+        crate::input::InputFormat::Dtc => {
+            let input = fs::File::open(&config.input)
+                .with_context(|| format!("failed to open input {}", config.input.display()))?;
+            let reader = BufReader::new(input);
+            let dtc_reader = dtc::Reader::new(reader);
+            let source = crate::input::DtcSource::new(dtc_reader, reference.clone(), config.clone());
+            Box::new(source)
+        },
+        crate::input::InputFormat::Vcf | crate::input::InputFormat::Bcf => {
+             // TODO: Implement VcfSource and BcfSource
+             return Err(anyhow!("VCF/BCF input not yet implemented"));
+        }
+        crate::input::InputFormat::Auto => return Err(anyhow!("Auto format detection failed or not resolved")),
+    };
 
-    let mut summary = ConversionSummary::default();
+    let mut summary = crate::ConversionSummary::default();
 
     match config.output_format {
         OutputFormat::Vcf => {
@@ -193,7 +177,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 .write_header(&header)
                 .with_context(|| "failed to write VCF header")?;
             process_records(
-                dtc_reader,
+                source,
                 &reference,
                 &mut writer,
                 &header,
@@ -202,14 +186,30 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             )?;
         }
         OutputFormat::Bcf => {
-            let mut writer = bcf::io::writer::Builder::default()
+             let mut writer = bcf::io::writer::Builder::default()
                 .build_from_path(&config.output)
                 .with_context(|| format!("failed to create output {}", config.output.display()))?;
             writer
                 .write_header(&header)
                 .with_context(|| "failed to write BCF header")?;
             process_records(
-                dtc_reader,
+                source,
+                &reference,
+                &mut writer,
+                &header,
+                &config,
+                &mut summary,
+            )?;
+        }
+        OutputFormat::Plink => {
+            let mut writer = PlinkWriter::new(&config.output)
+                .context("failed to create PLINK writer")?;
+
+            writer.write_fam(&config.sample_id, config.sex)
+                .context("failed to write FAM file")?;
+
+            process_records(
+                source,
                 &reference,
                 &mut writer,
                 &header,
@@ -222,325 +222,63 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     Ok(summary)
 }
 
-fn process_records<R, W>(
-    records: R,
+fn process_records<S, W>(
+    mut source: S,
     reference: &ReferenceGenome,
     writer: &mut W,
     header: &vcf::Header,
-    config: &ConversionConfig,
-    summary: &mut ConversionSummary,
+    _config: &ConversionConfig,
+    summary: &mut crate::ConversionSummary,
 ) -> Result<()>
 where
-    R: IntoIterator<Item = Result<DtcRecord, dtc::ParseError>>,
+    S: crate::input::VariantSource,
     W: VariantWriter,
 {
     let mut parsed_records = Vec::new();
 
-    for result in records {
+    while let Some(result) = source.next_variant(summary) {
         match result {
             Ok(record) => {
-                summary.total_records += 1;
+                summary.total_records += 1; 
                 parsed_records.push(record);
             }
             Err(e) => {
                 summary.parse_errors += 1;
-                tracing::warn!(error = %e, "failed to parse input line");
+                tracing::warn!(error = %e, "failed to parse/convert input record");
             }
         }
     }
 
-    // Issue 2B fix: Sort by contig index (matching header order) instead of lexicographic string
+    // Sort by contig index and position
     parsed_records.par_sort_by(|a, b| {
-        let idx_a = reference.contig_index(&a.chromosome).unwrap_or(usize::MAX);
-        let idx_b = reference.contig_index(&b.chromosome).unwrap_or(usize::MAX);
+        let idx_a = reference.contig_index(a.reference_sequence_name()).unwrap_or(usize::MAX);
+        let idx_b = reference.contig_index(b.reference_sequence_name()).unwrap_or(usize::MAX);
         match idx_a.cmp(&idx_b) {
-            std::cmp::Ordering::Equal => a.position.cmp(&b.position),
+            std::cmp::Ordering::Equal => {
+                 let pos_a = a.variant_start().map(|p| usize::from(p)).unwrap_or(0);
+                 let pos_b = b.variant_start().map(|p| usize::from(p)).unwrap_or(0);
+                 pos_a.cmp(&pos_b)
+            },
             other => other,
         }
     });
 
-    let shared_config = Arc::new(config.clone());
-    let shared_reference = Arc::new(reference.clone()); // Increase Arc count for closure
+    for record in parsed_records {
+        let has_alt = !record.alternate_bases().as_ref().is_empty();
+        summary.record_emission(has_alt); 
 
-    let converted: Vec<_> = parsed_records
-        .par_iter()
-        .map(|record| {
-            (
-                record.clone(),
-                convert_record_with_base(record, &shared_reference, &shared_config),
-            )
-        })
-        .collect();
-
-    for (record, result) in converted {
-        match result {
-            Ok(Some((vcf_record, has_alt))) => {
-                writer.write_variant(header, &vcf_record).with_context(|| {
-                    format!(
-                        "failed to write record {}:{}",
-                        record.chromosome, record.position
-                    )
-                })?;
-                summary.record_emission(has_alt);
-                
-                // Track symbolic alleles (indels) if any are present
-                if has_alt {
-                    // This is a rough check, ideally we'd return metadata from convert_record_with_base
-                    // but inspecting the opaque VCF record is hard.
-                    // Instead, we trust the conversion logic handled it correctly.
-                }
-            }
-            Ok(None) => {
-                summary.skipped_reference_sites += 1;
-            }
-            Err(RecordConversionError::UnknownContig { chromosome }) => {
-                summary.unknown_chromosomes += 1;
-                tracing::warn!(target: "convert_genome", %chromosome, "skipping unknown chromosome");
-            }
-            Err(RecordConversionError::MissingGenotype { .. }) => {
-                summary.missing_genotype_records += 1;
-            }
-            Err(RecordConversionError::InvalidGenotype { genotype, .. }) => {
-                summary.invalid_genotypes += 1;
-                tracing::warn!(%genotype, "skipping invalid genotype");
-            }
-            Err(RecordConversionError::Reference { source, .. }) => {
-                summary.reference_failures += 1;
-                tracing::warn!(error = %source, "reference lookup failed");
-            }
-            Err(RecordConversionError::Position(e)) => {
-                summary.reference_failures += 1;
-                tracing::warn!(error = %e, "invalid position");
-            }
+        if let Err(e) = writer.write_variant(header, &record) {
+             tracing::error!("Failed to write record: {}", e);
+             // Continue? Or abort?
         }
     }
 
     Ok(())
 }
 
+// parse_genotype moved to dtc.rs
 
-/// Convert a DTC record to VCF using pre-fetched reference bases.
-/// This avoids mutex contention during parallel processing.
-/// Convert a DTC record to VCF using pre-fetched reference bases.
-/// This avoids mutex contention during parallel processing.
-fn convert_record_with_base(
-    record: &DtcRecord,
-    reference: &ReferenceGenome,
-    config: &ConversionConfig,
-) -> Result<Option<(RecordBuf, bool)>, RecordConversionError> {
-    let chromosome = record.chromosome.as_str();
-    let canonical_chrom = reference.resolve_contig_name(chromosome).ok_or_else(|| {
-        RecordConversionError::UnknownContig {
-            chromosome: record.chromosome.clone(),
-        }
-    })?;
-    let canonical_name = canonical_chrom.to_string();
-    
-    // Determine expected ploidy (Male X/Y, Female Y, PAR, etc)
-    let ploidy = determine_ploidy(&canonical_name, record.position, config.sex, config.par_boundaries.as_ref());
-
-    let reference_base = reference
-        .base(chromosome, record.position)
-        .map_err(|e| RecordConversionError::Reference {
-            chromosome: record.chromosome.clone(),
-            position: record.position,
-            source: e,
-        })?;
-
-    let raw_alleles = parse_genotype(&record.genotype);
-    if raw_alleles.is_empty() || raw_alleles.iter().all(|a| matches!(a, DtcAllele::Missing)) {
-        return Err(RecordConversionError::MissingGenotype {
-            chromosome: record.chromosome.clone(),
-            position: record.position,
-        });
-    }
-
-    // Normalize Alleles based on Ploidy
-    let allele_states = match ploidy {
-        Ploidy::Zero => {
-            // Female Y should be empty/missing
-             return Err(RecordConversionError::MissingGenotype {
-                 chromosome: record.chromosome.clone(),
-                 position: record.position,
-             });
-        }
-        Ploidy::Haploid => {
-            // Collapse "AA" -> "A"
-            let unique: Vec<_> = raw_alleles.iter().filter(|a| !matches!(a, DtcAllele::Missing)).collect();
-            if unique.is_empty() {
-                vec![DtcAllele::Missing]
-            } else if unique.len() == 1 || (unique.len() == 2 && unique[0] == unique[1]) {
-                vec![unique[0].clone()]
-            } else {
-                // Heterozygous on haploid? Treat as missing.
-                vec![DtcAllele::Missing]
-            }
-        }
-        Ploidy::Diploid => raw_alleles,
-    };
-
-    let mut alt_bases = Vec::new();
-    for allele in allele_states.iter() {
-        match allele {
-            DtcAllele::Base(base) => {
-                let base_str = base.to_uppercase();
-                let ref_str = reference_base.to_string().to_uppercase();
-                if base_str != ref_str && !alt_bases.contains(&base_str) {
-                    alt_bases.push(base_str);
-                }
-            }
-            DtcAllele::Deletion => {
-                let del_str = String::from("DEL");
-                if !alt_bases.contains(&del_str) {
-                    alt_bases.push(del_str);
-                }
-            }
-            DtcAllele::Insertion => {
-                let ins_str = String::from("INS");
-                if !alt_bases.contains(&ins_str) {
-                    alt_bases.push(ins_str);
-                }
-            }
-            DtcAllele::Missing => {} // Ignore missing for ALT list construction
-        }
-    }
-
-    if alt_bases.is_empty() && !config.include_reference_sites {
-        return Ok(None);
-    }
-
-    let genotype_string =
-        format_genotype(&allele_states, reference_base, &alt_bases).map_err(|genotype| {
-            RecordConversionError::InvalidGenotype {
-                chromosome: record.chromosome.clone(),
-                position: record.position,
-                genotype,
-            }
-        })?;
-
-    let contig_len = reference
-        .contig(&canonical_name)
-        .map(|c| c.length)
-        .unwrap_or(0);
-
-    let position =
-        usize::try_from(record.position).map_err(|_| RecordConversionError::Reference {
-            chromosome: record.chromosome.clone(),
-            position: record.position,
-            source: ReferenceError::PositionOutOfBounds {
-                contig: canonical_name.clone(),
-                position: record.position,
-                length: contig_len,
-            },
-        })?;
-    let position = Position::try_from(position)?;
-    
-    // Construct AlternateBases, carefully handling symbolic alleles like <DEL> and <INS>
-    // Noodles expects symbolic alleles to be wrapped in < >, but strings like "DEL" might need special handling
-    // depending on which noodles version/API is used.
-    // However, AlternateBases::from takes strings. If we pass "DEL", it might output "DEL".
-    // VCF spec requires <DEL>.
-    // Let's ensure we wrap them in angle brackets if they are symbolic.
-    let formatted_alts: Vec<String> = alt_bases.iter().map(|a| {
-        if a == "DEL" || a == "INS" {
-            format!("<{}>", a)
-        } else {
-            a.clone()
-        }
-    }).collect();
-
-    let alternate_bases = AlternateBases::from(formatted_alts);
-
-    let ids = record
-        .id
-        .as_ref()
-        .map(|id| [id.clone()].into_iter().collect::<Ids>());
-
-    let mut builder = RecordBuf::builder()
-        .set_reference_sequence_name(canonical_name.clone())
-        .set_variant_start(position)
-        .set_reference_bases(reference_base.to_string())
-        .set_alternate_bases(alternate_bases);
-
-    if let Some(ids) = ids {
-        builder = builder.set_ids(ids);
-    }
-
-    // Pass filter if we have any variants (SNPs or Indels)
-    if !alt_bases.is_empty() {
-        builder = builder.set_filters(Filters::pass());
-    }
-
-    // Issue: Add IMPRECISE and SVTYPE for symbolic alleles
-    let has_del = alt_bases.contains(&"DEL".to_string());
-    let has_ins = alt_bases.contains(&"INS".to_string());
-    
-    if has_del || has_ins {
-        let mut info_map = Info::default();
-        info_map.insert("IMPRECISE".into(), Some(InfoFieldValue::Flag));
-        
-        let svtype = if has_del && has_ins {
-            None // Mixed types, just mark IMPRECISE
-        } else if has_del {
-            Some("DEL")
-        } else {
-            Some("INS")
-        };
-        
-        if let Some(t) = svtype {
-            info_map.insert("SVTYPE".into(), Some(InfoFieldValue::String(t.into())));
-        }
-        
-        builder = builder.set_info(info_map);
-    }
-    
-    let genotype_value = genotype_string
-        .parse::<variant::record_buf::samples::sample::value::Genotype>()
-        .map(SampleValue::from)
-        .map_err(|_| RecordConversionError::InvalidGenotype {
-            chromosome: record.chromosome.clone(),
-            position: record.position,
-            genotype: genotype_string.clone(),
-        })?;
-
-    let keys: Keys = [String::from(format_key::GENOTYPE)].into_iter().collect();
-    let samples = Samples::new(keys, vec![vec![Some(genotype_value)]]);
-    builder = builder.set_samples(samples);
-
-    let vcf_record = builder.build();
-    Ok(Some((vcf_record, !alt_bases.is_empty())))
-}
-
-/// Parse a genotype string into DtcAllele states.
-/// Handles SNPs (A,C,G,T), Deletions (D), Insertions (I), and Missing (-).
-fn parse_genotype(raw: &str) -> Vec<DtcAllele> {
-    let trimmed = raw.trim();
-
-    if trimmed.contains('/') {
-        trimmed
-            .split('/')
-            .map(|s| match s.trim() {
-                "D" => DtcAllele::Deletion,
-                "I" => DtcAllele::Insertion,
-                "-" | "0" | "?" => DtcAllele::Missing,
-                val => DtcAllele::Base(val.to_string()),
-            })
-            .collect()
-    } else {
-        trimmed
-            .chars()
-            .map(|c| match c.to_ascii_uppercase() {
-                'A' | 'C' | 'G' | 'T' | 'N' => DtcAllele::Base(c.to_string()),
-                'D' => DtcAllele::Deletion,
-                'I' => DtcAllele::Insertion,
-                '-' | '0' | '?' => DtcAllele::Missing,
-                _ => DtcAllele::Missing, // Treat garbage as missing
-            })
-            .collect()
-    }
-}
-
-fn format_genotype(
+pub fn format_genotype(
     alleles: &[DtcAllele],
     reference_base: char,
     alt_bases: &[String],
@@ -593,13 +331,13 @@ fn format_genotype(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Ploidy {
+pub enum Ploidy {
     Haploid,
     Diploid,
     Zero,
 }
 
-fn determine_ploidy(
+pub fn determine_ploidy(
     chrom: &str,
     pos: u64,
     sex: Sex,
@@ -820,7 +558,8 @@ mod tests {
         let reference = crate::reference::ReferenceGenome::open(&ref_path, None).unwrap();
         let config = ConversionConfig {
             input: std::path::PathBuf::from("dummy.txt"),
-            input_origin: "dummy".to_string(),
+            input_format: crate::input::InputFormat::Dtc,
+            input_origin: "test_input.txt".into(),
             reference_fasta: ref_path.clone(),
             reference_origin: "dummy_ref".to_string(),
             reference_fai: None,
@@ -855,6 +594,7 @@ mod tests {
         let reference = ReferenceGenome::open(fasta_path.path(), None).unwrap();
         let config = ConversionConfig {
             input: PathBuf::from("input.txt"),
+            input_format: crate::input::InputFormat::Dtc,
             input_origin: String::from("input.txt"),
             reference_fasta: fasta_path.path().to_path_buf(),
             reference_origin: fasta_path.path().to_string_lossy().to_string(),
