@@ -6,10 +6,14 @@
 
 - **Multiple output formats**: VCF text, BCF binary, and PLINK 1.9 binary (.bed/.bim/.fam).
 - **Flexible input parsing**: Supports 23andMe, AncestryDNA (5-column), MyHeritage (CSV), deCODEme (6-column with strand flipping), and standard VCF/BCF.
+- **Auto-detection**:
+  - **Genome Build**: Automatically detects `GRCh37` vs `GRCh38` vs `hg19`.
+  - **Biological Sex**: Infers sex from X/Y chromosome heterozygosity and density.
+- **Reference Panel Support**: Harmonize your data against a reference VCF (e.g., 1000 Genomes) to correct strand flips and align alleles.
+- **Structured Reporting**: Automatically generates a `<output>_report.json` file with full run metadata, stats, and inference results.
 - **Remote reference support**: Fetch `http://` and `https://` URLs with transparent decompression of `.gz` and `.zip` archives.
 - **Sex chromosome handling**: Correct ploidy enforcement for X, Y, and MT chromosomes with PAR region awareness.
 - **Allele polarization**: Optional `--standardize` mode to normalize alleles against the reference genome.
-- **Thread-safe reference access**: Uses an [`LRU`](https://docs.rs/lru) cache for efficient base lookups.
 - **Comprehensive CI/CD**: Formatting, linting, testing, and coverage across Linux (with macOS/Windows support).
 
 ## Installation
@@ -30,121 +34,109 @@ The resulting executable lives at `target/release/convert_genome`.
 
 ## Usage
 
-The CLI accepts three positional arguments: `INPUT`, `REFERENCE`, and `OUTPUT`. The `--sex` flag is required for correct sex chromosome ploidy handling.
-
-### Basic conversion to VCF
+### Basic conversion (auto-detect everything)
 
 ```bash
 convert_genome \
-  data/genotypes.txt \
-  GRCh38.fa \
-  genotypes.vcf \
-  --sex male
+  --input data/genotypes.txt \
+  --reference GRCh38.fa \
+  --output genotypes.vcf
 ```
 
-### BCF output with explicit sample ID
+This will:
+1. Detect the genome build (and warn if it differs from the default GRCh38).
+2. Infer biological sex from the data.
+3. Convert to VCF.
+4. Produce `genotypes.vcf` and `genotypes_report.json`.
+
+### Advanced pipeline: Standardize, Harmonize, and Convert
+
+Perform a full imputation-ready conversion in a single pass:
 
 ```bash
 convert_genome \
-  https://example.org/sample.txt.gz \
-  https://example.org/GRCh38.fa.gz \
-  sample.bcf \
-  --format bcf \
-  --sex female \
-  --sample SAMPLE_ID \
-  --assembly GRCh38
+  --input sample.txt \
+  --reference hg38.fa \
+  --standardize \        # Standardize alleles to reference forward strand
+  --panel panel.vcf \    # Harmonize against a reference panel (corrects flips)
+  --output sample.bcf \  # Output compact binary BCF
+  --format bcf
 ```
 
-### PLINK output (variants only)
+### PLINK output
 
 ```bash
 convert_genome \
-  input.txt \
-  reference.fa \
-  output \
+  --input input.txt \
+  --reference reference.fa \
+  --output output \
   --format plink \
-  --sex male \
-  --variants-only
+  --sex male \          # Override auto-detection
+  --variants-only       # Drop reference-matching sites
 ```
-
-If a `.fai` index is not provided, the converter will generate one next to the FASTA automatically.
 
 ### Command-line options
 
 | Option | Description |
 |--------|-------------|
+| `--input <PATH>` | **Required.** Input genotype file (DTC, VCF, or BCF) |
+| `--reference <PATH>` | **Required.** Reference genome FASTA (local or URL) |
+| `--output <PATH>` | **Required.** Output file path (or prefix for PLINK) |
 | `--format <vcf\|bcf\|plink>` | Output format (default: vcf) |
-| `--sex <male\|female>` | **Required.** Sample sex for X/Y ploidy |
+| `--sex <male\|female>` | Explicitly set sex (disables auto-inference) |
 | `--sample <NAME>` | Sample identifier for VCF header |
 | `--assembly <NAME>` | Assembly label for metadata (default: GRCh38) |
+| `--panel <PATH>` | VCF panel for harmonization (e.g., 1000G sites) |
+| `--standardize` | Standardize alleles to reference forward strand |
 | `--variants-only` | Omit reference-only sites from output |
-| `--standardize` | Normalize chromosome names and polarize alleles |
 | `--input-format <dtc\|vcf\|bcf\|auto>` | Input format (default: auto-detect) |
 | `--reference-fai <PATH>` | Explicit FASTA index path |
 | `--log-level <LEVEL>` | Logging verbosity (default: info) |
 
-## Performance
+## Output Report
 
-Reference lookups use a shared, thread-safe LRU cache. Input records are sorted by genomic position before processing to maximize cache locality.
+Every run produces a JSON report alongside the output file (e.g., `sample_report.json`) containing:
 
-Run benchmarks with:
-
-```bash
-cargo bench
+```json
+{
+  "version": "0.1.0",
+  "timestamp": "2025-12-16T22:44:00Z",
+  "input": { "format": "dtc", ... },
+  "output": { "format": "vcf", ... },
+  "sample": { "id": "SAMPLE", "sex": "male", "sex_inferred": true },
+  "build_detection": { "detected_build": "GRCh38" },
+  "standardize": true,
+  "panel": {
+    "total_sites": 120000,
+    "modified_sites": 150,  // Sites flipped/swapped to match panel
+    "novel_sites": 25       // Sites not in panel
+  },
+  "statistics": {
+    "total_records": 638234,
+    "emitted_records": 612847,
+    ...
+  }
+}
 ```
-
-Benchmarks cover:
-
-- Cached vs. uncached reference lookups.
-- DTC parsing throughput.
-- Full conversion pipeline comparisons.
-
-## Testing
-
-Unit, integration, and property-based tests ensure correctness:
-
-```bash
-cargo test                # Debug builds, all tests
-cargo test --release      # Property tests under release optimizations
-```
-
-
-The `tests/remote_download.rs` file contains integration tests that download real genome reference files from external servers (EBI, Ensembl, Illumina).
-
-
-## Continuous Integration
-
-See [`.github/workflows/ci.yml`](.github/workflows/ci.yml). The workflow performs:
-
-- Formatting (`cargo fmt --check`)
-- Linting (`cargo clippy --all-targets -- -D warnings`)
-- Cross-platform builds
-- Test suites (debug + release/property)
-- Benchmarks (`cargo bench --no-fail-fast`)
-- Coverage reporting via `cargo tarpaulin` on Linux
 
 ## Project Architecture
 
 ### Core modules
 
 - `src/cli.rs` – Argument parsing and top-level command dispatch.
-- `src/conversion.rs` – Conversion pipeline, header construction, and record translation.
+- `src/conversion.rs` – Conversion pipeline, report generation, and record translation.
 - `src/dtc.rs` – Parser for DTC genotype exports (23andMe, AncestryDNA, etc.).
-- `src/input.rs` – Input source abstraction (DTC, VCF, BCF) with sorting for cache locality.
+- `src/imputation.rs` – Logic for sex inference and build detection.
+- `src/inference.rs` – Logic for sex inference and build detection.
+- `src/harmonize.rs` – Allele harmonization against reference panels.
+- `src/panel.rs` – Reference panel loading and management.
+- `src/report.rs` – JSON run report generation.
 - `src/reference.rs` – Reference genome loader, contig metadata, and cached base access.
 - `src/remote.rs` – Remote fetching with HTTP(S) support and archive extraction.
 - `src/plink.rs` – PLINK 1.9 binary format writer (.bed/.bim/.fam).
-
-### Additional resources
-
-- `tests/` – Integration and property-based test suites.
-- `benches/` – Criterion benchmarks for core subsystems.
 
 ## Contributing
 
 1. Install the nightly toolchain (`rustup toolchain install nightly`).
 2. Run formatting and linting before submitting: `cargo fmt` and `cargo clippy --all-targets -- -D warnings`.
 3. Execute the full test suite (debug + release) and benchmarks.
-4. For large datasets or new reference assemblies, add integration tests with representative fixtures.
-
-Issues and pull requests are welcome! Please include benchmark results when proposing performance-sensitive changes.
