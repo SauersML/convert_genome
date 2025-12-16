@@ -36,6 +36,7 @@ impl Fixtures {
     fn config(&self, output: PathBuf, format: OutputFormat) -> ConversionConfig {
         ConversionConfig {
             input: self.input.clone(),
+            input_format: convert_genome::input::InputFormat::Dtc,
             input_origin: self.input.display().to_string(),
             reference_fasta: self.reference.clone(),
             reference_origin: self.reference.display().to_string(),
@@ -46,6 +47,9 @@ impl Fixtures {
             sample_id: "BENCH".into(),
             assembly: "GRCh38".into(),
             include_reference_sites: true,
+            sex: convert_genome::cli::Sex::Female,
+            par_boundaries: None,
+            standardize: false,
         }
     }
 }
