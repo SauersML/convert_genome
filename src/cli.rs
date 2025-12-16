@@ -32,9 +32,13 @@ struct Cli {
     #[arg(value_name = "REFERENCE")]
     reference: PathBuf,
 
-    /// Output VCF or BCF path
-    #[arg(value_name = "OUTPUT")]
-    output: PathBuf,
+    /// Output VCF or BCF path (mutually exclusive with --output-dir)
+    #[arg(value_name = "OUTPUT", conflicts_with = "output_dir")]
+    output: Option<PathBuf>,
+
+    /// Output directory for panel mode (produces panel.vcf.gz + genotypes.vcf.gz)
+    #[arg(long, value_name = "DIR", conflicts_with = "output")]
+    output_dir: Option<PathBuf>,
 
     /// Output file format
     #[arg(long, value_enum, default_value_t = OutputFormat::Vcf)]
@@ -43,6 +47,10 @@ struct Cli {
     /// Optional explicit FASTA index (.fai) path
     #[arg(long, value_name = "FAI")]
     reference_fai: Option<PathBuf>,
+
+    /// Reference panel VCF/BCF for allele harmonization (Beagle compatibility)
+    #[arg(long, value_name = "PANEL")]
+    ref_panel: Option<PathBuf>,
 
     /// Sample identifier to embed in the VCF header
     #[arg(long, value_name = "SAMPLE")]
@@ -75,6 +83,24 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     init_logging(&cli.log_level)?;
 
+    // Validate output arguments
+    let output = match (&cli.output, &cli.output_dir, &cli.ref_panel) {
+        (Some(output), None, _) => output.clone(),
+        (None, Some(dir), Some(_)) => {
+            // Panel mode - create output directory and use genotypes.vcf as output
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("failed to create output directory: {}", dir.display()))?;
+            dir.join("genotypes.vcf")
+        }
+        (None, Some(_), None) => {
+            anyhow::bail!("--output-dir requires --ref-panel");
+        }
+        (None, None, _) => {
+            anyhow::bail!("Either --output or --output-dir (with --ref-panel) is required");
+        }
+        _ => unreachable!(), // conflicts_with handles other cases
+    };
+
     let sample_id = cli
         .sample
         .clone()
@@ -96,6 +122,12 @@ pub fn run() -> Result<()> {
         None => None,
     };
 
+    // Resolve panel if provided
+    let resolved_panel = match &cli.ref_panel {
+        Some(path) => Some(resources.resolve(path)?),
+        None => None,
+    };
+
     let input_format = if matches!(cli.input_format, InputFormat::Auto) {
         InputFormat::detect(&resolved_input)
     } else {
@@ -110,7 +142,8 @@ pub fn run() -> Result<()> {
         reference_origin,
         reference_fai: resolved_reference_fai,
         reference_fai_origin,
-        output: cli.output.clone(),
+        output: output.clone(),
+        output_dir: cli.output_dir.clone(),
         output_format: cli.format,
         sample_id,
         assembly: cli.assembly.clone(),
@@ -118,6 +151,7 @@ pub fn run() -> Result<()> {
         sex: cli.sex,
         par_boundaries: crate::reference::ParBoundaries::new(&cli.assembly),
         standardize: cli.standardize,
+        ref_panel: resolved_panel,
     };
 
     let summary = convert_dtc_file(config)?;

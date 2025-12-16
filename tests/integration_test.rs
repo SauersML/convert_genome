@@ -29,6 +29,7 @@ fn base_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> Conversio
         reference_fai: None,
         reference_fai_origin: None,
         output,
+        output_dir: None,
         output_format: convert_genome::OutputFormat::Vcf,
         sample_id: "SAMPLE".into(),
         assembly: "GRCh38".into(),
@@ -36,6 +37,7 @@ fn base_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> Conversio
         sex: convert_genome::cli::Sex::Female,
         par_boundaries: None,
         standardize: false,
+        ref_panel: None,
     }
 }
 

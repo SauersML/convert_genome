@@ -43,6 +43,7 @@ impl Fixtures {
             reference_fai: None,
             reference_fai_origin: None,
             output,
+            output_dir: None,
             output_format: format,
             sample_id: "BENCH".into(),
             assembly: "GRCh38".into(),
@@ -50,6 +51,7 @@ impl Fixtures {
             sex: convert_genome::cli::Sex::Female,
             par_boundaries: None,
             standardize: false,
+            ref_panel: None,
         }
     }
 }

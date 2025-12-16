@@ -1,15 +1,16 @@
 # convert_genome
 
-`convert_genome` converts direct-to-consumer (DTC) genotype exports (23andMe, AncestryDNA, etc.) into standard [VCF](https://samtools.github.io/hts-specs/VCFv4.5.pdf) or [BCF](https://samtools.github.io/hts-specs/BCFv2_qref.pdf) files. The converter understands remote references, streams compressed archives, and now includes high-performance, parallel processing suitable for multi-million record datasets.
+`convert_genome` converts direct-to-consumer (DTC) genotype exports (23andMe, AncestryDNA, MyHeritage, etc.) into standard [VCF](https://samtools.github.io/hts-specs/VCFv4.5.pdf), [BCF](https://samtools.github.io/hts-specs/BCFv2_qref.pdf), or [PLINK](https://www.cog-genomics.org/plink/1.9/formats) binary formats. The converter supports remote references via HTTP(S) and handles compressed `.gz` and `.zip` archives.
 
 ## Features
 
-- **Parallel conversion pipeline** powered by [`rayon`](https://docs.rs/rayon), scaling across all cores.
-- **Thread-safe reference genome access** with a shared [`LRU`](https://docs.rs/lru) cache for rapid base lookups.
-- **Remote reference support** for `http://` and `https://` URLs with transparent decompression of `.gz` and `.zip` archives.
-- **Robust parsing** with property-based and integration tests covering malformed input, missing fields, and concurrent access.
-- **Benchmark suite** (Criterion) to track performance of parsing, reference lookups, and pipeline throughput.
-- **Comprehensive CI/CD** across Linux, macOS, and Windows with formatting, linting, testing, coverage, and benchmarks.
+- **Multiple output formats**: VCF text, BCF binary, and PLINK 1.9 binary (.bed/.bim/.fam).
+- **Flexible input parsing**: Supports 23andMe, AncestryDNA (5-column), MyHeritage (CSV), deCODEme (6-column with strand flipping), and standard VCF/BCF.
+- **Remote reference support**: Fetch `http://` and `https://` URLs with transparent decompression of `.gz` and `.zip` archives.
+- **Sex chromosome handling**: Correct ploidy enforcement for X, Y, and MT chromosomes with PAR region awareness.
+- **Allele polarization**: Optional `--standardize` mode to normalize alleles against the reference genome.
+- **Thread-safe reference access**: Uses an [`LRU`](https://docs.rs/lru) cache for efficient base lookups.
+- **Comprehensive CI/CD**: Formatting, linting, testing, and coverage across Linux (with macOS/Windows support).
 
 ## Installation
 
@@ -29,36 +30,64 @@ The resulting executable lives at `target/release/convert_genome`.
 
 ## Usage
 
-The CLI accepts both local files and remote resources. A minimal invocation converts a DTC file to VCF:
+The CLI accepts three positional arguments: `INPUT`, `REFERENCE`, and `OUTPUT`. The `--sex` flag is required for correct sex chromosome ploidy handling.
+
+### Basic conversion to VCF
 
 ```bash
 convert_genome \
-  --input data/genotypes.txt \
-  --reference GRCh38.fa \
-  --output genotypes.vcf \
-  --sample SAMPLE_ID
+  data/genotypes.txt \
+  GRCh38.fa \
+  genotypes.vcf \
+  --sex male
 ```
 
-Generate a BCF with explicit assembly metadata and keep homozygous reference calls:
+### BCF output with explicit sample ID
 
 ```bash
 convert_genome \
-  --input https://example.org/sample.txt.gz \
-  --reference https://example.org/GRCh38.fa.gz \
-  --output sample.bcf \
-  --output-format bcf \
-  --assembly GRCh38 \
+  https://example.org/sample.txt.gz \
+  https://example.org/GRCh38.fa.gz \
+  sample.bcf \
+  --format bcf \
+  --sex female \
   --sample SAMPLE_ID \
-  --include-reference-sites
+  --assembly GRCh38
 ```
 
-If a `.fai` index is not provided the converter will generate one next to the FASTA automatically.
+### PLINK output (variants only)
+
+```bash
+convert_genome \
+  input.txt \
+  reference.fa \
+  output \
+  --format plink \
+  --sex male \
+  --variants-only
+```
+
+If a `.fai` index is not provided, the converter will generate one next to the FASTA automatically.
+
+### Command-line options
+
+| Option | Description |
+|--------|-------------|
+| `--format <vcf\|bcf\|plink>` | Output format (default: vcf) |
+| `--sex <male\|female>` | **Required.** Sample sex for X/Y ploidy |
+| `--sample <NAME>` | Sample identifier for VCF header |
+| `--assembly <NAME>` | Assembly label for metadata (default: GRCh38) |
+| `--variants-only` | Omit reference-only sites from output |
+| `--standardize` | Normalize chromosome names and polarize alleles |
+| `--input-format <dtc\|vcf\|bcf\|auto>` | Input format (default: auto-detect) |
+| `--reference-fai <PATH>` | Explicit FASTA index path |
+| `--log-level <LEVEL>` | Logging verbosity (default: info) |
 
 ## Performance
 
-Reference lookups use a shared, thread-safe LRU cache sized for 128k entries, dramatically reducing random I/O. The conversion pipeline collects DTC records, sorts them for cache locality, and processes them in parallel; results are written sequentially to keep deterministic ordering.
+Reference lookups use a shared, thread-safe LRU cache. Input records are sorted by genomic position before processing to maximize cache locality.
 
-The Criterion benchmarks can be executed with:
+Run benchmarks with:
 
 ```bash
 cargo bench
@@ -68,18 +97,20 @@ Benchmarks cover:
 
 - Cached vs. uncached reference lookups.
 - DTC parsing throughput.
-- Full conversion pipeline comparisons (parallel vs. single-threaded execution).
+- Full conversion pipeline comparisons.
 
 ## Testing
 
-Unit, integration, and property-based tests ensure correctness across a wide surface area:
+Unit, integration, and property-based tests ensure correctness:
 
 ```bash
-cargo test              # Debug builds, all tests
-cargo test --release    # Property tests under release optimizations
+cargo test                # Debug builds, all tests
+cargo test --release      # Property tests under release optimizations
 ```
 
-Ignored integration tests in `tests/remote_download.rs` exercise real-world genome downloads; run them manually as needed.
+
+The `tests/remote_download.rs` file contains integration tests that download real genome reference files from external servers (EBI, Ensembl, Illumina).
+
 
 ## Continuous Integration
 
@@ -94,13 +125,17 @@ See [`.github/workflows/ci.yml`](.github/workflows/ci.yml). The workflow perform
 
 ## Project Architecture
 
+### Core modules
+
 - `src/cli.rs` – Argument parsing and top-level command dispatch.
 - `src/conversion.rs` – Conversion pipeline, header construction, and record translation.
-- `src/dtc.rs` – Streaming parser for DTC genotype exports.
+- `src/dtc.rs` – Parser for DTC genotype exports (23andMe, AncestryDNA, etc.).
+- `src/input.rs` – Input source abstraction (DTC, VCF, BCF) with sorting for cache locality.
 - `src/reference.rs` – Reference genome loader, contig metadata, and cached base access.
 - `src/remote.rs` – Remote fetching with HTTP(S) support and archive extraction.
+- `src/plink.rs` – PLINK 1.9 binary format writer (.bed/.bim/.fam).
 
-Additional resources:
+### Additional resources
 
 - `tests/` – Integration and property-based test suites.
 - `benches/` – Criterion benchmarks for core subsystems.

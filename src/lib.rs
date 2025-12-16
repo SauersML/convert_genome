@@ -2,6 +2,7 @@ pub mod cli;
 pub mod conversion;
 pub mod dtc;
 pub mod input;
+pub mod panel;
 pub mod plink;
 pub mod reference;
 pub mod remote;

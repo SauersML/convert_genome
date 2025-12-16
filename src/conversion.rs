@@ -63,6 +63,7 @@ pub struct ConversionConfig {
     pub reference_fai: Option<PathBuf>,
     pub reference_fai_origin: Option<String>,
     pub output: PathBuf,
+    pub output_dir: Option<PathBuf>,
     pub output_format: OutputFormat,
     pub sample_id: String,
     pub assembly: String,
@@ -70,6 +71,7 @@ pub struct ConversionConfig {
     pub sex: Sex,
     pub par_boundaries: Option<ParBoundaries>,
     pub standardize: bool,
+    pub ref_panel: Option<PathBuf>,
 }
 
 // ConversionSummary moved to crate root
@@ -794,6 +796,7 @@ mod tests {
             reference_fai: None,
             reference_fai_origin: None,
             output: dir.path().join("out.vcf"),
+            output_dir: None,
             output_format: OutputFormat::Vcf,
             sample_id: "SAMPLE".to_string(),
             assembly: "GRCh38".to_string(),
@@ -801,6 +804,7 @@ mod tests {
             sex: Sex::Female,
             par_boundaries: None,
             standardize: false,
+            ref_panel: None,
         };
 
         let header = build_header(&config, &reference).unwrap();
@@ -831,6 +835,7 @@ mod tests {
             reference_fai: None,
             reference_fai_origin: None,
             output: PathBuf::from("out.vcf"),
+            output_dir: None,
             output_format: OutputFormat::Vcf,
             sample_id: String::from("sample"),
             assembly: String::from("GRCh38"),
@@ -838,6 +843,7 @@ mod tests {
             sex: Sex::Female,
             par_boundaries: None,
             standardize: false,
+            ref_panel: None,
         };
 
         let header = build_header(&config, &reference).unwrap();
