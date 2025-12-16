@@ -371,8 +371,19 @@ impl PaddedPanel {
     }
 
     /// Get the added ALTs for a site.
+    /// Performs chr-prefix normalization to handle mismatched naming conventions.
     pub fn added_alts(&self, chrom: &str, pos: u64) -> Option<&Vec<String>> {
-        self.added_alts.get(&(chrom.to_string(), pos))
+        // Try exact match first
+        if let Some(v) = self.added_alts.get(&(chrom.to_string(), pos)) {
+            return Some(v);
+        }
+        // Try with/without 'chr' prefix
+        let alt_chrom = if chrom.starts_with("chr") {
+            chrom.strip_prefix("chr").unwrap().to_string()
+        } else {
+            format!("chr{}", chrom)
+        };
+        self.added_alts.get(&(alt_chrom, pos))
     }
 
     /// Iterate over all novel sites.

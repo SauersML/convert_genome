@@ -96,7 +96,7 @@ pub fn harmonize_alleles(
         let idx = panel.get_or_add_allele_index(chrom, pos, &base, ref_base);
         indices.push(idx);
     }
-    
+
     Ok(indices)
 }
 
@@ -109,15 +109,13 @@ pub fn harmonize_genotype(
     panel: &mut PaddedPanel,
 ) -> HarmonizationResult {
     match harmonize_alleles(user_bases, ref_base, chrom, pos, panel) {
-        Ok(indices) => {
-            match indices.len() {
-                1 => HarmonizationResult::Haploid(indices[0]),
-                2 => HarmonizationResult::Diploid(indices[0], indices[1]),
-                _ => HarmonizationResult::InvalidAlleles {
-                    user_bases: user_bases.to_vec(),
-                    ref_base: ref_base.to_string(),
-                },
-            }
+        Ok(indices) => match indices.len() {
+            1 => HarmonizationResult::Haploid(indices[0]),
+            2 => HarmonizationResult::Diploid(indices[0], indices[1]),
+            _ => HarmonizationResult::InvalidAlleles {
+                user_bases: user_bases.to_vec(),
+                ref_base: ref_base.to_string(),
+            },
         },
         Err(e) => HarmonizationResult::Skip { reason: e },
     }

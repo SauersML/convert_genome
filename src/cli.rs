@@ -36,7 +36,7 @@ struct Cli {
     #[arg(value_name = "OUTPUT", conflicts_with = "output_dir")]
     output: Option<PathBuf>,
 
-    /// Output directory for panel mode (produces panel.vcf.gz + genotypes.vcf.gz)
+    /// Output directory for panel mode (produces panel.vcf + genotypes.vcf)
     #[arg(long, value_name = "DIR", conflicts_with = "output")]
     output_dir: Option<PathBuf>,
 
@@ -93,10 +93,10 @@ pub fn run() -> Result<()> {
             dir.join("genotypes.vcf")
         }
         (None, Some(_), None) => {
-            anyhow::bail!("--output-dir requires --ref-panel");
+            anyhow::bail!("--output-dir requires --panel");
         }
         (None, None, _) => {
-            anyhow::bail!("Either --output or --output-dir (with --ref-panel) is required");
+            anyhow::bail!("Either --output or --output-dir (with --panel) is required");
         }
         _ => unreachable!(), // conflicts_with handles other cases
     };

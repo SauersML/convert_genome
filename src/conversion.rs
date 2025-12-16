@@ -27,7 +27,10 @@ use noodles::vcf::{
     variant::{
         io::Write as VariantRecordWrite,
         record::samples::keys::key as format_key,
-        record_buf::{AlternateBases, RecordBuf, Samples, samples::sample::{Value, value::Array}},
+        record_buf::{
+            AlternateBases, RecordBuf, Samples,
+            samples::sample::{Value, value::Array},
+        },
     },
 };
 // rayon removed
@@ -334,8 +337,6 @@ where
                     // We need the ACTUAL bases the user has called, e.g. ["A", "G"]
                     // We can get these by mapping GT indices to record alleles.
 
-
-
                     let samples = final_record.samples().clone();
                     // Assume single sample for conversion tool
                     if let Some(Some(Value::String(gt_str))) = samples
@@ -355,7 +356,7 @@ where
                                 (None, None)
                             }
                         };
-                        
+
                         // ---------------------------------------------------------
                         // REMAPPING LOGIC FOR VCF FIELDS (AD, AC, AF)
                         // ---------------------------------------------------------
@@ -363,16 +364,16 @@ where
                         let mut final_ref = final_record.reference_bases().to_string();
                         let mut final_alts = final_record.alternate_bases().clone();
                         let mut final_samples = final_record.samples().clone();
-                        
+
                         // 1. Harmonize ALL input alleles to determine the full mapping
 
                         // Input alleles: [REF, ALT1, ALT2...]
                         let mut all_input_alleles = Vec::new();
                         all_input_alleles.push(record_ref.clone());
                         all_input_alleles.extend(record_alts.iter().cloned());
-                        
+
                         let mut panel_borrow = panel_cell.borrow_mut();
-                        
+
                         // harmonized_indices[i] = Panel Allele Index for Input Allele i
                         // This handles strand flips for the entire set of alleles consistent with the called genotype.
                         // (harmonize_alleles uses the same logic as harmonize_genotype for flip detection)
@@ -381,9 +382,9 @@ where
                             record_ref,
                             &chrom,
                             pos,
-                            &mut panel_borrow
+                            &mut panel_borrow,
                         );
-                        
+
                         *final_record.reference_bases_mut() = final_ref.into();
                         *final_record.alternate_bases_mut() = final_alts;
                         *final_record.samples_mut() = final_samples;
@@ -819,6 +820,26 @@ fn build_header(config: &ConversionConfig, reference: &ReferenceGenome) -> Resul
 
     let genotype_format = Map::<Format>::from(format_key::GENOTYPE);
     builder = builder.add_format(format_key::GENOTYPE, genotype_format);
+
+    // Add FORMAT fields that may be preserved during standardization
+    use noodles::vcf::header::record::value::map::format::{Number as FmtNumber, Type as FmtType};
+    builder = builder
+        .add_format(
+            "GQ",
+            Map::<Format>::new(FmtNumber::Count(1), FmtType::Integer, "Genotype Quality"),
+        )
+        .add_format(
+            "DP",
+            Map::<Format>::new(FmtNumber::Count(1), FmtType::Integer, "Read Depth"),
+        )
+        .add_format(
+            "MIN_DP",
+            Map::<Format>::new(
+                FmtNumber::Count(1),
+                FmtType::Integer,
+                "Minimum DP observed within the GVCF block",
+            ),
+        );
 
     // Add symbolic alleles for Indels as per VCF spec
     builder = builder
