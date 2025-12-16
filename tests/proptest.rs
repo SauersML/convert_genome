@@ -31,21 +31,28 @@ proptest! {
     }
 }
 
+use convert_genome::conversion::DtcAllele;
+
 proptest! {
     #[test]
     fn genotype_parsing_round_trips(
         reference_base in prop::sample::select(vec!['A', 'C', 'G', 'T']),
         alleles in proptest::collection::vec(prop::sample::select(vec!['A', 'C', 'G', 'T', '-']), 1..3),
     ) {
-        let parsed: Vec<Option<char>> = alleles
+        let parsed: Vec<DtcAllele> = alleles
             .iter()
-            .map(|&c| if c == '-' { None } else { Some(c) })
+            .map(|&c| if c == '-' { DtcAllele::Missing } else { DtcAllele::Base(c) })
             .collect();
 
         let mut alts = Vec::new();
-        for allele in parsed.iter().flatten() {
-            if *allele != reference_base && !alts.contains(allele) {
-                alts.push(*allele);
+        for allele in parsed.iter() {
+            if let DtcAllele::Base(c) = allele {
+                if *c != reference_base {
+                    let s = c.to_string();
+                    if !alts.contains(&s) {
+                        alts.push(s);
+                    }
+                }
             }
         }
 
@@ -64,7 +71,9 @@ proptest! {
         reference_base in prop::sample::select(vec!['A', 'C', 'G', 'T']),
         invalid in prop::sample::select(vec!['X', 'Y', 'Z']),
     ) {
-        let alleles = vec![Some(invalid)];
+        // We manually construct an invalid Base allele to test error handling
+        let alleles = vec![DtcAllele::Base(invalid)];
+        // The invalid base is not in REF and not in ALT (empty), so it should error
         let result = format_genotype_for_tests(&alleles, reference_base, &[]);
         prop_assert!(result.is_err());
     }

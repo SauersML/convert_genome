@@ -182,10 +182,10 @@ fn print_summary(summary: &ConversionSummary) {
         );
     }
 
-    if summary.indel_records > 0 {
+    if summary.symbolic_allele_records > 0 {
         println!(
-            "Skipped {count} indel-like genotypes (not supported).",
-            count = summary.indel_records
+            "Skipped {count} indel-like genotypes (represented as symbolic alleles).",
+            count = summary.symbolic_allele_records
         );
     }
 

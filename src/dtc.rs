@@ -26,6 +26,7 @@ pub struct Reader<R> {
     inner: R,
     line: u64,
     buf: String,
+    has_warned_build: bool,
 }
 
 impl<R> Reader<R>
@@ -37,6 +38,7 @@ where
             inner,
             line: 0,
             buf: String::new(),
+            has_warned_build: false,
         }
     }
 
@@ -58,9 +60,29 @@ where
                 Ok(0) => return None,
                 Ok(_) => {
                     self.line += 1;
-                    let trimmed = self.buf.trim_end_matches(&['\n', '\r'][..]);
-                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                    // Sanitize input: remove quotes which are common in CSV formats (MyHeritage)
+                    let trimmed = self.buf.trim_end_matches(&['\n', '\r'][..]).trim();
+                    
+                    if trimmed.is_empty() {
                         continue;
+                    }
+
+                    if trimmed.starts_with('#') {
+                        if !self.has_warned_build {
+                            if trimmed.contains("Build 36") || trimmed.contains("NCBI36") {
+                                tracing::warn!("Input file appears to be Build 36/NCBI36! Coordinate mismatches with GRCh38 are likely.");
+                                self.has_warned_build = true;
+                            } else if trimmed.contains("Build 37") || trimmed.contains("GRCh37") {
+                                tracing::warn!("Input file appears to be Build 37/GRCh37. Ensure you are using a compatible reference.");
+                                self.has_warned_build = true;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Column headers usually start with "rsid" or "RSID" or "loid"
+                    if trimmed.starts_with("rsid") || trimmed.starts_with("RSID") || trimmed.starts_with("loid") {
+                         continue;
                     }
 
                     return Some(parse_record(trimmed).map_err(|kind| ParseError {
@@ -95,7 +117,7 @@ pub struct ParseError {
 pub enum ParseErrorKind {
     #[error("I/O error")]
     Io(#[from] io::Error),
-    #[error("expected at least four tab- or space-delimited fields, found {0}")]
+    #[error("expected 4, 5, or 6 fields, found {0}")]
     FieldCount(usize),
     #[error("invalid chromosome field")]
     InvalidChromosome,
@@ -106,47 +128,77 @@ pub enum ParseErrorKind {
 }
 
 fn parse_record(line: &str) -> Result<Record, ParseErrorKind> {
-    let mut fields = line.split_whitespace();
+    // 1. Sanitize quotes
+    let sanitized = line.replace('"', "");
+    
+    // 2. Determine delimiter (Comma for MyHeritage/FTDNA, Whitespace for others)
+    let fields: Vec<&str> = if sanitized.contains(',') {
+        sanitized.split(',').map(|s| s.trim()).collect()
+    } else {
+        sanitized.split_whitespace().collect()
+    };
 
-    let id_field = fields.next();
-    let chromosome = fields
-        .next()
-        .ok_or_else(|| ParseErrorKind::FieldCount(count_fields(line)))?;
+    let count = fields.len();
+
+    // 3. Heuristic column mapping based on field count
+    let (id_idx, chr_idx, pos_idx, geno_val) = match count {
+        4 => {
+            // Standard / 23andMe
+            // ID, Chr, Pos, Genotype
+            (0, 1, 2, fields[3].to_string())
+        }
+        5 => {
+            // AncestryDNA
+            // ID, Chr, Pos, A1, A2
+            (0, 1, 2, format!("{}{}", fields[3], fields[4]))
+        }
+        6 => {
+            // deCODEme
+            // ID, Variation, Chr, Pos, Strand, Genotype
+            let strand = fields[4];
+            let mut g = fields[5].to_string();
+            if strand == "-" {
+                g = flip_genotype(&g);
+            }
+            (0, 2, 3, g)
+        }
+        _ => return Err(ParseErrorKind::FieldCount(count)),
+    };
+
+    let id_str = fields[id_idx];
+    let chromosome = fields[chr_idx];
+    let position_str = fields[pos_idx];
+
     if chromosome.is_empty() {
         return Err(ParseErrorKind::InvalidChromosome);
     }
 
-    let position_str = fields
-        .next()
-        .ok_or_else(|| ParseErrorKind::FieldCount(count_fields(line)))?;
     let position = position_str
         .parse::<u64>()
         .map_err(ParseErrorKind::InvalidPosition)?;
 
-    let genotype = fields
-        .next()
-        .ok_or(ParseErrorKind::MissingGenotype)?
-        .to_string();
-
-    let id = id_field.and_then(|s| {
-        let trimmed = s.trim();
-        if trimmed.is_empty() || trimmed == "0" || trimmed == "." {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    });
+    let id = if id_str.is_empty() || id_str == "0" || id_str == "." {
+        None
+    } else {
+        Some(id_str.to_string())
+    };
 
     Ok(Record {
         id,
         chromosome: chromosome.to_string(),
         position,
-        genotype,
+        genotype: geno_val,
     })
 }
 
-fn count_fields(line: &str) -> usize {
-    line.split_whitespace().count()
+fn flip_genotype(g: &str) -> String {
+    g.chars()
+        .map(|c| match c {
+            'A' => 'T', 'T' => 'A', 'C' => 'G', 'G' => 'C',
+            'a' => 't', 't' => 'a', 'c' => 'g', 'g' => 'c',
+            other => other,
+        })
+        .collect()
 }
 
 impl fmt::Display for Record {
@@ -176,11 +228,40 @@ mod tests {
     }
 
     #[test]
-    fn reader_skips_comments() {
-        let data = b"#comment\nrs1\t1\t10\tAA\n";
+    fn reader_skips_comments_and_detects_build() {
+        let data = b"#comment\n# Build 37\nrs1\t1\t10\tAA\n";
         let mut reader = Reader::new(&data[..]);
         let record = reader.next().unwrap().unwrap();
         assert_eq!(record.position, 10);
+        assert!(reader.has_warned_build);
         assert!(reader.next().is_none());
     }
+
+    #[test]
+    fn parses_csv_quoted() {
+        // MyHeritage style
+        let line = "\"rs123\",\"1\",\"100\",\"AA\"";
+        let record = parse_record(line).unwrap();
+        assert_eq!(record.id.as_deref(), Some("rs123"));
+        assert_eq!(record.chromosome, "1");
+        assert_eq!(record.position, 100);
+        assert_eq!(record.genotype, "AA");
+    }
+
+    #[test]
+    fn parses_ancestry_5col() {
+        // AncestryDNA style: ID, Chr, Pos, A1, A2
+        let line = "rs123\t1\t100\tA\tG";
+        let record = parse_record(line).unwrap();
+        assert_eq!(record.genotype, "AG");
+    }
+
+    #[test]
+    fn parses_decodeme_6col_flipped() {
+        // deCODEme style: ID, Var, Chr, Pos, Strand, Geno
+        // Strand - means flip A->T
+        let line = "rs123\tvar\t1\t100\t-\tA";
+        let record = parse_record(line).unwrap();
+        assert_eq!(record.genotype, "T"); // Flipped from A
+    }    
 }

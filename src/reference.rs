@@ -194,6 +194,10 @@ fn canonical_key(raw: &str) -> String {
     let upper = trimmed.to_ascii_uppercase();
     match upper.as_str() {
         "M" => "MT".to_string(),
+        "23" => "X".to_string(),
+        "24" => "Y".to_string(),
+        "25" => "X".to_string(), // PAR
+        "26" => "MT".to_string(),
         _ => upper,
     }
 }
@@ -237,5 +241,35 @@ mod tests {
         // Subsequent lookups are served from the cache.
         assert_eq!(reference.base("1", 2).unwrap(), 'C');
         assert!(reference.cache_len() >= 1);
+    }
+    
+    #[test]
+    fn reference_resolves_numeric_sex_chromosomes() {
+        // Create a temporary FASTA with X, Y, M
+        let dir = tempfile::tempdir().unwrap();
+        let fasta_path = dir.path().join("ref_sex.fa");
+        let mut file = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(file, ">chrX").unwrap();
+        writeln!(file, "ACGT").unwrap();
+        writeln!(file, ">chrY").unwrap();
+        writeln!(file, "ACGT").unwrap();
+        writeln!(file, ">chrM").unwrap();
+        writeln!(file, "ACGT").unwrap();
+        drop(file);
+
+        let reference = ReferenceGenome::open(&fasta_path, None).unwrap();
+        
+        // 23 -> X
+        assert_eq!(reference.resolve_contig_name("23").unwrap(), "chrX");
+        assert_eq!(reference.contig_index("23"), reference.contig_index("chrX"));
+
+        // 24 -> Y
+        assert_eq!(reference.resolve_contig_name("24").unwrap(), "chrY");
+        
+        // 25 -> X (PAR)
+        assert_eq!(reference.resolve_contig_name("25").unwrap(), "chrX");
+        
+        // 26 -> MT (mapped to chrM -> MT)
+        assert_eq!(reference.resolve_contig_name("26").unwrap(), "chrM");
     }
 }
