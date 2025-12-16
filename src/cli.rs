@@ -6,9 +6,9 @@ use tracing_subscriber::{EnvFilter, fmt};
 use url::Url;
 
 use crate::{
-    ConversionConfig, convert_dtc_file, ConversionSummary, OutputFormat,
-    remote::{self, RemoteResource},
+    ConversionConfig, ConversionSummary, OutputFormat, convert_dtc_file,
     input::InputFormat,
+    remote::{self, RemoteResource},
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, clap::ValueEnum)]

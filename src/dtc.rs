@@ -107,7 +107,7 @@ where
                     self.line += 1;
                     // Sanitize input: remove quotes which are common in CSV formats (MyHeritage)
                     let trimmed = self.buf.trim_end_matches(&['\n', '\r'][..]).trim();
-                    
+
                     if trimmed.is_empty() {
                         continue;
                     }
@@ -115,10 +115,14 @@ where
                     if trimmed.starts_with('#') {
                         if !self.has_warned_build {
                             if trimmed.contains("Build 36") || trimmed.contains("NCBI36") {
-                                tracing::warn!("Input file appears to be Build 36/NCBI36! Coordinate mismatches with GRCh38 are likely.");
+                                tracing::warn!(
+                                    "Input file appears to be Build 36/NCBI36! Coordinate mismatches with GRCh38 are likely."
+                                );
                                 self.has_warned_build = true;
                             } else if trimmed.contains("Build 37") || trimmed.contains("GRCh37") {
-                                tracing::warn!("Input file appears to be Build 37/GRCh37. Ensure you are using a compatible reference.");
+                                tracing::warn!(
+                                    "Input file appears to be Build 37/GRCh37. Ensure you are using a compatible reference."
+                                );
                                 self.has_warned_build = true;
                             }
                         }
@@ -129,7 +133,9 @@ where
                     // Use safe slicing to avoid panic on multi-byte UTF-8 characters
                     let header_check = trimmed.trim_matches('"');
                     if let Some(prefix) = header_check.get(..4) {
-                        if prefix.eq_ignore_ascii_case("rsid") || prefix.eq_ignore_ascii_case("loid") {
+                        if prefix.eq_ignore_ascii_case("rsid")
+                            || prefix.eq_ignore_ascii_case("loid")
+                        {
                             continue;
                         }
                     }
@@ -180,9 +186,13 @@ fn parse_record(line: &str) -> Result<Record, ParseErrorKind> {
     // Determine delimiter (Comma for MyHeritage/FTDNA, Whitespace for others)
     // and strip quotes from fields lazily to avoid allocation
     let fields: Vec<&str> = if line.contains(',') {
-        line.split(',').map(|s| s.trim().trim_matches('"')).collect()
+        line.split(',')
+            .map(|s| s.trim().trim_matches('"'))
+            .collect()
     } else {
-        line.split_whitespace().map(|s| s.trim_matches('"')).collect()
+        line.split_whitespace()
+            .map(|s| s.trim_matches('"'))
+            .collect()
     };
 
     let count = fields.len();
@@ -241,8 +251,14 @@ fn parse_record(line: &str) -> Result<Record, ParseErrorKind> {
 fn flip_genotype(g: &str) -> String {
     g.chars()
         .map(|c| match c {
-            'A' => 'T', 'T' => 'A', 'C' => 'G', 'G' => 'C',
-            'a' => 't', 't' => 'a', 'c' => 'g', 'g' => 'c',
+            'A' => 'T',
+            'T' => 'A',
+            'C' => 'G',
+            'G' => 'C',
+            'a' => 't',
+            't' => 'a',
+            'c' => 'g',
+            'g' => 'c',
             other => other,
         })
         .collect()
@@ -310,5 +326,5 @@ mod tests {
         let line = "rs123\tvar\t1\t100\t-\tA";
         let record = parse_record(line).unwrap();
         assert_eq!(record.genotype, "T"); // Flipped from A
-    }    
+    }
 }

@@ -1,10 +1,10 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     fs, io,
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
-    borrow::Cow,
 };
 
 use lru::LruCache;
@@ -111,7 +111,9 @@ impl ReferenceGenome {
 
     pub fn contig(&self, query: &str) -> Option<&ReferenceContig> {
         let key = canonical_key(query);
-        self.alias_to_index.get(key.as_ref()).map(|&idx| &self.contigs[idx])
+        self.alias_to_index
+            .get(key.as_ref())
+            .map(|&idx| &self.contigs[idx])
     }
 
     /// Returns the index of the contig matching the query, if found.
@@ -127,12 +129,11 @@ impl ReferenceGenome {
 
     pub fn base(&self, query: &str, position: u64) -> Result<char, ReferenceError> {
         let canonical = canonical_key(query);
-        let contig_idx = *self
-            .alias_to_index
-            .get(canonical.as_ref())
-            .ok_or_else(|| ReferenceError::UnknownContig {
+        let contig_idx = *self.alias_to_index.get(canonical.as_ref()).ok_or_else(|| {
+            ReferenceError::UnknownContig {
                 query: query.to_string(),
-            })?;
+            }
+        })?;
         let contig = &self.contigs[contig_idx];
 
         if position == 0 || position > contig.length {
@@ -192,9 +193,12 @@ fn default_index_path(path: &Path) -> PathBuf {
 fn canonical_key(raw: &str) -> Cow<'_, str> {
     let trimmed = raw.trim();
     let stripped = trimmed.strip_prefix("chr").unwrap_or(trimmed);
-    
+
     // Optimization: avoid allocation for common uppercase inputs
-    if stripped.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+    if stripped
+        .bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    {
         match stripped {
             "M" => return Cow::Borrowed("MT"),
             "23" | "25" => return Cow::Borrowed("X"),
@@ -222,7 +226,8 @@ fn build_alias_map(contigs: &[ReferenceContig]) -> HashMap<String, usize> {
         map.entry(canonical.into_owned()).or_insert(idx);
         map.entry(name.to_ascii_uppercase()).or_insert(idx);
         if let Some(stripped) = name.strip_prefix("chr") {
-            map.entry(canonical_key(stripped).into_owned()).or_insert(idx);
+            map.entry(canonical_key(stripped).into_owned())
+                .or_insert(idx);
         }
         if name.eq_ignore_ascii_case("chrM") || name.eq_ignore_ascii_case("MT") {
             map.entry("MT".into()).or_insert(idx);
@@ -244,26 +249,14 @@ impl ParBoundaries {
         if asm.contains("38") {
             // GRCh38 coordinates
             Some(Self {
-                x_ranges: vec![
-                    (10_001, 2_781_479),
-                    (155_701_383, 156_030_895),
-                ],
-                y_ranges: vec![
-                    (10_001, 2_781_479),
-                    (56_887_903, 57_217_415),
-                ],
+                x_ranges: vec![(10_001, 2_781_479), (155_701_383, 156_030_895)],
+                y_ranges: vec![(10_001, 2_781_479), (56_887_903, 57_217_415)],
             })
         } else if asm.contains("37") || asm.contains("19") {
             // GRCh37 coordinates
             Some(Self {
-                x_ranges: vec![
-                    (60_001, 2_699_520),
-                    (154_931_044, 155_260_560),
-                ],
-                y_ranges: vec![
-                    (10_001, 2_649_520),
-                    (59_034_050, 59_363_566),
-                ],
+                x_ranges: vec![(60_001, 2_699_520), (154_931_044, 155_260_560)],
+                y_ranges: vec![(10_001, 2_649_520), (59_034_050, 59_363_566)],
             })
         } else {
             None
@@ -280,7 +273,9 @@ impl ParBoundaries {
         } else {
             return false;
         };
-        ranges.iter().any(|(start, end)| pos >= *start && pos <= *end)
+        ranges
+            .iter()
+            .any(|(start, end)| pos >= *start && pos <= *end)
     }
 }
 
@@ -306,7 +301,7 @@ mod tests {
         assert_eq!(reference.base("1", 2).unwrap(), 'C');
         assert!(reference.cache_len() >= 1);
     }
-    
+
     #[test]
     fn reference_resolves_numeric_sex_chromosomes() {
         // Create a temporary FASTA with X, Y, M
@@ -322,17 +317,17 @@ mod tests {
         drop(file);
 
         let reference = ReferenceGenome::open(&fasta_path, None).unwrap();
-        
+
         // 23 -> X
         assert_eq!(reference.resolve_contig_name("23").unwrap(), "chrX");
         assert_eq!(reference.contig_index("23"), reference.contig_index("chrX"));
 
         // 24 -> Y
         assert_eq!(reference.resolve_contig_name("24").unwrap(), "chrY");
-        
+
         // 25 -> X (PAR)
         assert_eq!(reference.resolve_contig_name("25").unwrap(), "chrX");
-        
+
         // 26 -> MT (mapped to chrM -> MT)
         assert_eq!(reference.resolve_contig_name("26").unwrap(), "chrM");
     }

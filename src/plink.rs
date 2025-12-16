@@ -24,7 +24,10 @@ impl PlinkWriter {
     pub fn new<P: AsRef<Path>>(prefix: P) -> io::Result<Self> {
         let prefix = prefix.as_ref();
         // Strip extension if provided (simple handling)
-        let stem = if prefix.extension().map_or(false, |e| e == "vcf" || e == "bcf") {
+        let stem = if prefix
+            .extension()
+            .map_or(false, |e| e == "vcf" || e == "bcf")
+        {
             prefix.with_extension("")
         } else {
             prefix.to_path_buf()
@@ -63,11 +66,7 @@ impl PlinkWriter {
             Sex::Female => "2",
         };
         // Phenotype -9 = missing
-        writeln!(
-            self.fam,
-            "{0}\t{0}\t0\t0\t{1}\t-9",
-            sample_id, sex_code
-        )?;
+        writeln!(self.fam, "{0}\t{0}\t0\t0\t{1}\t-9", sample_id, sex_code)?;
         self.samples_written = true;
         Ok(())
     }
@@ -75,41 +74,54 @@ impl PlinkWriter {
     pub fn write_variant(&mut self, record: &RecordBuf) -> io::Result<()> {
         // Enforce Biallelic: Ref + 1 Alt
         if record.alternate_bases().len() > 1 {
-             // RecordBuf usually uses variant_start() or alignment_start(). 
-             let pos = record.variant_start().map(|p| usize::from(p)).unwrap_or(0);
-             tracing::warn!("Skipping multiallelic site at {}:{}", record.reference_sequence_name(), pos);
-             return Ok(());
+            // RecordBuf usually uses variant_start() or alignment_start().
+            let pos = record.variant_start().map(|p| usize::from(p)).unwrap_or(0);
+            tracing::warn!(
+                "Skipping multiallelic site at {}:{}",
+                record.reference_sequence_name(),
+                pos
+            );
+            return Ok(());
         }
 
         // Write BIM line
         // Chrom Ident cm Pos Ref Alt
         let chrom = record.reference_sequence_name();
-        
+
         // Ids: join if multiple
         let id = if record.ids().is_empty() {
-             ".".to_string()
+            ".".to_string()
         } else {
-             record.ids().iter().map(|s| s.to_string()).collect::<Vec<_>>().join(";")
+            record
+                .ids()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(";")
         };
-        
+
         // Pos
         let pos = record.variant_start().map(|p| usize::from(p)).unwrap_or(0);
-        
+
         let ref_base = record.reference_bases();
-        
+
         // alternate_bases
         let alt_base_str = if record.alternate_bases().is_empty() {
-             ".".to_string()
+            ".".to_string()
         } else {
-             if let Some(res) = record.alternate_bases().as_ref().iter().next() {
-                 res.to_string()
-             } else {
-                 ".".to_string()
-             }
+            if let Some(res) = record.alternate_bases().as_ref().iter().next() {
+                res.to_string()
+            } else {
+                ".".to_string()
+            }
         };
 
         // Write to BIM
-        writeln!(self.bim, "{}\t{}\t0\t{}\t{}\t{}", chrom, id, pos, ref_base, alt_base_str)?;
+        writeln!(
+            self.bim,
+            "{}\t{}\t0\t{}\t{}\t{}",
+            chrom, id, pos, ref_base, alt_base_str
+        )?;
 
         // Write BED Genotypes
         // User mapping (Variant-Major):
@@ -117,63 +129,63 @@ impl PlinkWriter {
         // 01 (1) Missing genotype
         // 10 (2) Heterozygous
         // 11 (3) Homozygous for second allele (Alt)
-        
+
         let mut byte = 0u8;
         let mut count = 0;
-        
-        for sample in record.samples().values() {
-             // Handle missing GT field gracefully instead of panic
-             let genotype_val = match sample.get(key::GENOTYPE) {
-                 Some(val) => val,
-                 None => {
-                     // No GT field - treat as missing
-                     let bits: u8 = 1; // Missing (01)
-                     byte |= bits << (2 * count);
-                     count += 1;
-                     if count == 4 {
-                         self.bed.write_all(&[byte])?;
-                         byte = 0;
-                         count = 0;
-                     }
-                     continue;
-                 }
-             };
-             
-             // Map genotype string to PLINK bed bits
-             // 00 (0) = HomRef, 01 (1) = Missing, 10 (2) = Het, 11 (3) = HomAlt
-             let bits: u8 = match genotype_val {
-                 Some(Value::String(s)) => {
-                     match s.as_str() {
-                         "0/0" | "0|0" => 0, // HomRef (00)
-                         "0/1" | "0|1" | "1/0" | "1|0" => 2, // Het (10)
-                         "1/1" | "1|1" => 3, // HomAlt (11)
-                         // Haploid cases
-                         "0" => 0, // Haploid Ref -> HomRef
-                         "1" => 3, // Haploid Alt -> HomAlt
-                         // Missing cases
-                         "./." | "." | ".|." | "" => 1, // Missing (01)
-                         _ => 1, // Unknown -> Missing
-                     }
-                 },
-                 _ => 1, // Missing
-             };
 
-             // Pack bits: sample 0 in low bits (0-1), sample 1 in bits (2-3), etc.
-             byte |= bits << (2 * count);
-             count += 1;
-             
-             if count == 4 {
-                 self.bed.write_all(&[byte])?;
-                 byte = 0;
-                 count = 0;
-             }
+        for sample in record.samples().values() {
+            // Handle missing GT field gracefully instead of panic
+            let genotype_val = match sample.get(key::GENOTYPE) {
+                Some(val) => val,
+                None => {
+                    // No GT field - treat as missing
+                    let bits: u8 = 1; // Missing (01)
+                    byte |= bits << (2 * count);
+                    count += 1;
+                    if count == 4 {
+                        self.bed.write_all(&[byte])?;
+                        byte = 0;
+                        count = 0;
+                    }
+                    continue;
+                }
+            };
+
+            // Map genotype string to PLINK bed bits
+            // 00 (0) = HomRef, 01 (1) = Missing, 10 (2) = Het, 11 (3) = HomAlt
+            let bits: u8 = match genotype_val {
+                Some(Value::String(s)) => {
+                    match s.as_str() {
+                        "0/0" | "0|0" => 0,                 // HomRef (00)
+                        "0/1" | "0|1" | "1/0" | "1|0" => 2, // Het (10)
+                        "1/1" | "1|1" => 3,                 // HomAlt (11)
+                        // Haploid cases
+                        "0" => 0, // Haploid Ref -> HomRef
+                        "1" => 3, // Haploid Alt -> HomAlt
+                        // Missing cases
+                        "./." | "." | ".|." | "" => 1, // Missing (01)
+                        _ => 1,                        // Unknown -> Missing
+                    }
+                }
+                _ => 1, // Missing
+            };
+
+            // Pack bits: sample 0 in low bits (0-1), sample 1 in bits (2-3), etc.
+            byte |= bits << (2 * count);
+            count += 1;
+
+            if count == 4 {
+                self.bed.write_all(&[byte])?;
+                byte = 0;
+                count = 0;
+            }
         }
-        
+
         // Pad and flush last byte if needed
         if count > 0 {
-             self.bed.write_all(&[byte])?;
+            self.bed.write_all(&[byte])?;
         }
-        
+
         Ok(())
     }
 }
