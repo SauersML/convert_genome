@@ -189,7 +189,7 @@ fn default_index_path(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn canonical_key(raw: &str) -> Cow<str> {
+fn canonical_key(raw: &str) -> Cow<'_, str> {
     let trimmed = raw.trim();
     let stripped = trimmed.strip_prefix("chr").unwrap_or(trimmed);
     

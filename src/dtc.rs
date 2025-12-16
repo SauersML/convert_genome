@@ -126,9 +126,12 @@ where
                     }
 
                     // Check for header by sanitizing quotes first (handling "RSID" in CSVs)
+                    // Use safe slicing to avoid panic on multi-byte UTF-8 characters
                     let header_check = trimmed.trim_matches('"');
-                    if header_check.len() >= 4 && (header_check[..4].eq_ignore_ascii_case("rsid") || header_check[..4].eq_ignore_ascii_case("loid")) {
-                         continue;
+                    if let Some(prefix) = header_check.get(..4) {
+                        if prefix.eq_ignore_ascii_case("rsid") || prefix.eq_ignore_ascii_case("loid") {
+                            continue;
+                        }
                     }
 
                     return Some(parse_record(trimmed).map_err(|kind| ParseError {

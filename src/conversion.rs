@@ -152,7 +152,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     let header = build_header(&config, &reference)?;
 
     // Instantiate Source Iterator
-    let mut source: Box<dyn crate::input::VariantSource> = match config.input_format {
+    let source: Box<dyn crate::input::VariantSource> = match config.input_format {
         crate::input::InputFormat::Dtc => {
             let input = fs::File::open(&config.input)
                 .with_context(|| format!("failed to open input {}", config.input.display()))?;
@@ -401,7 +401,6 @@ pub fn standardize_record(
     config: &ConversionConfig,
 ) -> Result<Option<RecordBuf>, RecordConversionError> {
     use noodles::vcf::variant::record_buf::{AlternateBases, Ids};
-    use noodles::vcf::variant::record::Ids as IdsTrait;
     
     let chrom = record.reference_sequence_name();
     let pos = record.variant_start()
@@ -434,7 +433,7 @@ pub fn standardize_record(
     let ref_base_str = ref_base.to_string();
     
     // 3. Check if allele polarization is needed
-    let (final_ref, final_alts, needs_flip) = if input_ref.len() == 1 && input_ref != ref_base_str {
+    let (final_ref, final_alts, _needs_flip) = if input_ref.len() == 1 && input_ref != ref_base_str {
         // Single-base REF doesn't match reference - need to polarize
         let alt_bases: Vec<String> = record.alternate_bases()
             .as_ref()

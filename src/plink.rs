@@ -122,35 +122,44 @@ impl PlinkWriter {
         let mut count = 0;
         
         for sample in record.samples().values() {
-             let genotype_val = sample.get(key::GENOTYPE).expect("Genotype not found");
+             // Handle missing GT field gracefully instead of panic
+             let genotype_val = match sample.get(key::GENOTYPE) {
+                 Some(val) => val,
+                 None => {
+                     // No GT field - treat as missing
+                     let bits: u8 = 1; // Missing (01)
+                     byte |= bits << (2 * count);
+                     count += 1;
+                     if count == 4 {
+                         self.bed.write_all(&[byte])?;
+                         byte = 0;
+                         count = 0;
+                     }
+                     continue;
+                 }
+             };
              
-             let bits = match genotype_val {
+             // Map genotype string to PLINK bed bits
+             // 00 (0) = HomRef, 01 (1) = Missing, 10 (2) = Het, 11 (3) = HomAlt
+             let bits: u8 = match genotype_val {
                  Some(Value::String(s)) => {
                      match s.as_str() {
-                         "0/0" | "0|0" | "0" => 0, // HomRef (00)
-                         "0/1" | "0|1" | "1/0" | "1|0" | "1" => 2, // Het (10)
+                         "0/0" | "0|0" => 0, // HomRef (00)
+                         "0/1" | "0|1" | "1/0" | "1|0" => 2, // Het (10)
                          "1/1" | "1|1" => 3, // HomAlt (11)
-                         "./." | "." | ".|." => 1, // Missing (01)
-                         _ => 1, // Treat unknown as missing
+                         // Haploid cases
+                         "0" => 0, // Haploid Ref -> HomRef
+                         "1" => 3, // Haploid Alt -> HomAlt
+                         // Missing cases
+                         "./." | "." | ".|." | "" => 1, // Missing (01)
+                         _ => 1, // Unknown -> Missing
                      }
                  },
                  _ => 1, // Missing
              };
-             
-             // Check haploid '1' case mapping logic
-             let corrected_bits = if let Some(Value::String(s)) = genotype_val {
-                  if s == "1" { 
-                      3 // HomAlt (11)
-                  } else if s == "0" {
-                      0 // HomRef (00)
-                  } else {
-                      bits
-                  }
-             } else { bits };
 
-             // Pack bits: sample 0 in low bits (0-1), etc.
-             // byte |= bits << (2 * count)
-             byte |= corrected_bits << (2 * count);
+             // Pack bits: sample 0 in low bits (0-1), sample 1 in bits (2-3), etc.
+             byte |= bits << (2 * count);
              count += 1;
              
              if count == 4 {

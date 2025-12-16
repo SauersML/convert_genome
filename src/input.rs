@@ -216,11 +216,8 @@ impl DtcSource {
             }
         };
              
-        // Build RecordBuf
-        // IDs
              
-        // Build RecordBuf
-        // IDs
+        // Build RecordBuf with IDs
         let ids = record.id.as_ref().map(|id| [id.clone()].into_iter().collect::<noodles::vcf::variant::record_buf::Ids>());
         
         let samples = Samples::new(
