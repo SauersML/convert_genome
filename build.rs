@@ -399,6 +399,11 @@ impl Sink for CustomUppercaseCollector {
         let alpha_chars: Vec<char> = comment_text.chars().filter(|c| c.is_alphabetic()).collect();
 
         if !alpha_chars.is_empty() {
+            // Exception: Allow short comments (e.g., abbreviations, formulas) to be uppercase
+            if alpha_chars.len() < 6 {
+                return Ok(true);
+            }
+
             let uppercase_count = alpha_chars.iter().filter(|c| c.is_uppercase()).count();
             let uppercase_ratio = uppercase_count as f64 / alpha_chars.len() as f64;
 

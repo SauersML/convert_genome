@@ -80,8 +80,9 @@ where
                         continue;
                     }
 
-                    // Column headers usually start with "rsid" or "RSID" or "loid"
-                    if trimmed.starts_with("rsid") || trimmed.starts_with("RSID") || trimmed.starts_with("loid") {
+                    // Check for header by sanitizing quotes first (handling "RSID" in CSVs)
+                    let header_check = trimmed.trim_matches('"');
+                    if header_check.starts_with("rsid") || header_check.starts_with("RSID") || header_check.starts_with("loid") {
                          continue;
                     }
 
@@ -128,14 +129,12 @@ pub enum ParseErrorKind {
 }
 
 fn parse_record(line: &str) -> Result<Record, ParseErrorKind> {
-    // 1. Sanitize quotes
-    let sanitized = line.replace('"', "");
-    
-    // 2. Determine delimiter (Comma for MyHeritage/FTDNA, Whitespace for others)
-    let fields: Vec<&str> = if sanitized.contains(',') {
-        sanitized.split(',').map(|s| s.trim()).collect()
+    // Determine delimiter (Comma for MyHeritage/FTDNA, Whitespace for others)
+    // and strip quotes from fields lazily to avoid allocation
+    let fields: Vec<&str> = if line.contains(',') {
+        line.split(',').map(|s| s.trim().trim_matches('"')).collect()
     } else {
-        sanitized.split_whitespace().collect()
+        line.split_whitespace().map(|s| s.trim_matches('"')).collect()
     };
 
     let count = fields.len();

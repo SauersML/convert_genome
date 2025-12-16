@@ -684,6 +684,8 @@ mod tests {
             .unwrap(),
             "1/1"
         );
+
+
         assert_eq!(
             format_genotype(&[DtcAllele::Missing, DtcAllele::Missing], 'A', &[])
                 .unwrap(),
@@ -698,6 +700,44 @@ mod tests {
             .unwrap(),
             "0/1"
         );
+    }
+
+    #[test]
+    fn test_vcf_header_symbolic_alleles() {
+        use std::io::Write;
+        
+        // Setup temp reference
+        let dir = tempfile::tempdir().unwrap();
+        let ref_path = dir.path().join("ref.fa");
+        let mut file = std::fs::File::create(&ref_path).unwrap();
+        writeln!(file, ">1\nACGT").unwrap();
+        drop(file);
+        
+        let reference = crate::reference::ReferenceGenome::open(&ref_path, None).unwrap();
+        let config = ConversionConfig {
+            input: std::path::PathBuf::from("dummy.txt"),
+            input_origin: "dummy".to_string(),
+            reference_fasta: ref_path.clone(),
+            reference_origin: "dummy_ref".to_string(),
+            reference_fai: None,
+            reference_fai_origin: None,
+            output: dir.path().join("out.vcf"),
+            output_format: OutputFormat::Vcf,
+            sample_id: "SAMPLE".to_string(),
+            assembly: "GRCh38".to_string(),
+            include_reference_sites: true,
+        };
+        
+        let header = build_header(&config, &reference).unwrap();
+        
+        // Write header to string
+        let mut buf = Vec::new();
+        let mut writer = noodles::vcf::io::Writer::new(&mut buf);
+        writer.write_header(&header).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        
+        assert!(output.contains("##ALT=<ID=DEL,Description=\"Deletion\">"));
+        assert!(output.contains("##ALT=<ID=INS,Description=\"Insertion\">"));
     }
 
     #[test]
