@@ -101,7 +101,7 @@ impl PlinkWriter {
         let alt_base_str = if record.alternate_bases().is_empty() {
              ".".to_string()
         } else {
-             if let Some(Ok(res)) = record.alternate_bases().iter().next() {
+             if let Some(res) = record.alternate_bases().as_ref().iter().next() {
                  res.to_string()
              } else {
                  ".".to_string()

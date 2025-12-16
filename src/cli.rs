@@ -22,7 +22,6 @@ pub enum Sex {
 struct Cli {
     /// Input DTC genotype file (23andMe, LivingDNA, etc.)
     #[arg(value_name = "INPUT")]
-    #[arg(value_name = "INPUT")]
     input: PathBuf,
 
     /// Input file format (auto-detected if not specified)

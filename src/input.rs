@@ -1,7 +1,9 @@
 use std::io;
+use tracing;
 use noodles::vcf::variant::record_buf::{RecordBuf, AlternateBases, Samples, samples::Keys};
 use noodles::vcf::variant::record_buf::samples::sample::Value;
-use noodles::core::Position;
+// Position removed
+
 
 use crate::dtc::{self, Record as DtcRecord, Allele as DtcAllele};
 use crate::reference::ReferenceGenome;
@@ -48,18 +50,39 @@ impl<T: VariantSource + ?Sized> VariantSource for Box<T> {
 }
 
 /// Adapter for reading DTC (23andMe) files.
-pub struct DtcSource<R> {
-    reader: dtc::Reader<R>,
+/// Buffers and sorts raw records to ensure cache locality and minimize memory usage.
+pub struct DtcSource {
+    records: std::vec::IntoIter<DtcRecord>,
     reference: ReferenceGenome,
     config: ConversionConfig,
     header_keys: Keys, 
 }
 
-impl<R: std::io::BufRead> DtcSource<R> {
-    pub fn new(reader: dtc::Reader<R>, reference: ReferenceGenome, config: ConversionConfig) -> Self {
+impl DtcSource {
+    pub fn new<R: std::io::BufRead>(mut reader: dtc::Reader<R>, reference: ReferenceGenome, config: ConversionConfig) -> Self {
         let keys: Keys = vec![String::from("GT")].into_iter().collect();
+        
+        // Read all records aggressively
+        let mut raw_records = Vec::new();
+        while let Some(res) = reader.next() {
+            match res {
+                Ok(rec) => raw_records.push(rec),
+                Err(e) => {
+                    tracing::warn!("failed to read input line: {}", e);
+                    // Continue/Skip bad lines
+                }
+            }
+        }
+        
+        // Sort by chromosome index and position to optimize ReferenceGenome cache usage
+        // This is crucial for performance.
+        raw_records.sort_by_cached_key(|r| {
+             let idx = reference.contig_index(&r.chromosome).unwrap_or(usize::MAX);
+             (idx, r.position)
+        });
+
         Self {
-            reader,
+            records: raw_records.into_iter(),
             reference,
             config,
             header_keys: keys,
@@ -83,8 +106,12 @@ impl<R: std::io::BufRead> DtcSource<R> {
         // Use reference.base instead of get_context
         let reference_base = match self.reference.base(&canonical_name, position) {
             Ok(base) => base,
-            Err(_) => {
+            Err(e) => {
                 summary.reference_failures += 1;
+                tracing::warn!(
+                    "reference lookup failed for {}:{}: {}", 
+                    canonical_name, position, e
+                );
                 return Ok(None); 
             }
         };
@@ -92,8 +119,9 @@ impl<R: std::io::BufRead> DtcSource<R> {
         // Parse alleles
         let allele_states = match record.parse_alleles() {
             Ok(states) => states,
-            Err(_) => {
+            Err(e) => {
                 summary.invalid_genotypes += 1;
+                tracing::warn!("invalid alleles for {}:{}: {}", canonical_name, position, e);
                 return Ok(None);
             }
         };
@@ -166,49 +194,72 @@ impl<R: std::io::BufRead> DtcSource<R> {
         // Genotype string
         let genotype_string = format_genotype(&normalized_alleles, reference_base, &alt_bases)
              .map_err(|e| {
+                 // Do not increment summary here if we return Err, process_records will count it as parse_error?
+                 // But wait, user noted double counting.
+                 // If we return Err, process_records increments parse_errors. 
+                 // If we want to skip it as invalid_genotype, we should return Ok(None) and increment here.
                  summary.invalid_genotypes += 1;
                  io::Error::new(io::ErrorKind::InvalidData, e.to_string())
-             })?;
+             });
+
+        let genotype_string = match genotype_string {
+            Ok(s) => s,
+            Err(e) => {
+                 tracing::warn!("genotype formatting failed: {}", e);
+                 return Ok(None); // Skip, don't return Err to avoid double count
+            }
+        };
+             
+        // Build RecordBuf
+        // IDs
              
         // Build RecordBuf
         // IDs
         let ids = record.id.as_ref().map(|id| [id.clone()].into_iter().collect::<noodles::vcf::variant::record_buf::Ids>());
         
-        let samples_buf = Samples::new(
+        let samples = Samples::new(
             self.header_keys.clone(),
             vec![vec![Some(Value::String(genotype_string))]]
         );
         
-        let mut builder = RecordBuf::builder()
+        // INFO
+        let mut info_map: noodles::vcf::variant::record_buf::Info = Default::default();
+        
+        let has_del = alt_bases.iter().any(|b| b == "DEL");
+        let has_ins = alt_bases.iter().any(|b| b == "INS");
+        
+        if has_del || has_ins {
+             // IMPRECISE
+             info_map.insert(String::from("IMPRECISE"), Some(noodles::vcf::variant::record_buf::info::field::Value::Flag));
+             // SVTYPE
+             let svtype = if has_del && has_ins { "COMPLEX" } else if has_del { "DEL" } else { "INS" };
+             info_map.insert(String::from("SVTYPE"), Some(noodles::vcf::variant::record_buf::info::field::Value::String(svtype.into())));
+        }
+
+        Ok(Some(RecordBuf::builder()
             .set_reference_sequence_name(canonical_name)
-            .set_variant_start(Position::try_from(position as usize).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?)
+            .set_variant_start(noodles::core::Position::new(position as usize).ok_or(
+                 io::Error::new(io::ErrorKind::InvalidData, "invalid position")
+            )?)
+            .set_ids(ids.unwrap_or_default()) // Use unwrap_or_default if ids can be None
             .set_reference_bases(reference_base.to_string())
             .set_alternate_bases(alternate_bases)
-            .set_samples(samples_buf);
-            
-        if let Some(i) = ids {
-            builder = builder.set_ids(i);
-        }
-        
-        Ok(Some(builder.build()))
+            .set_info(info_map)
+            .set_samples(samples)
+            .build()))
     }
 }
 
-impl<R: std::io::BufRead> VariantSource for DtcSource<R> {
+impl VariantSource for DtcSource {
     fn next_variant(&mut self, summary: &mut crate::ConversionSummary) -> Option<io::Result<RecordBuf>> {
-        loop {
-            // Read next generic record
-            let record = match self.reader.next() {
-                Some(Ok(r)) => r,
-                Some(Err(e)) => return Some(Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string()))),
-                None => return None,
-            };
-            
+        // We iterate over the pre-sorted raw records
+        while let Some(record) = self.records.next() {
             match self.convert_record(record, summary) {
                 Ok(Some(buf)) => return Some(Ok(buf)),
-                Ok(None) => continue, // Filtered, try next
+                Ok(None) => continue, // Filtered
                 Err(e) => return Some(Err(e)),
             }
         }
+        None
     }
 }

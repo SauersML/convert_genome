@@ -33,7 +33,8 @@ use noodles::{
         },
     },
 };
-use rayon::prelude::*;
+// rayon removed
+
 use thiserror::Error;
 use time::{OffsetDateTime, macros::format_description};
 
@@ -224,7 +225,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
 fn process_records<S, W>(
     mut source: S,
-    reference: &ReferenceGenome,
+    _reference: &ReferenceGenome,
     writer: &mut W,
     header: &vcf::Header,
     _config: &ConversionConfig,
@@ -234,42 +235,22 @@ where
     S: crate::input::VariantSource,
     W: VariantWriter,
 {
-    let mut parsed_records = Vec::new();
-
     while let Some(result) = source.next_variant(summary) {
         match result {
             Ok(record) => {
                 summary.total_records += 1; 
-                parsed_records.push(record);
+                summary.record_emission(!record.alternate_bases().as_ref().is_empty()); 
+
+                writer.write_variant(header, &record)
+                    .context("failed to write variant record")?;
             }
             Err(e) => {
                 summary.parse_errors += 1;
+                // Log but continue (unless fatal?)
+                // If it's IO error from source, it might be fatal.
+                // But DtcSource returns io::ErrorKind::InvalidData for format errors.
                 tracing::warn!(error = %e, "failed to parse/convert input record");
             }
-        }
-    }
-
-    // Sort by contig index and position
-    parsed_records.par_sort_by(|a, b| {
-        let idx_a = reference.contig_index(a.reference_sequence_name()).unwrap_or(usize::MAX);
-        let idx_b = reference.contig_index(b.reference_sequence_name()).unwrap_or(usize::MAX);
-        match idx_a.cmp(&idx_b) {
-            std::cmp::Ordering::Equal => {
-                 let pos_a = a.variant_start().map(|p| usize::from(p)).unwrap_or(0);
-                 let pos_b = b.variant_start().map(|p| usize::from(p)).unwrap_or(0);
-                 pos_a.cmp(&pos_b)
-            },
-            other => other,
-        }
-    });
-
-    for record in parsed_records {
-        let has_alt = !record.alternate_bases().as_ref().is_empty();
-        summary.record_emission(has_alt); 
-
-        if let Err(e) = writer.write_variant(header, &record) {
-             tracing::error!("Failed to write record: {}", e);
-             // Continue? Or abort?
         }
     }
 
