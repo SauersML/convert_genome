@@ -82,7 +82,7 @@ where
 
                     // Check for header by sanitizing quotes first (handling "RSID" in CSVs)
                     let header_check = trimmed.trim_matches('"');
-                    if header_check.starts_with("rsid") || header_check.starts_with("RSID") || header_check.starts_with("loid") {
+                    if header_check.len() >= 4 && (header_check[..4].eq_ignore_ascii_case("rsid") || header_check[..4].eq_ignore_ascii_case("loid")) {
                          continue;
                     }
 
@@ -149,7 +149,7 @@ fn parse_record(line: &str) -> Result<Record, ParseErrorKind> {
         5 => {
             // AncestryDNA
             // ID, Chr, Pos, A1, A2
-            (0, 1, 2, format!("{}{}", fields[3], fields[4]))
+            (0, 1, 2, format!("{}/{}", fields[3], fields[4]))
         }
         6 => {
             // deCODEme
@@ -252,7 +252,7 @@ mod tests {
         // AncestryDNA style: ID, Chr, Pos, A1, A2
         let line = "rs123\t1\t100\tA\tG";
         let record = parse_record(line).unwrap();
-        assert_eq!(record.genotype, "AG");
+        assert_eq!(record.genotype, "A/G");
     }
 
     #[test]

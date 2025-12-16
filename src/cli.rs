@@ -10,6 +10,12 @@ use crate::{
     remote::{self, RemoteResource},
 };
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, clap::ValueEnum)]
+pub enum Sex {
+    Male,
+    Female,
+}
+
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Convert DTC genotype text files to VCF or BCF", long_about = None)]
 struct Cli {
@@ -48,6 +54,10 @@ struct Cli {
     /// Logging verbosity (e.g. error, warn, info, debug)
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Sex of the sample (required for correct X/Y ploidy)
+    #[arg(long, value_enum)]
+    sex: Sex,
 }
 
 pub fn run() -> Result<()> {
@@ -87,6 +97,8 @@ pub fn run() -> Result<()> {
         sample_id,
         assembly: cli.assembly.clone(),
         include_reference_sites: !cli.variants_only,
+        sex: cli.sex,
+        par_boundaries: crate::reference::ParBoundaries::new(&cli.assembly),
     };
 
     let summary = convert_dtc_file(config)?;

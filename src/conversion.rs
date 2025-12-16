@@ -1,10 +1,11 @@
 use std::{
-    collections::HashMap,
     fs,
     io::{self, BufReader},
     path::PathBuf,
     sync::Arc,
 };
+use crate::reference::ParBoundaries;
+use crate::cli::Sex;
 
 use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
@@ -19,7 +20,11 @@ use noodles::{
                 key,
                 value::{
                     Collection, Map,
-                    map::{AlternativeAllele, Contig, Format},
+                    map::{
+                        AlternativeAllele, Contig, Format,
+                        Info as InfoMap,
+                        info::{Number, Type},
+                    },
                 },
             },
         },
@@ -28,7 +33,8 @@ use noodles::{
             io::Write as VariantRecordWrite,
             record::samples::keys::key as format_key,
             record_buf::{
-                AlternateBases, Filters, Ids,
+                AlternateBases, Filters, Ids, Info,
+                info::field::Value as InfoFieldValue,
                 samples::{Keys, Samples, sample::Value as SampleValue},
             },
         },
@@ -66,6 +72,8 @@ pub struct ConversionConfig {
     pub sample_id: String,
     pub assembly: String,
     pub include_reference_sites: bool,
+    pub sex: Sex,
+    pub par_boundaries: Option<ParBoundaries>,
 }
 
 /// Statistics describing the results of a conversion run.
@@ -97,15 +105,11 @@ impl ConversionSummary {
 
 /// Represents an allele from DTC genotype data.
 /// DTC data can contain SNPs (A,C,G,T), deletions (D), insertions (I), or missing (-).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DtcAllele {
-    /// A standard nucleotide base (A, C, G, T, N).
-    Base(char),
-    /// A deletion event (the chip detected missing sequence).
+    Base(String),
     Deletion,
-    /// An insertion event (the chip detected extra sequence).
     Insertion,
-    /// No call / missing data.
     Missing,
 }
 
@@ -255,31 +259,15 @@ where
         }
     });
 
-    // Issue 3A & Memory Fix: Pre-fetch all reference bases single-threaded using (usize, u64) keys
-    // to avoid mutex contention and massive String allocation overhead (600k+ strings).
-    let prefetched_bases: HashMap<(usize, u64), char> = parsed_records
-        .iter()
-        .filter_map(|r| {
-            if let Some(idx) = reference.contig_index(&r.chromosome) {
-                reference
-                    .base(&r.chromosome, r.position)
-                    .ok()
-                    .map(|base| ((idx, r.position), base))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let prefetched = Arc::new(prefetched_bases);
     let shared_config = Arc::new(config.clone());
+    let shared_reference = Arc::new(reference.clone()); // Increase Arc count for closure
 
     let converted: Vec<_> = parsed_records
         .par_iter()
         .map(|record| {
             (
-                record,
-                convert_record_with_base(record, reference, shared_config.as_ref(), &prefetched),
+                record.clone(),
+                convert_record_with_base(record, &shared_reference, &shared_config),
             )
         })
         .collect();
@@ -339,7 +327,6 @@ fn convert_record_with_base(
     record: &DtcRecord,
     reference: &ReferenceGenome,
     config: &ConversionConfig,
-    prefetched: &HashMap<(usize, u64), char>,
 ) -> Result<Option<(RecordBuf, bool)>, RecordConversionError> {
     let chromosome = record.chromosome.as_str();
     let canonical_chrom = reference.resolve_contig_name(chromosome).ok_or_else(|| {
@@ -348,43 +335,57 @@ fn convert_record_with_base(
         }
     })?;
     let canonical_name = canonical_chrom.to_string();
+    
+    // Determine expected ploidy (Male X/Y, Female Y, PAR, etc)
+    let ploidy = determine_ploidy(&canonical_name, record.position, config.sex, config.par_boundaries.as_ref());
 
-    // Use pre-fetched base to avoid mutex contention (Issue 3A fix).
-    // The key is (contig_index, position) for efficiency (Issue 4C/Memory Fix).
-    let contig_idx = reference.contig_index(chromosome).ok_or_else(|| {
-        RecordConversionError::UnknownContig {
-            chromosome: record.chromosome.clone(),
-        }
-    })?;
-
-    let reference_base = prefetched
-        .get(&(contig_idx, record.position))
-        .copied()
-        .ok_or_else(|| RecordConversionError::Reference {
+    let reference_base = reference
+        .base(chromosome, record.position)
+        .map_err(|e| RecordConversionError::Reference {
             chromosome: record.chromosome.clone(),
             position: record.position,
-            source: ReferenceError::UnknownContig {
-                // If it wasn't in prefetch but we have an index, likely position out of bounds or something odd
-                // but technically we map it to UnknownContig or similar here for simplicity as per original error type
-                query: record.chromosome.clone(),
-            },
+            source: e,
         })?;
 
-    let allele_states = parse_genotype(&record.genotype);
-    if allele_states.is_empty() || allele_states.iter().all(|a| matches!(a, DtcAllele::Missing)) {
+    let raw_alleles = parse_genotype(&record.genotype);
+    if raw_alleles.is_empty() || raw_alleles.iter().all(|a| matches!(a, DtcAllele::Missing)) {
         return Err(RecordConversionError::MissingGenotype {
             chromosome: record.chromosome.clone(),
             position: record.position,
         });
     }
 
+    // Normalize Alleles based on Ploidy
+    let allele_states = match ploidy {
+        Ploidy::Zero => {
+            // Female Y should be empty/missing
+             return Err(RecordConversionError::MissingGenotype {
+                 chromosome: record.chromosome.clone(),
+                 position: record.position,
+             });
+        }
+        Ploidy::Haploid => {
+            // Collapse "AA" -> "A"
+            let unique: Vec<_> = raw_alleles.iter().filter(|a| !matches!(a, DtcAllele::Missing)).collect();
+            if unique.is_empty() {
+                vec![DtcAllele::Missing]
+            } else if unique.len() == 1 || (unique.len() == 2 && unique[0] == unique[1]) {
+                vec![unique[0].clone()]
+            } else {
+                // Heterozygous on haploid? Treat as missing.
+                vec![DtcAllele::Missing]
+            }
+        }
+        Ploidy::Diploid => raw_alleles,
+    };
+
     let mut alt_bases = Vec::new();
     for allele in allele_states.iter() {
         match allele {
             DtcAllele::Base(base) => {
-                let base_char = base.to_ascii_uppercase();
-                let base_str = base_char.to_string();
-                 if base_char != reference_base && !alt_bases.contains(&base_str) {
+                let base_str = base.to_uppercase();
+                let ref_str = reference_base.to_string().to_uppercase();
+                if base_str != ref_str && !alt_bases.contains(&base_str) {
                     alt_bases.push(base_str);
                 }
             }
@@ -394,7 +395,7 @@ fn convert_record_with_base(
                     alt_bases.push(del_str);
                 }
             }
-             DtcAllele::Insertion => {
+            DtcAllele::Insertion => {
                 let ins_str = String::from("INS");
                 if !alt_bases.contains(&ins_str) {
                     alt_bases.push(ins_str);
@@ -470,6 +471,29 @@ fn convert_record_with_base(
         builder = builder.set_filters(Filters::pass());
     }
 
+    // Issue: Add IMPRECISE and SVTYPE for symbolic alleles
+    let has_del = alt_bases.contains(&"DEL".to_string());
+    let has_ins = alt_bases.contains(&"INS".to_string());
+    
+    if has_del || has_ins {
+        let mut info_map = Info::default();
+        info_map.insert("IMPRECISE".into(), Some(InfoFieldValue::Flag));
+        
+        let svtype = if has_del && has_ins {
+            None // Mixed types, just mark IMPRECISE
+        } else if has_del {
+            Some("DEL")
+        } else {
+            Some("INS")
+        };
+        
+        if let Some(t) = svtype {
+            info_map.insert("SVTYPE".into(), Some(InfoFieldValue::String(t.into())));
+        }
+        
+        builder = builder.set_info(info_map);
+    }
+    
     let genotype_value = genotype_string
         .parse::<variant::record_buf::samples::sample::value::Genotype>()
         .map(SampleValue::from)
@@ -491,23 +515,29 @@ fn convert_record_with_base(
 /// Handles SNPs (A,C,G,T), Deletions (D), Insertions (I), and Missing (-).
 fn parse_genotype(raw: &str) -> Vec<DtcAllele> {
     let trimmed = raw.trim();
-    
-    // Check for multi-character alleles which might indicate an insertion/indel description
-    // that isn't just "I" or "D", but since DTC formats vary, we stick to the basic chars first.
-    // If we see "AG", that's usually two calls A and G.
-    // If we see "D", that's deletion.
-    
-    // For now, assume standard DTC logic: one char = one allele.
-    trimmed
-        .chars()
-        .map(|c| match c.to_ascii_uppercase() {
-            'A' | 'C' | 'G' | 'T' | 'N' => DtcAllele::Base(c.to_ascii_uppercase()),
-            'D' => DtcAllele::Deletion,
-            'I' => DtcAllele::Insertion,
-            '-' => DtcAllele::Missing,
-            _ => DtcAllele::Missing, // Treat garbage as missing
-        })
-        .collect()
+
+    if trimmed.contains('/') {
+        trimmed
+            .split('/')
+            .map(|s| match s.trim() {
+                "D" => DtcAllele::Deletion,
+                "I" => DtcAllele::Insertion,
+                "-" | "0" | "?" => DtcAllele::Missing,
+                val => DtcAllele::Base(val.to_string()),
+            })
+            .collect()
+    } else {
+        trimmed
+            .chars()
+            .map(|c| match c.to_ascii_uppercase() {
+                'A' | 'C' | 'G' | 'T' | 'N' => DtcAllele::Base(c.to_string()),
+                'D' => DtcAllele::Deletion,
+                'I' => DtcAllele::Insertion,
+                '-' | '0' | '?' => DtcAllele::Missing,
+                _ => DtcAllele::Missing, // Treat garbage as missing
+            })
+            .collect()
+    }
 }
 
 fn format_genotype(
@@ -524,14 +554,14 @@ fn format_genotype(
         .map(|allele| match allele {
             DtcAllele::Missing => Ok(String::from(".")),
             DtcAllele::Base(base) => {
-                if *base == reference_base {
+                if base == &reference_base.to_string() {
                     Ok(String::from("0"))
                 } else if let Some((index, _)) =
-                    alt_bases.iter().enumerate().find(|(_, alt)| *alt == &base.to_string())
+                    alt_bases.iter().enumerate().find(|(_, alt)| *alt == base)
                 {
                     Ok((index + 1).to_string())
                 } else {
-                    Err(base.to_string())
+                    Err(base.clone())
                 }
             }
             DtcAllele::Deletion => {
@@ -562,6 +592,46 @@ fn format_genotype(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Ploidy {
+    Haploid,
+    Diploid,
+    Zero,
+}
+
+fn determine_ploidy(
+    chrom: &str,
+    pos: u64,
+    sex: Sex,
+    boundaries: Option<&ParBoundaries>,
+) -> Ploidy {
+    let chrom_upper = chrom.to_ascii_uppercase();
+    let short_chrom = chrom_upper.strip_prefix("CHR").unwrap_or(&chrom_upper);
+
+    if short_chrom == "MT" || short_chrom == "M" {
+        return Ploidy::Haploid;
+    }
+
+    match (short_chrom, sex) {
+        (c, _) if c != "X" && c != "Y" => Ploidy::Diploid,
+        ("X", Sex::Female) => Ploidy::Diploid,
+        ("Y", Sex::Female) => Ploidy::Zero,
+        ("Y", Sex::Male) => Ploidy::Haploid,
+        ("X", Sex::Male) => {
+             if let Some(b) = boundaries {
+                if b.is_par(pos) {
+                    Ploidy::Diploid
+                } else {
+                    Ploidy::Haploid
+                }
+            } else {
+                Ploidy::Haploid
+            }
+        }
+        _ => Ploidy::Diploid,
+    }
+}
+
 #[doc(hidden)]
 pub fn format_genotype_for_tests(
     alleles: &[DtcAllele],
@@ -585,7 +655,19 @@ fn build_header(config: &ConversionConfig, reference: &ReferenceGenome) -> Resul
     // Add symbolic alleles for Indels as per VCF spec
     builder = builder
         .add_alternative_allele("DEL", Map::<AlternativeAllele>::new("Deletion"))
-        .add_alternative_allele("INS", Map::<AlternativeAllele>::new("Insertion"));
+        .add_alternative_allele("INS", Map::<AlternativeAllele>::new("Insertion"))
+        .add_info(
+            "IMPRECISE",
+            Map::<InfoMap>::new(Number::Count(0), Type::Flag, "Imprecise structural variation"),
+        )
+        .add_info(
+            "SVTYPE",
+            Map::<InfoMap>::new(
+                Number::Count(1),
+                Type::String,
+                "Type of structural variation",
+            ),
+        );
 
     for contig in reference.contigs() {
         let mut contig_map = Map::<Contig>::new();
@@ -648,11 +730,15 @@ mod tests {
     fn genotype_parsing() {
         assert_eq!(
             parse_genotype("AA"),
-            vec![DtcAllele::Base('A'), DtcAllele::Base('A')]
+            vec![DtcAllele::Base("A".to_string()), DtcAllele::Base("A".to_string())]
         );
         assert_eq!(
             parse_genotype("A-"),
-            vec![DtcAllele::Base('A'), DtcAllele::Missing]
+            vec![DtcAllele::Base("A".to_string()), DtcAllele::Missing]
+        );
+        assert_eq!(
+             parse_genotype("A/AG"),
+             vec![DtcAllele::Base("A".to_string()), DtcAllele::Base("AG".to_string())]
         );
         assert_eq!(
             parse_genotype("--"),
@@ -662,13 +748,21 @@ mod tests {
             parse_genotype("DI"),
             vec![DtcAllele::Deletion, DtcAllele::Insertion]
         );
+        assert_eq!(
+            parse_genotype("00"),
+            vec![DtcAllele::Missing, DtcAllele::Missing]
+        );
+        assert_eq!(
+            parse_genotype("??"),
+            vec![DtcAllele::Missing, DtcAllele::Missing]
+        );
     }
 
     #[test]
     fn format_genotype_strings() {
         assert_eq!(
             format_genotype(
-                &[DtcAllele::Base('A'), DtcAllele::Base('C')],
+                &[DtcAllele::Base("A".to_string()), DtcAllele::Base("C".to_string())],
                 'A',
                 &[String::from("C")]
             )
@@ -677,7 +771,7 @@ mod tests {
         );
         assert_eq!(
             format_genotype(
-                &[DtcAllele::Base('T'), DtcAllele::Base('T')],
+                &[DtcAllele::Base("T".to_string()), DtcAllele::Base("T".to_string())],
                 'A',
                 &[String::from("T")]
             )
@@ -693,7 +787,7 @@ mod tests {
         );
         assert_eq!(
             format_genotype(
-                &[DtcAllele::Base('G'), DtcAllele::Deletion],
+                &[DtcAllele::Base("G".to_string()), DtcAllele::Deletion],
                 'G',
                 &[String::from("DEL")]
             )
@@ -726,6 +820,8 @@ mod tests {
             sample_id: "SAMPLE".to_string(),
             assembly: "GRCh38".to_string(),
             include_reference_sites: true,
+            sex: Sex::Female,
+            par_boundaries: None,
         };
         
         let header = build_header(&config, &reference).unwrap();
@@ -759,6 +855,8 @@ mod tests {
             sample_id: String::from("sample"),
             assembly: String::from("GRCh38"),
             include_reference_sites: true,
+            sex: Sex::Female,
+            par_boundaries: None,
         };
 
         let header = build_header(&config, &reference).unwrap();

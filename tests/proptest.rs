@@ -41,14 +41,14 @@ proptest! {
     ) {
         let parsed: Vec<DtcAllele> = alleles
             .iter()
-            .map(|&c| if c == '-' { DtcAllele::Missing } else { DtcAllele::Base(c) })
+            .map(|&c| if c == '-' { DtcAllele::Missing } else { DtcAllele::Base(c.to_string()) })
             .collect();
 
         let mut alts = Vec::new();
         for allele in parsed.iter() {
-            if let DtcAllele::Base(c) = allele {
-                if *c != reference_base {
-                    let s = c.to_string();
+            if let DtcAllele::Base(s) = allele {
+                if s != &reference_base.to_string() {
+                    let s = s.clone();
                     if !alts.contains(&s) {
                         alts.push(s);
                     }
@@ -72,7 +72,7 @@ proptest! {
         invalid in prop::sample::select(vec!['X', 'Y', 'Z']),
     ) {
         // We manually construct an invalid Base allele to test error handling
-        let alleles = vec![DtcAllele::Base(invalid)];
+        let alleles = vec![DtcAllele::Base(invalid.to_string())];
         // The invalid base is not in REF and not in ALT (empty), so it should error
         let result = format_genotype_for_tests(&alleles, reference_base, &[]);
         prop_assert!(result.is_err());

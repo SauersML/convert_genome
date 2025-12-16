@@ -220,6 +220,31 @@ fn build_alias_map(contigs: &[ReferenceContig]) -> HashMap<String, usize> {
     map
 }
 
+#[derive(Debug, Clone)]
+pub struct ParBoundaries {
+    pub par1_end: u64,
+    pub par2_start: u64,
+}
+
+impl ParBoundaries {
+    pub fn new(assembly: &str) -> Option<Self> {
+        let asm = assembly.to_uppercase();
+        if asm.contains("38") {
+            // GRCh38 coordinates
+            Some(Self { par1_end: 2_781_479, par2_start: 155_701_383 })
+        } else if asm.contains("37") || asm.contains("19") {
+            // GRCh37 coordinates
+            Some(Self { par1_end: 2_699_520, par2_start: 154_931_044 })
+        } else {
+            None
+        }
+    }
+
+    pub fn is_par(&self, pos: u64) -> bool {
+        pos <= self.par1_end || pos >= self.par2_start
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
