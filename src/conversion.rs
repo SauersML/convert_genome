@@ -147,10 +147,10 @@ fn prescan_dtc_records(input: &PathBuf) -> Result<Vec<dtc::Record>> {
     let mut records_read = 0;
 
     for res in dtc_reader {
-        if let Some(limit) = max_records {
-            if records_read >= limit {
-                break;
-            }
+        if let Some(limit) = max_records
+            && records_read >= limit
+        {
+            break;
         }
         if let Ok(rec) = res {
             records.push(rec);
