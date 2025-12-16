@@ -25,6 +25,13 @@ pub struct RunReport {
     pub output: OutputInfo,
     pub reference: ReferenceInfo,
 
+    /// Whether allele standardization was enabled
+    pub standardize: bool,
+
+    /// Reference panel if used
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub panel: Option<PanelInfo>,
+
     /// Inferred or provided sample metadata
     pub sample: SampleInfo,
 
@@ -54,6 +61,14 @@ pub struct ReferenceInfo {
     pub path: String,
     pub origin: String,
     pub assembly: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PanelInfo {
+    pub path: String,
+    pub total_sites: usize,
+    pub modified_sites: usize,
+    pub novel_sites: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,6 +150,8 @@ pub struct RunReportBuilder {
     pub reference_path: String,
     pub reference_origin: String,
     pub assembly: String,
+    pub standardize: bool,
+    pub panel: Option<PanelInfo>,
     pub sample_id: String,
     pub sex: Option<Sex>,
     pub sex_inferred: bool,
@@ -169,6 +186,8 @@ impl RunReportBuilder {
                 origin: self.reference_origin,
                 assembly: self.assembly,
             },
+            standardize: self.standardize,
+            panel: self.panel,
             sample: SampleInfo {
                 id: self.sample_id,
                 sex: sex_name(self.sex),

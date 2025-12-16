@@ -356,6 +356,11 @@ impl PaddedPanel {
         self.novel_sites.len()
     }
 
+    /// Get total number of sites (original + novel).
+    pub fn total_site_count(&self) -> usize {
+        self.original.len() + self.novel_sites.len()
+    }
+
     /// Get reference to original panel.
     pub fn original(&self) -> &PanelIndex {
         &self.original

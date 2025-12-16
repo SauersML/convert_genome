@@ -365,6 +365,20 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     }
 
     // Build and write the run report
+    let panel_info = padded_panel.as_ref().map(|p| {
+        let panel = p.borrow();
+        crate::report::PanelInfo {
+            path: config
+                .panel
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            total_sites: panel.total_site_count(),
+            modified_sites: panel.modified_site_count(),
+            novel_sites: panel.novel_site_count(),
+        }
+    });
+
     let report_builder = crate::report::RunReportBuilder {
         input_path: config.input.display().to_string(),
         input_format: Some(config.input_format),
@@ -374,6 +388,8 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         reference_path: config.reference_fasta.display().to_string(),
         reference_origin: config.reference_origin.clone(),
         assembly: config.assembly.clone(),
+        standardize: config.standardize,
+        panel: panel_info,
         sample_id: config.sample_id.clone(),
         sex: config.sex,
         sex_inferred,
