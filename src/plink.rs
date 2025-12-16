@@ -216,9 +216,9 @@ impl PlinkWriter {
 
 /// Helper to parse GT string into two indices.
 /// Returns (Option<usize>, Option<usize>). None means missing ('.').
-fn parse_gt_indices(gt: &str) -> (Option<usize>, Option<usize>) {
+pub fn parse_gt_indices(gt: &str) -> (Option<usize>, Option<usize>) {
     // Split by '/' or '|'
-    let alleles: Vec<&str> = gt.split(|c| c == '/' || c == '|').collect();
+    let alleles: Vec<&str> = gt.split(['/', '|']).collect();
 
     // Handle haploid (1 allele) or diploid (2 alleles)
     match alleles.len() {

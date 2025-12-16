@@ -53,16 +53,31 @@ pub fn parse_genotype(raw: &str) -> Vec<Allele> {
             })
             .collect()
     } else {
-        trimmed
-            .chars()
-            .map(|c| match c.to_ascii_uppercase() {
-                'A' | 'C' | 'G' | 'T' | 'N' => Allele::Base(c.to_string()),
-                'D' => Allele::Deletion,
-                'I' => Allele::Insertion,
-                '-' | '0' | '?' => Allele::Missing,
-                _ => Allele::Missing, // Treat garbage as missing
-            })
-            .collect()
+        // No separator. 
+        // Heuristic: If string is > 1 char and contains ONLY ACGTN, treat as single Indel allele.
+        // If it contains I, D, -, or is 2 chars like "AG" (diploid SNV), check against standard known calls.
+        
+        let upper = trimmed.to_ascii_uppercase();
+        let is_all_bases = upper.chars().all(|c| matches!(c, 'A'|'C'|'G'|'T'|'N'));
+        
+        // Treat as single string (Insertion/Indel) only if length > 2
+        // Length 2 (e.g. "AA", "AG") is typically a diploid call.
+        // Length 3+ (e.g. "ACT") cannot be diploid (triploid?), so it must be an insertion sequence.
+        if upper.len() > 2 && is_all_bases {
+             vec![Allele::Base(upper)]
+        } else {
+            // Standard splitting (e.g. "AG" -> A, G; "II" -> I, I)
+            trimmed
+                .chars()
+                .map(|c| match c.to_ascii_uppercase() {
+                    'A' | 'C' | 'G' | 'T' | 'N' => Allele::Base(c.to_string()),
+                    'D' => Allele::Deletion,
+                    'I' => Allele::Insertion,
+                    '-' | '0' | '?' => Allele::Missing,
+                    _ => Allele::Missing, // Treat garbage as missing
+                })
+                .collect()
+        }
     }
 }
 
