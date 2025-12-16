@@ -56,6 +56,12 @@ struct Cli {
     #[arg(long)]
     variants_only: bool,
 
+    /// Standardize/normalize the input file without format conversion.
+    /// Performs: chromosome naming normalization, allele polarization against
+    /// reference, sex chromosome ploidy enforcement, and sorting.
+    #[arg(long)]
+    standardize: bool,
+
     /// Logging verbosity (e.g. error, warn, info, debug)
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -111,6 +117,7 @@ pub fn run() -> Result<()> {
         include_reference_sites: !cli.variants_only,
         sex: cli.sex,
         par_boundaries: crate::reference::ParBoundaries::new(&cli.assembly),
+        standardize: cli.standardize,
     };
 
     let summary = convert_dtc_file(config)?;

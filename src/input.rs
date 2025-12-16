@@ -280,3 +280,124 @@ impl VariantSource for DtcSource {
         None
     }
 }
+
+// ============================================================================
+// VCF Source Adapter
+// ============================================================================
+
+use noodles::vcf;
+use std::io::BufRead;
+
+/// Adapter for reading VCF files.
+/// Buffers and sorts records by contig index and position.
+pub struct VcfSource {
+    records: std::vec::IntoIter<RecordBuf>,
+    initial_parse_errors: usize,
+    initial_stats_synced: bool,
+}
+
+impl VcfSource {
+    pub fn new<R: BufRead>(mut reader: vcf::io::Reader<R>, reference: &ReferenceGenome) -> io::Result<Self> {
+        let header = reader.read_header()?;
+        
+        let mut raw_records = Vec::new();
+        let mut parse_errors = 0;
+        
+        for result in reader.record_bufs(&header) {
+            match result {
+                Ok(record) => raw_records.push(record),
+                Err(e) => {
+                    parse_errors += 1;
+                    tracing::warn!("failed to read VCF record: {}", e);
+                }
+            }
+        }
+        
+        // Sort by contig index and position
+        raw_records.sort_by_cached_key(|r| {
+            let idx = reference.contig_index(r.reference_sequence_name()).unwrap_or(usize::MAX);
+            let pos = r.variant_start().map(|p| usize::from(p)).unwrap_or(0);
+            (idx, pos)
+        });
+        
+        Ok(Self {
+            records: raw_records.into_iter(),
+            initial_parse_errors: parse_errors,
+            initial_stats_synced: false,
+        })
+    }
+}
+
+impl VariantSource for VcfSource {
+    fn next_variant(&mut self, summary: &mut crate::ConversionSummary) -> Option<io::Result<RecordBuf>> {
+        if !self.initial_stats_synced {
+            summary.parse_errors += self.initial_parse_errors;
+            self.initial_stats_synced = true;
+        }
+        
+        self.records.next().map(|record| {
+            summary.total_records += 1;
+            Ok(record)
+        })
+    }
+}
+
+// ============================================================================
+// BCF Source Adapter
+// ============================================================================
+
+use noodles::bcf;
+
+/// Adapter for reading BCF files.
+/// Buffers and sorts records by contig index and position.
+pub struct BcfSource {
+    records: std::vec::IntoIter<RecordBuf>,
+    initial_parse_errors: usize,
+    initial_stats_synced: bool,
+}
+
+impl BcfSource {
+    pub fn new<R: std::io::Read>(mut reader: bcf::io::Reader<R>, reference: &ReferenceGenome) -> io::Result<Self> {
+        let header = reader.read_header()?;
+        
+        let mut raw_records = Vec::new();
+        let mut parse_errors = 0;
+        
+        for result in reader.record_bufs(&header) {
+            match result {
+                Ok(record) => raw_records.push(record),
+                Err(e) => {
+                    parse_errors += 1;
+                    tracing::warn!("failed to read BCF record: {}", e);
+                }
+            }
+        }
+        
+        // Sort by contig index and position
+        raw_records.sort_by_cached_key(|r| {
+            let idx = reference.contig_index(r.reference_sequence_name()).unwrap_or(usize::MAX);
+            let pos = r.variant_start().map(|p| usize::from(p)).unwrap_or(0);
+            (idx, pos)
+        });
+        
+        Ok(Self {
+            records: raw_records.into_iter(),
+            initial_parse_errors: parse_errors,
+            initial_stats_synced: false,
+        })
+    }
+}
+
+impl VariantSource for BcfSource {
+    fn next_variant(&mut self, summary: &mut crate::ConversionSummary) -> Option<io::Result<RecordBuf>> {
+        if !self.initial_stats_synced {
+            summary.parse_errors += self.initial_parse_errors;
+            self.initial_stats_synced = true;
+        }
+        
+        self.records.next().map(|record| {
+            summary.total_records += 1;
+            Ok(record)
+        })
+    }
+}
