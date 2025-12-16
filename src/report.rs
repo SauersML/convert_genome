@@ -130,7 +130,7 @@ impl RunReport {
         let report_path = output_path.with_file_name(report_name);
 
         let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         std::fs::write(&report_path, json)?;
         tracing::info!("Wrote run report to {}", report_path.display());
