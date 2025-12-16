@@ -299,7 +299,7 @@ where
             Ok(record) => {
                 // Apply standardization if requested
                 let mut final_record = if config.standardize {
-                    match standardize_record(&record, &reference, config) {
+                    match standardize_record(&record, reference, config) {
                         Ok(Some(standardized)) => standardized,
                         Ok(None) => continue, // Filtered out
                         Err(e) => {
@@ -336,11 +336,9 @@ where
 
                     let samples = final_record.samples();
                     // Assume single sample for conversion tool
-                    if let Some(sample) = samples.values().next() {
-                        if let Some(Some(Value::String(gt_str))) = sample.get(format_key::GENOTYPE)
-                        {
-                            // Parse GT
-                            let indices = crate::plink::parse_gt_indices(gt_str);
+                    if let Some(Some(Value::String(gt_str))) = samples.values().next().and_then(|sample| sample.get(format_key::GENOTYPE)) {
+                             // Parse GT
+                             let indices = crate::plink::parse_gt_indices(gt_str);
                             let get_allele = |idx: Option<usize>| -> String {
                                 match idx {
                                     Some(0) => record_ref.clone(),
@@ -361,7 +359,6 @@ where
                                 user_bases.push(get_allele(indices.0));
                             }
                         }
-                    }
 
                     // Only harmonize if we have valid bases
                     if !user_bases.is_empty() && !user_bases.contains(&".".to_string()) {
@@ -464,7 +461,7 @@ where
                                         for (key, value) in
                                             samples.keys().as_ref().iter().zip(sample.values())
                                         {
-                                            if key == &format_key::GENOTYPE {
+                                            if key == format_key::GENOTYPE {
                                                 values
                                                     .push(Some(Value::String(new_gt_str.clone())));
                                             } else {
@@ -793,9 +790,7 @@ fn flip_sample_genotypes(
     let mut new_keys_vec = Vec::new();
     // Filter keys: keep GT and safe fields (GQ, DP, MIN_DP), drop allele-dependent fields (PL, AD, GP)
     for key in keys.as_ref().iter() {
-        if key == format_key::GENOTYPE {
-            new_keys_vec.push(key.clone());
-        } else if key == "GQ" || key == "DP" || key == "MIN_DP" {
+        if key == format_key::GENOTYPE || key == "GQ" || key == "DP" || key == "MIN_DP" {
             new_keys_vec.push(key.clone());
         } else {
             tracing::debug!("Dropping field {} during polarization", key);
@@ -816,7 +811,7 @@ fn flip_sample_genotypes(
         for key in new_keys.as_ref().iter() {
             let val_opt = sample.get(key).flatten().cloned();
 
-            if key == &format_key::GENOTYPE {
+            if key == format_key::GENOTYPE {
                 if let Some(Value::String(gt_str)) = &val_opt {
                     new_sample_vals.push(Some(Value::String(flip_gt_string(gt_str))));
                 } else {
