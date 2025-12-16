@@ -46,12 +46,12 @@ proptest! {
 
         let mut alts = Vec::new();
         for allele in parsed.iter() {
-            if let DtcAllele::Base(s) = allele {
-                if s != &reference_base.to_string() {
-                    let s = s.clone();
-                    if !alts.contains(&s) {
-                        alts.push(s);
-                    }
+            if let DtcAllele::Base(s) = allele
+                && s != &reference_base.to_string()
+            {
+                let s = s.clone();
+                if !alts.contains(&s) {
+                    alts.push(s);
                 }
             }
         }

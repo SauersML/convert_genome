@@ -24,10 +24,7 @@ impl PlinkWriter {
     pub fn new<P: AsRef<Path>>(prefix: P) -> io::Result<Self> {
         let prefix = prefix.as_ref();
         // Strip extension if provided (simple handling)
-        let stem = if prefix
-            .extension()
-            .map_or(false, |e| e == "vcf" || e == "bcf")
-        {
+        let stem = if prefix.extension().is_some_and(|e| e == "vcf" || e == "bcf") {
             prefix.with_extension("")
         } else {
             prefix.to_path_buf()
@@ -75,7 +72,7 @@ impl PlinkWriter {
         // Enforce Biallelic: Ref + 1 Alt
         if record.alternate_bases().len() > 1 {
             // RecordBuf usually uses variant_start() or alignment_start().
-            let pos = record.variant_start().map(|p| usize::from(p)).unwrap_or(0);
+            let pos = record.variant_start().map(usize::from).unwrap_or(0);
             tracing::warn!(
                 "Skipping multiallelic site at {}:{}",
                 record.reference_sequence_name(),
@@ -101,19 +98,17 @@ impl PlinkWriter {
         };
 
         // Pos
-        let pos = record.variant_start().map(|p| usize::from(p)).unwrap_or(0);
+        let pos = record.variant_start().map(usize::from).unwrap_or(0);
 
         let ref_base = record.reference_bases();
 
         // alternate_bases
         let alt_base_str = if record.alternate_bases().is_empty() {
             ".".to_string()
+        } else if let Some(res) = record.alternate_bases().as_ref().iter().next() {
+            res.to_string()
         } else {
-            if let Some(res) = record.alternate_bases().as_ref().iter().next() {
-                res.to_string()
-            } else {
-                ".".to_string()
-            }
+            ".".to_string()
         };
 
         // Write to BIM

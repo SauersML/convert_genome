@@ -84,7 +84,7 @@ pub struct DtcSource {
 
 impl DtcSource {
     pub fn new<R: std::io::BufRead>(
-        mut reader: dtc::Reader<R>,
+        reader: dtc::Reader<R>,
         reference: ReferenceGenome,
         config: ConversionConfig,
     ) -> Self {
@@ -93,7 +93,7 @@ impl DtcSource {
         // Read all records aggressively
         let mut raw_records = Vec::new();
         let mut parse_errors = 0;
-        while let Some(res) = reader.next() {
+        for res in reader {
             match res {
                 Ok(rec) => raw_records.push(rec),
                 Err(e) => {
@@ -387,7 +387,7 @@ impl VcfSource {
             let idx = reference
                 .contig_index(r.reference_sequence_name())
                 .unwrap_or(usize::MAX);
-            let pos = r.variant_start().map(|p| usize::from(p)).unwrap_or(0);
+            let pos = r.variant_start().map(usize::from).unwrap_or(0);
             (idx, pos)
         });
 
@@ -455,7 +455,7 @@ impl BcfSource {
             let idx = reference
                 .contig_index(r.reference_sequence_name())
                 .unwrap_or(usize::MAX);
-            let pos = r.variant_start().map(|p| usize::from(p)).unwrap_or(0);
+            let pos = r.variant_start().map(usize::from).unwrap_or(0);
             (idx, pos)
         });
 

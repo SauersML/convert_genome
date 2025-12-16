@@ -570,14 +570,14 @@ fn flip_sample_genotypes(
             if let Some(Value::String(gt_str)) = gt_val {
                 // Replace the GT value with flipped version
                 if !new_sample_vals.is_empty() {
-                    new_sample_vals[0] = Some(Value::String(flip_gt_string(&gt_str)));
+                    new_sample_vals[0] = Some(Value::String(flip_gt_string(gt_str)));
                 }
             }
 
             new_values.push(new_sample_vals);
         } else {
             // No GT field, keep sample as-is
-            new_values.push(sample.values().iter().map(|v| v.clone()).collect());
+            new_values.push(sample.values().to_vec());
         }
     }
 

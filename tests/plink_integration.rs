@@ -1,11 +1,9 @@
-use convert_genome::cli::Sex;
 use convert_genome::plink::PlinkWriter;
 use noodles::core::Position;
 use noodles::vcf::variant::record_buf::{
     AlternateBases, Ids, RecordBuf, Samples, samples::Keys, samples::sample::Value,
 };
 use std::fs;
-use std::path::Path;
 use tempfile::tempdir;
 
 #[test]
