@@ -171,7 +171,7 @@ mod tests {
         // "A" matches Ref. "T" matches Comp(Ref).
         // Ambiguous. Priority: Fwd match ("A") -> No Flip.
         let res = harmonize_genotype(
-            &vec!["A".to_string(), "T".to_string()],
+            &["A".to_string(), "T".to_string()],
             "A",
             chrom,
             pos,
@@ -224,7 +224,7 @@ mod tests {
         // A is Ref (0). G is novel (1).
         // Expect (0, 1).
         let res = harmonize_genotype(
-            &vec!["T".to_string(), "C".to_string()],
+            &["T".to_string(), "C".to_string()],
             "A",
             chrom,
             pos,
