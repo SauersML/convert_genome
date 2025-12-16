@@ -1,0 +1,29 @@
+[package]
+name = "convert_genome-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.convert_genome]
+path = ".."
+
+[[bin]]
+name = "fuzz_dtc_reader"
+path = "fuzz_targets/fuzz_dtc_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_genotype"
+path = "fuzz_targets/fuzz_parse_genotype.rs"
+test = false
+doc = false
+bench = false

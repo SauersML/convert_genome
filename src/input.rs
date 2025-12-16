@@ -2,12 +2,19 @@ use noodles::vcf::variant::record_buf::samples::sample::Value;
 use noodles::vcf::variant::record_buf::{AlternateBases, RecordBuf, Samples, samples::Keys};
 use std::io;
 use tracing;
-// Position removed
 
 use crate::conversion::{ConversionConfig, Ploidy, determine_ploidy, format_genotype};
 use crate::dtc::{self, Allele as DtcAllele, Record as DtcRecord};
 use crate::reference::ReferenceGenome;
 use clap::ValueEnum;
+
+/// Get optional max records limit from environment variable.
+/// Set `CONVERT_GENOME_MAX_RECORDS=N` to limit buffered records (for OOM protection).
+fn get_max_records_limit() -> Option<usize> {
+    std::env::var("CONVERT_GENOME_MAX_RECORDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum InputFormat {
@@ -94,22 +101,34 @@ impl DtcSource {
     ) -> Self {
         let keys: Keys = vec![String::from("GT")].into_iter().collect();
 
-        // Read all records aggressively
+        // Get optional limit from environment
+        let max_records = get_max_records_limit();
+
+        // Read records (with optional limit for OOM protection)
         let mut raw_records = Vec::new();
         let mut parse_errors = 0;
+        let mut records_read = 0;
+
         for res in reader {
+            if let Some(limit) = max_records {
+                if records_read >= limit {
+                    tracing::info!(limit, "reached max_records limit, stopping read");
+                    break;
+                }
+            }
             match res {
-                Ok(rec) => raw_records.push(rec),
+                Ok(rec) => {
+                    raw_records.push(rec);
+                    records_read += 1;
+                }
                 Err(e) => {
                     parse_errors += 1;
                     tracing::warn!("failed to read input line: {}", e);
-                    // Continue/Skip bad lines
                 }
             }
         }
 
         // Sort by chromosome index and position to optimize ReferenceGenome cache usage
-        // This is crucial for performance.
         raw_records.sort_by_cached_key(|r| {
             let idx = reference.contig_index(&r.chromosome).unwrap_or(usize::MAX);
             (idx, r.position)
@@ -373,12 +392,25 @@ impl VcfSource {
     ) -> io::Result<Self> {
         let header = reader.read_header()?;
 
+        // Get optional limit from environment
+        let max_records = get_max_records_limit();
+
         let mut raw_records = Vec::new();
         let mut parse_errors = 0;
+        let mut records_read = 0;
 
         for result in reader.record_bufs(&header) {
+            if let Some(limit) = max_records {
+                if records_read >= limit {
+                    tracing::info!(limit, "reached max_records limit, stopping read");
+                    break;
+                }
+            }
             match result {
-                Ok(record) => raw_records.push(record),
+                Ok(record) => {
+                    raw_records.push(record);
+                    records_read += 1;
+                }
                 Err(e) => {
                     parse_errors += 1;
                     tracing::warn!("failed to read VCF record: {}", e);
@@ -441,12 +473,25 @@ impl BcfSource {
     ) -> io::Result<Self> {
         let header = reader.read_header()?;
 
+        // Get optional limit from environment
+        let max_records = get_max_records_limit();
+
         let mut raw_records = Vec::new();
         let mut parse_errors = 0;
+        let mut records_read = 0;
 
         for result in reader.record_bufs(&header) {
+            if let Some(limit) = max_records {
+                if records_read >= limit {
+                    tracing::info!(limit, "reached max_records limit, stopping read");
+                    break;
+                }
+            }
             match result {
-                Ok(record) => raw_records.push(record),
+                Ok(record) => {
+                    raw_records.push(record);
+                    records_read += 1;
+                }
                 Err(e) => {
                     parse_errors += 1;
                     tracing::warn!("failed to read BCF record: {}", e);
