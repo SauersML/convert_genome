@@ -616,10 +616,20 @@ fn determine_ploidy(
         (c, _) if c != "X" && c != "Y" => Ploidy::Diploid,
         ("X", Sex::Female) => Ploidy::Diploid,
         ("Y", Sex::Female) => Ploidy::Zero,
-        ("Y", Sex::Male) => Ploidy::Haploid,
+        ("Y", Sex::Male) => {
+            if let Some(b) = boundaries {
+                if b.is_par(short_chrom, pos) {
+                    Ploidy::Diploid
+                } else {
+                    Ploidy::Haploid
+                }
+            } else {
+                Ploidy::Haploid
+            }
+        }
         ("X", Sex::Male) => {
              if let Some(b) = boundaries {
-                if b.is_par(pos) {
+                if b.is_par(short_chrom, pos) {
                     Ploidy::Diploid
                 } else {
                     Ploidy::Haploid

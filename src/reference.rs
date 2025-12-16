@@ -222,8 +222,8 @@ fn build_alias_map(contigs: &[ReferenceContig]) -> HashMap<String, usize> {
 
 #[derive(Debug, Clone)]
 pub struct ParBoundaries {
-    pub par1_end: u64,
-    pub par2_start: u64,
+    x_ranges: Vec<(u64, u64)>,
+    y_ranges: Vec<(u64, u64)>,
 }
 
 impl ParBoundaries {
@@ -231,17 +231,44 @@ impl ParBoundaries {
         let asm = assembly.to_uppercase();
         if asm.contains("38") {
             // GRCh38 coordinates
-            Some(Self { par1_end: 2_781_479, par2_start: 155_701_383 })
+            Some(Self {
+                x_ranges: vec![
+                    (10_001, 2_781_479),
+                    (155_701_383, 156_030_895),
+                ],
+                y_ranges: vec![
+                    (10_001, 2_781_479),
+                    (56_887_903, 57_217_415),
+                ],
+            })
         } else if asm.contains("37") || asm.contains("19") {
             // GRCh37 coordinates
-            Some(Self { par1_end: 2_699_520, par2_start: 154_931_044 })
+            Some(Self {
+                x_ranges: vec![
+                    (60_001, 2_699_520),
+                    (154_931_044, 155_260_560),
+                ],
+                y_ranges: vec![
+                    (10_001, 2_649_520),
+                    (59_034_050, 59_363_566),
+                ],
+            })
         } else {
             None
         }
     }
 
-    pub fn is_par(&self, pos: u64) -> bool {
-        pos <= self.par1_end || pos >= self.par2_start
+    pub fn is_par(&self, chrom: &str, pos: u64) -> bool {
+        let upper = chrom.to_ascii_uppercase();
+        let stripped = upper.strip_prefix("CHR").unwrap_or(&upper);
+        let ranges = if stripped == "X" {
+            &self.x_ranges
+        } else if stripped == "Y" {
+            &self.y_ranges
+        } else {
+            return false;
+        };
+        ranges.iter().any(|(start, end)| pos >= *start && pos <= *end)
     }
 }
 
