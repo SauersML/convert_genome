@@ -27,10 +27,7 @@ use noodles::vcf::{
     variant::{
         io::Write as VariantRecordWrite,
         record::samples::keys::key as format_key,
-        record_buf::{
-            AlternateBases, RecordBuf, Samples,
-            samples::sample::{Value, value::Array},
-        },
+        record_buf::{RecordBuf, Samples, samples::sample::Value},
     },
 };
 // rayon removed
@@ -301,7 +298,7 @@ where
         match result {
             Ok(record) => {
                 // Apply standardization if requested
-                let mut final_record = if config.standardize {
+                let final_record = if config.standardize {
                     match standardize_record(&record, reference, config) {
                         Ok(Some(standardized)) => standardized,
                         Ok(None) => continue, // Filtered out
@@ -322,70 +319,28 @@ where
                     let ref_base = final_record.reference_bases().to_string();
 
                     // Collect alleles from the record
-                    let mut record_alts: Vec<String> = final_record
+                    let record_alts: Vec<String> = final_record
                         .alternate_bases()
                         .as_ref()
                         .iter()
                         .map(|s| s.to_string())
                         .collect();
-                    let record_ref = &ref_base;
 
-                    let mut user_bases: Vec<String> = Vec::new();
+                    // Build list of all input alleles: [REF, ALT1, ALT2...]
+                    let mut all_input_alleles = vec![ref_base.clone()];
+                    all_input_alleles.extend(record_alts);
 
-                    // Decode GT to get actual bases
-                    // For now, assume diploid/haploid from GT indices
-                    // We need the ACTUAL bases the user has called, e.g. ["A", "G"]
-                    // We can get these by mapping GT indices to record alleles.
-
-                    let samples = final_record.samples().clone();
-                    // Assume single sample for conversion tool
-                    if let Some(Some(Value::String(gt_str))) = samples
-                        .values()
-                        .next()
-                        .and_then(|sample| sample.get(format_key::GENOTYPE))
-                    {
-                        // Parse GT - Handle Haploid vs Diploid carefully
-                        let is_diploid_str = gt_str.contains('/') || gt_str.contains('|');
-                        let indices = if is_diploid_str {
-                            crate::plink::parse_gt_indices(gt_str)
-                        } else {
-                            // Haploid: treat as (Some(idx), None)
-                            if let Ok(idx) = gt_str.trim().parse::<usize>() {
-                                (Some(idx), None)
-                            } else {
-                                (None, None)
-                            }
-                        };
-
-                        // Initialize variables to hold the new record components
-                        let mut final_ref = final_record.reference_bases().to_string();
-                        let mut final_alts = final_record.alternate_bases().clone();
-                        let mut final_samples = final_record.samples().clone();
-
-                        // 1. Harmonize ALL input alleles to determine the full mapping
-
-                        // Input alleles: [REF, ALT1, ALT2...]
-                        let mut all_input_alleles = Vec::new();
-                        all_input_alleles.push(record_ref.clone());
-                        all_input_alleles.extend(record_alts.iter().cloned());
-
-                        let mut panel_borrow = panel_cell.borrow_mut();
-
-                        // harmonized_indices[i] = Panel Allele Index for Input Allele i
-                        // This handles strand flips for the entire set of alleles consistent with the called genotype.
-                        // (harmonize_alleles uses the same logic as harmonize_genotype for flip detection)
-                        let mapping_result = crate::harmonize::harmonize_alleles(
-                            &all_input_alleles,
-                            record_ref,
-                            &chrom,
-                            pos,
-                            &mut panel_borrow,
-                        );
-
-                        *final_record.reference_bases_mut() = final_ref.into();
-                        *final_record.alternate_bases_mut() = final_alts;
-                        *final_record.samples_mut() = final_samples;
-                    }
+                    // Harmonize alleles against panel (handles strand flips)
+                    let mut panel_borrow = panel_cell.borrow_mut();
+                    // Note: harmonize_alleles registers alleles with panel for padding
+                    // The mapping result could be used to remap GT indices if needed
+                    let _ = crate::harmonize::harmonize_alleles(
+                        &all_input_alleles,
+                        &ref_base,
+                        &chrom,
+                        pos,
+                        &mut panel_borrow,
+                    );
                 }
                 summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
 

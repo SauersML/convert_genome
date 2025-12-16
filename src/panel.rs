@@ -43,19 +43,11 @@ impl PanelSite {
 }
 
 /// Index of panel sites for fast lookup by position.
+#[derive(Default)]
 pub struct PanelIndex {
     sites: HashMap<(String, u64), PanelSite>,
     /// Chromosome order from the panel header for sorting output
     chrom_order: Vec<String>,
-}
-
-impl Default for PanelIndex {
-    fn default() -> Self {
-        Self {
-            sites: HashMap::new(),
-            chrom_order: Vec::new(),
-        }
-    }
 }
 
 impl PanelIndex {
@@ -278,7 +270,6 @@ impl PaddedPanel {
         allele: &str,
         ref_base: &str,
     ) -> usize {
-        let key = (chrom.to_string(), pos);
         if let Some(site) = self.original.get(chrom, pos) {
             // Site exists in panel - USE CANONICAL CHROM NAME FROM SITE
             // This ensures added_alts is keyed by "chr1" even if user passed "1"
