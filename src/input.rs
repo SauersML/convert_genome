@@ -110,11 +110,11 @@ impl DtcSource {
         let mut records_read = 0;
 
         for res in reader {
-            if let Some(limit) = max_records {
-                if records_read >= limit {
-                    tracing::info!(limit, "reached max_records limit, stopping read");
-                    break;
-                }
+            if let Some(limit) = max_records
+                && records_read >= limit
+            {
+                tracing::info!(limit, "reached max_records limit, stopping read");
+                break;
             }
             match res {
                 Ok(rec) => {
@@ -400,11 +400,11 @@ impl VcfSource {
         let mut records_read = 0;
 
         for result in reader.record_bufs(&header) {
-            if let Some(limit) = max_records {
-                if records_read >= limit {
-                    tracing::info!(limit, "reached max_records limit, stopping read");
-                    break;
-                }
+            if let Some(limit) = max_records
+                && records_read >= limit
+            {
+                tracing::info!(limit, "reached max_records limit, stopping read");
+                break;
             }
             match result {
                 Ok(record) => {
@@ -481,11 +481,11 @@ impl BcfSource {
         let mut records_read = 0;
 
         for result in reader.record_bufs(&header) {
-            if let Some(limit) = max_records {
-                if records_read >= limit {
-                    tracing::info!(limit, "reached max_records limit, stopping read");
-                    break;
-                }
+            if let Some(limit) = max_records
+                && records_read >= limit
+            {
+                tracing::info!(limit, "reached max_records limit, stopping read");
+                break;
             }
             match result {
                 Ok(record) => {
