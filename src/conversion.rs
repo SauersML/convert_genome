@@ -238,7 +238,6 @@ where
     while let Some(result) = source.next_variant(summary) {
         match result {
             Ok(record) => {
-                summary.total_records += 1; 
                 summary.record_emission(!record.alternate_bases().as_ref().is_empty()); 
 
                 writer.write_variant(header, &record)

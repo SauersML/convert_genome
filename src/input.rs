@@ -55,7 +55,9 @@ pub struct DtcSource {
     records: std::vec::IntoIter<DtcRecord>,
     reference: ReferenceGenome,
     config: ConversionConfig,
-    header_keys: Keys, 
+    header_keys: Keys,
+    initial_parse_errors: usize,
+    initial_stats_synced: bool,
 }
 
 impl DtcSource {
@@ -64,10 +66,12 @@ impl DtcSource {
         
         // Read all records aggressively
         let mut raw_records = Vec::new();
+        let mut parse_errors = 0;
         while let Some(res) = reader.next() {
             match res {
                 Ok(rec) => raw_records.push(rec),
                 Err(e) => {
+                    parse_errors += 1;
                     tracing::warn!("failed to read input line: {}", e);
                     // Continue/Skip bad lines
                 }
@@ -86,6 +90,8 @@ impl DtcSource {
             reference,
             config,
             header_keys: keys,
+            initial_parse_errors: parse_errors,
+            initial_stats_synced: false,
         }
     }
 
@@ -252,8 +258,19 @@ impl DtcSource {
 
 impl VariantSource for DtcSource {
     fn next_variant(&mut self, summary: &mut crate::ConversionSummary) -> Option<io::Result<RecordBuf>> {
+        // Sync initial stats once
+        if !self.initial_stats_synced {
+            summary.parse_errors += self.initial_parse_errors;
+            // Note: total_records should typically track *valid* or *attemped* records.
+            // If we want total to include malformed lines, add them here:
+            // summary.total_records += self.initial_parse_errors as u64; 
+            // The previous behavior was to count lines read.
+            self.initial_stats_synced = true;
+        }
+
         // We iterate over the pre-sorted raw records
         while let Some(record) = self.records.next() {
+            summary.total_records += 1;
             match self.convert_record(record, summary) {
                 Ok(Some(buf)) => return Some(Ok(buf)),
                 Ok(None) => continue, // Filtered

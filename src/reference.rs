@@ -4,6 +4,7 @@ use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
+    borrow::Cow,
 };
 
 use lru::LruCache;
@@ -104,19 +105,19 @@ impl ReferenceGenome {
     pub fn resolve_contig_name(&self, query: &str) -> Option<&str> {
         let key = canonical_key(query);
         self.alias_to_index
-            .get(&key)
+            .get(key.as_ref())
             .map(|&idx| self.contigs[idx].name.as_str())
     }
 
     pub fn contig(&self, query: &str) -> Option<&ReferenceContig> {
         let key = canonical_key(query);
-        self.alias_to_index.get(&key).map(|&idx| &self.contigs[idx])
+        self.alias_to_index.get(key.as_ref()).map(|&idx| &self.contigs[idx])
     }
 
     /// Returns the index of the contig matching the query, if found.
     pub fn contig_index(&self, query: &str) -> Option<usize> {
         let key = canonical_key(query);
-        self.alias_to_index.get(&key).copied()
+        self.alias_to_index.get(key.as_ref()).copied()
     }
 
     #[doc(hidden)]
@@ -128,7 +129,7 @@ impl ReferenceGenome {
         let canonical = canonical_key(query);
         let contig_idx = *self
             .alias_to_index
-            .get(&canonical)
+            .get(canonical.as_ref())
             .ok_or_else(|| ReferenceError::UnknownContig {
                 query: query.to_string(),
             })?;
@@ -188,17 +189,28 @@ fn default_index_path(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn canonical_key(raw: &str) -> String {
+fn canonical_key(raw: &str) -> Cow<str> {
     let trimmed = raw.trim();
-    let trimmed = trimmed.strip_prefix("chr").unwrap_or(trimmed);
-    let upper = trimmed.to_ascii_uppercase();
+    let stripped = trimmed.strip_prefix("chr").unwrap_or(trimmed);
+    
+    // Optimization: avoid allocation for common uppercase inputs
+    if stripped.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+        match stripped {
+            "M" => return Cow::Borrowed("MT"),
+            "23" | "25" => return Cow::Borrowed("X"),
+            "24" => return Cow::Borrowed("Y"),
+            "26" => return Cow::Borrowed("MT"),
+            _ => return Cow::Borrowed(stripped),
+        }
+    }
+
+    let upper = stripped.to_ascii_uppercase();
     match upper.as_str() {
-        "M" => "MT".to_string(),
-        "23" => "X".to_string(),
-        "24" => "Y".to_string(),
-        "25" => "X".to_string(), // PAR
-        "26" => "MT".to_string(),
-        _ => upper,
+        "M" => Cow::Borrowed("MT"),
+        "23" | "25" => Cow::Borrowed("X"),
+        "24" => Cow::Borrowed("Y"),
+        "26" => Cow::Borrowed("MT"),
+        _ => Cow::Owned(upper),
     }
 }
 
@@ -207,10 +219,10 @@ fn build_alias_map(contigs: &[ReferenceContig]) -> HashMap<String, usize> {
     for (idx, contig) in contigs.iter().enumerate() {
         let name = contig.name.as_str();
         let canonical = canonical_key(name);
-        map.entry(canonical.clone()).or_insert(idx);
+        map.entry(canonical.into_owned()).or_insert(idx);
         map.entry(name.to_ascii_uppercase()).or_insert(idx);
         if let Some(stripped) = name.strip_prefix("chr") {
-            map.entry(canonical_key(stripped)).or_insert(idx);
+            map.entry(canonical_key(stripped).into_owned()).or_insert(idx);
         }
         if name.eq_ignore_ascii_case("chrM") || name.eq_ignore_ascii_case("MT") {
             map.entry("MT".into()).or_insert(idx);
