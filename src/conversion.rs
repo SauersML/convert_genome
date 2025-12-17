@@ -198,7 +198,6 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // Track inference results for the report
     let mut sex_inferred = false;
     let mut build_detection: Option<crate::report::BuildDetection> = None;
-    let _original_sex_provided = config.sex.is_some();
 
     // Auto-detect build and sex if not provided (DTC format only for now)
     let mut config = config;
