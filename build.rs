@@ -104,6 +104,7 @@ fn install_stage_panic_hook() {
 }
 
 fn detect_total_memory_bytes() -> Option<u64> {
+    #[allow(clippy::collapsible_if)]
     if let Ok(forced) = std::env::var("GNOMON_FORCE_TOTAL_MEMORY_BYTES") {
         if let Ok(parsed) = forced.trim().parse::<u64>() {
             return Some(parsed);
@@ -116,6 +117,7 @@ fn detect_total_memory_bytes() -> Option<u64> {
             for line in meminfo.lines() {
                 if let Some(rest) = line.strip_prefix("MemTotal:") {
                     let mut parts = rest.split_whitespace();
+                    #[allow(clippy::collapsible_if)]
                     if let Some(raw_value) = parts.next() {
                         if let Ok(kib) = raw_value.parse::<u64>() {
                             return Some(kib.saturating_mul(1024));
@@ -584,9 +586,7 @@ fn tuple_pattern_is_fully_ignored(line_text: &str) -> bool {
         return false;
     }
 
-    components
-        .into_iter()
-        .all(|component| is_component_ignored(component))
+    components.into_iter().all(is_component_ignored)
 }
 
 fn extract_tuple_pattern(line_text: &str) -> Option<&str> {
@@ -657,9 +657,7 @@ fn is_component_ignored(component: &str) -> bool {
         let inner = &trimmed[1..trimmed.len() - 1];
         let inner_components = split_top_level_components(inner);
         return !inner_components.is_empty()
-            && inner_components
-                .into_iter()
-                .all(|inner_component| is_component_ignored(inner_component));
+            && inner_components.into_iter().all(is_component_ignored);
     }
 
     if trimmed.contains('@') {
@@ -1097,7 +1095,7 @@ fn manually_check_for_unused_variables() {
         command_preview(&rustc_binary, &manual_lint_args)
     ));
 
-    if let Some(cwd) = std::env::current_dir().ok() {
+    if let Ok(cwd) = std::env::current_dir() {
         emit_stage_detail(&format!(
             "manual lint self-check: current dir before spawn: {:?}",
             cwd
