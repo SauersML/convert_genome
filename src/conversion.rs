@@ -128,7 +128,6 @@ where
 impl VariantWriter for PlinkWriter {
     fn write_variant(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
         // Header not used for PLINK format but required by trait
-        drop(header);
         self.write_variant(record)
     }
 }
@@ -199,7 +198,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // Track inference results for the report
     let mut sex_inferred = false;
     let mut build_detection: Option<crate::report::BuildDetection> = None;
-    let original_sex_provided = config.sex.is_some();
+    let _original_sex_provided = config.sex.is_some();
 
     // Auto-detect build and sex if not provided (DTC format only for now)
     let mut config = config;
@@ -1121,7 +1120,7 @@ mod tests {
             input: std::path::PathBuf::from("dummy.txt"),
             input_format: crate::input::InputFormat::Dtc,
             input_origin: "test_input.txt".into(),
-            reference_fasta: ref_path.clone(),
+            reference_fasta: Some(ref_path.clone()),
             reference_origin: "dummy_ref".to_string(),
             reference_fai: None,
             reference_fai_origin: None,
@@ -1137,7 +1136,7 @@ mod tests {
             panel: None,
         };
 
-        let header = build_header(&config, &reference).unwrap();
+        let header = build_header(&config, Some(&reference)).unwrap();
 
         // Write header to string
         let mut buf = Vec::new();
@@ -1161,7 +1160,7 @@ mod tests {
             input_format: crate::input::InputFormat::Dtc,
             input_origin: String::from("input.txt"),
             reference_fasta: fasta_path.path().to_path_buf(),
-            reference_origin: fasta_path.path().to_string_lossy().to_string(),
+            reference_origin: Some(fasta_path.path().to_string_lossy().to_string()),
             reference_fai: None,
             reference_fai_origin: None,
             output: PathBuf::from("out.vcf"),
@@ -1176,7 +1175,7 @@ mod tests {
             panel: None,
         };
 
-        let header = build_header(&config, &reference).unwrap();
+        let header = build_header(&config, Some(&reference)).unwrap();
         assert!(!header.contigs().is_empty());
         assert!(header.other_records().contains_key("source"));
         assert!(header.other_records().contains_key("reference"));
