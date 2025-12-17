@@ -300,7 +300,7 @@ impl DtcSource {
             vec![vec![Some(Value::String(genotype_string))]],
         );
 
-        // INFO
+        // Build info section
         let mut info_map: noodles::vcf::variant::record_buf::Info = Default::default();
 
         let has_del = alt_bases.iter().any(|b| b == "DEL");

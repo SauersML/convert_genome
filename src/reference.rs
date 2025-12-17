@@ -318,14 +318,14 @@ mod tests {
 
         let reference = ReferenceGenome::open(&fasta_path, None).unwrap();
 
-        // 23 -> X
+        // chromosome 23 maps to X
         assert_eq!(reference.resolve_contig_name("23").unwrap(), "chrX");
         assert_eq!(reference.contig_index("23"), reference.contig_index("chrX"));
 
-        // 24 -> Y
+        // chromosome 24 maps to Y
         assert_eq!(reference.resolve_contig_name("24").unwrap(), "chrY");
 
-        // 25 -> X (PAR)
+        // chromosome 25 maps to X pseudoautosomal region
         assert_eq!(reference.resolve_contig_name("25").unwrap(), "chrX");
 
         // 26 -> MT (mapped to chrM -> MT)

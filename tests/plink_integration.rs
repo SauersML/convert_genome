@@ -69,7 +69,7 @@ fn test_plink_writer_spec_example() {
         .set_samples(samples_buf2)
         .build();
 
-    // SNP 3: 0 0 1 2 1 2
+    // Genotype pattern for variant 3: 0 0 1 2 1 2
     // Bytes: 6B (01 10 10 11 -> S4 S3 S2 S1) (Missing Het Het HomAlt)
 
     let samples3 = vec![

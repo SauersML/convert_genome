@@ -128,7 +128,7 @@ where
 impl VariantWriter for PlinkWriter {
     fn write_variant(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
         // Header not used for PLINK format but required by trait
-        let _ = header;
+        drop(header);
         self.write_variant(record)
     }
 }
@@ -252,7 +252,6 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             }
         }
     }
-    let _ = original_sex_provided; // silence unused warning for now
 
     // Load panel if provided
     let padded_panel: Option<std::cell::RefCell<crate::panel::PaddedPanel>> =

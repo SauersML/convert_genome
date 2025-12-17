@@ -82,7 +82,7 @@ fn benchmark_dtc_parsing(c: &mut Criterion) {
             let reader = dtc::Reader::new(cursor);
             let mut count = 0;
             for record in reader {
-                let _ = record;
+                drop(record);
                 count += 1;
             }
             black_box(count)

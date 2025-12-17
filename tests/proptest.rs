@@ -26,7 +26,7 @@ proptest! {
         let cursor = Cursor::new(data);
         let reader = dtc::Reader::new(cursor);
         for record in reader {
-            let _ = record;
+            drop(record);
         }
     }
 }

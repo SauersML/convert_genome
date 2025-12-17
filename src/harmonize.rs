@@ -179,27 +179,7 @@ mod tests {
         );
         match res {
             HarmonizationResult::Diploid(idx1, idx2) => {
-                // Should return indices for A and T.
-                // A is Ref (0). T is novel (1).
-                // If it flipped, it would be T (0) and A (1).
-                // Or rather, if flipped:
-                // Input [A, T] -> [T, A].
-                // Ref=A.
-                // T -> Ambiguous? No, T is not Ref.
-                // Panel indices depend on what we added.
-                // Since panel is empty, we add.
-                // If NO FLIP: Uses A (Ref) and T (Alt).
-                // If FLIP: Uses T (Ref Comp -> A -> Ref) and A (Ref match -> T -> Alt).
-                // WAIT.
-                // If NO FLIP: input A, T. A is Ref. T is Alt.
-                // Indices: A->0. T->1 (added). Result (0, 1).
-
-                // If FLIP: input A, T -> flip -> T, A.
-                // T is Alt. A is Ref.
-                // Indices: T->1 (added), A->0. Result (1, 0).
-
-                // We expect (0, 1) or (1, 0) depending on input order.
-                // Input order is [A, T]. Result should be (0, 1).
+                // Input [A, T] with A as reference should yield indices (0, 1)
                 assert_eq!(idx1, 0, "First allele should be Ref (A)");
                 assert_eq!(idx2, 1, "Second allele should be Alt (T)");
             }
