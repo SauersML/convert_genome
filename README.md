@@ -16,7 +16,15 @@
 - **Allele polarization**: Optional `--standardize` mode to normalize alleles against the reference genome.
 - **Comprehensive CI/CD**: Formatting, linting, testing, and coverage across Linux (with macOS/Windows support).
 
-## Installation
+- 
+### Automatic Install (Recommended)
+Installs the latest binary for your platform (macOS/Linux/Windows):
+```bash
+# macOS / Linux / Windows (Git Bash)
+curl -fsSL https://raw.githubusercontent.com/SauersML/convert_genome/main/install.sh | bash
+```
+
+## Manual installation
 
 The project targets Rust **nightly** (see `rust-toolchain.toml`). Install the converter directly from the repository:
 
