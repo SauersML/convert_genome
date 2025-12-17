@@ -386,6 +386,51 @@ pub struct VcfSource {
 }
 
 impl VcfSource {
+    /// Create a new VcfSource using natural chromosome ordering (no reference required)
+    pub fn new_without_reference<R: BufRead>(
+        mut reader: vcf::io::Reader<R>,
+    ) -> io::Result<Self> {
+        let header = reader.read_header()?;
+
+        let max_records = get_max_records_limit();
+
+        let mut raw_records = Vec::new();
+        let mut parse_errors = 0;
+        let mut records_read = 0;
+
+        for result in reader.record_bufs(&header) {
+            if let Some(limit) = max_records
+                && records_read >= limit
+            {
+                tracing::info!(limit, "reached max_records limit, stopping read");
+                break;
+            }
+            match result {
+                Ok(record) => {
+                    raw_records.push(record);
+                    records_read += 1;
+                }
+                Err(e) => {
+                    parse_errors += 1;
+                    tracing::warn!("failed to read VCF record: {}", e);
+                }
+            }
+        }
+
+        // Sort using natural chromosome order (no reference needed)
+        raw_records.sort_by_cached_key(|r| {
+            let order = natural_contig_order(r.reference_sequence_name());
+            let pos = r.variant_start().map(usize::from).unwrap_or(0);
+            (order, pos)
+        });
+
+        Ok(Self {
+            records: raw_records.into_iter(),
+            initial_parse_errors: parse_errors,
+            initial_stats_synced: false,
+        })
+    }
+
     pub fn new<R: BufRead>(
         mut reader: vcf::io::Reader<R>,
         reference: &ReferenceGenome,
@@ -467,6 +512,51 @@ pub struct BcfSource {
 }
 
 impl BcfSource {
+    /// Create a new BcfSource using natural chromosome ordering (no reference required)
+    pub fn new_without_reference<R: std::io::Read>(
+        mut reader: bcf::io::Reader<R>,
+    ) -> io::Result<Self> {
+        let header = reader.read_header()?;
+
+        let max_records = get_max_records_limit();
+
+        let mut raw_records = Vec::new();
+        let mut parse_errors = 0;
+        let mut records_read = 0;
+
+        for result in reader.record_bufs(&header) {
+            if let Some(limit) = max_records
+                && records_read >= limit
+            {
+                tracing::info!(limit, "reached max_records limit, stopping read");
+                break;
+            }
+            match result {
+                Ok(record) => {
+                    raw_records.push(record);
+                    records_read += 1;
+                }
+                Err(e) => {
+                    parse_errors += 1;
+                    tracing::warn!("failed to read BCF record: {}", e);
+                }
+            }
+        }
+
+        // Sort using natural chromosome order (no reference needed)
+        raw_records.sort_by_cached_key(|r| {
+            let order = natural_contig_order(r.reference_sequence_name());
+            let pos = r.variant_start().map(usize::from).unwrap_or(0);
+            (order, pos)
+        });
+
+        Ok(Self {
+            records: raw_records.into_iter(),
+            initial_parse_errors: parse_errors,
+            initial_stats_synced: false,
+        })
+    }
+
     pub fn new<R: std::io::Read>(
         mut reader: bcf::io::Reader<R>,
         reference: &ReferenceGenome,
@@ -530,5 +620,33 @@ impl VariantSource for BcfSource {
             summary.total_records += 1;
             Ok(record)
         })
+    }
+}
+
+// ============================================================================
+// Natural Chromosome Ordering (no reference required)
+// ============================================================================
+
+/// Returns a sort key for chromosome names using natural ordering.
+/// This allows sorting without a reference genome.
+///
+/// Order: 1-22, X, Y, MT/M, then other contigs alphabetically
+pub fn natural_contig_order(name: &str) -> (u32, String) {
+    let normalized = name
+        .trim_start_matches("chr")
+        .trim_start_matches("Chr")
+        .trim_start_matches("CHR");
+    
+    // Try to parse as a number (autosomes 1-22)
+    if let Ok(num) = normalized.parse::<u32>() {
+        return (num, String::new());
+    }
+    
+    // Handle sex chromosomes and mitochondrial
+    match normalized.to_uppercase().as_str() {
+        "X" => (23, String::new()),
+        "Y" => (24, String::new()),
+        "M" | "MT" => (25, String::new()),
+        other => (1000, other.to_string()), // Other contigs sorted alphabetically after standard ones
     }
 }
