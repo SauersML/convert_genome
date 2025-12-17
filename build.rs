@@ -104,11 +104,10 @@ fn install_stage_panic_hook() {
 }
 
 fn detect_total_memory_bytes() -> Option<u64> {
-    #[allow(clippy::collapsible_if)]
-    if let Ok(forced) = std::env::var("GNOMON_FORCE_TOTAL_MEMORY_BYTES") {
-        if let Ok(parsed) = forced.trim().parse::<u64>() {
-            return Some(parsed);
-        }
+    if let Ok(forced) = std::env::var("GNOMON_FORCE_TOTAL_MEMORY_BYTES")
+        && let Ok(parsed) = forced.trim().parse::<u64>()
+    {
+        return Some(parsed);
     }
 
     #[cfg(target_os = "linux")]
@@ -117,11 +116,10 @@ fn detect_total_memory_bytes() -> Option<u64> {
             for line in meminfo.lines() {
                 if let Some(rest) = line.strip_prefix("MemTotal:") {
                     let mut parts = rest.split_whitespace();
-                    #[allow(clippy::collapsible_if)]
-                    if let Some(raw_value) = parts.next() {
-                        if let Ok(kib) = raw_value.parse::<u64>() {
-                            return Some(kib.saturating_mul(1024));
-                        }
+                    if let Some(raw_value) = parts.next()
+                        && let Ok(kib) = raw_value.parse::<u64>()
+                    {
+                        return Some(kib.saturating_mul(1024));
                     }
                 }
             }
