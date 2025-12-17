@@ -13,6 +13,18 @@ struct ViolationCollector {
     file_path: PathBuf,
 }
 
+// A collector for disallowed `let _ = token;` patterns
+struct DisallowedLetCollector {
+    violations: Vec<String>,
+    file_path: PathBuf,
+}
+
+// A collector for tuple destructuring patterns that discard values using `_`
+struct TupleWildcardCollector {
+    violations: Vec<String>,
+    file_path: PathBuf,
+}
+
 // A collector for forbidden comment content
 struct ForbiddenCommentCollector {
     violations: Vec<String>,
@@ -46,6 +58,19 @@ struct IgnoredTestCollector {
 
 static CURRENT_STAGE: OnceLock<Mutex<String>> = OnceLock::new();
 
+fn warnings_enabled() -> bool {
+    static ENABLE_WARNINGS: OnceLock<bool> = OnceLock::new();
+    *ENABLE_WARNINGS.get_or_init(|| match std::env::var("BUILD_VERBOSE") {
+        Ok(value) => {
+            let normalized = value.trim();
+            normalized.eq_ignore_ascii_case("true")
+                || normalized.eq_ignore_ascii_case("yes")
+                || normalized == "1"
+        }
+        Err(_) => false,
+    })
+}
+
 fn update_stage(label: &str) {
     let tracker = CURRENT_STAGE.get_or_init(|| Mutex::new(String::new()));
     if let Ok(mut guard) = tracker.lock() {
@@ -53,13 +78,17 @@ fn update_stage(label: &str) {
         guard.push_str(label);
     }
 
-    println!("cargo:warning= build stage: {label}");
-    let _ = io::stdout().flush();
+    if warnings_enabled() {
+        println!("cargo:warning=project build stage: {label}");
+        let _ = io::stdout().flush();
+    }
 }
 
 fn emit_stage_detail(detail: &str) {
-    println!("cargo:warning= build detail: {detail}");
-    let _ = io::stdout().flush();
+    if warnings_enabled() {
+        println!("cargo:warning=project build detail: {detail}");
+        let _ = io::stdout().flush();
+    }
 }
 
 fn install_stage_panic_hook() {
@@ -72,6 +101,87 @@ fn install_stage_panic_hook() {
         eprintln!("\n⚠️ build script panic while processing stage: {stage_name}");
         eprintln!("{info}");
     }));
+}
+
+fn detect_total_memory_bytes() -> Option<u64> {
+    if let Ok(forced) = std::env::var("GNOMON_FORCE_TOTAL_MEMORY_BYTES") {
+        if let Ok(parsed) = forced.trim().parse::<u64>() {
+            return Some(parsed);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+            for line in meminfo.lines() {
+                if let Some(rest) = line.strip_prefix("MemTotal:") {
+                    let mut parts = rest.split_whitespace();
+                    if let Some(raw_value) = parts.next() {
+                        if let Ok(kib) = raw_value.parse::<u64>() {
+                            return Some(kib.saturating_mul(1024));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn configure_linker_for_low_memory() {
+    if let Ok(value) = std::env::var("GNOMON_DISABLE_LOW_MEM_WORKAROUND") {
+        let normalized = value.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "1" | "true" | "yes") {
+            return;
+        }
+    }
+
+    const TEN_GIB: u64 = 10u64 * 1024 * 1024 * 1024;
+
+    match detect_total_memory_bytes() {
+        Some(total) if total < TEN_GIB => {
+            println!("cargo:rustc-link-arg=-Wl,--no-keep-memory");
+            configure_rustc_parallelism_for_low_memory(total);
+            if warnings_enabled() {
+                println!(
+                    "cargo:warning=linker configured for low-memory host (detected {} bytes)",
+                    total
+                );
+            }
+        }
+        Some(total) => {
+            if warnings_enabled() {
+                println!(
+                    "cargo:warning=total system memory {} bytes >= 10 GiB, using default linker settings",
+                    total
+                );
+            }
+        }
+        None => {
+            if warnings_enabled() {
+                println!(
+                    "cargo:warning=unable to detect total system memory; using default linker settings"
+                );
+            }
+        }
+    }
+}
+
+fn configure_rustc_parallelism_for_low_memory(total_memory_bytes: u64) {
+    // Build scripts are no longer permitted to emit arbitrary rustc flags; we rely on
+    // Cargo profiles (see Cargo.toml) to set codegen-units instead.
+    println!(
+        "cargo:rustc-env=GNOMON_LOW_MEMORY_TOTAL_MEMORY_BYTES={}",
+        total_memory_bytes
+    );
+    println!("cargo:rustc-env=GNOMON_LOW_MEMORY_SERIAL_BUILD=1");
+    println!("cargo:rustc-cfg=gnomon_low_memory_serial_build");
+    if warnings_enabled() {
+        println!(
+            "cargo:warning=low-memory host detected; consider forcing single rustc codegen unit via Cargo profile overrides if builds still fail"
+        );
+    }
 }
 
 impl ViolationCollector {
@@ -104,6 +214,76 @@ impl ViolationCollector {
             .push_str("\n⚠️ Underscore-prefixed variable names are not allowed in this project.\n");
         error_msg.push_str(
             "   Either use the variable (removing the underscore) or remove it completely.\n",
+        );
+
+        Some(error_msg)
+    }
+}
+
+impl DisallowedLetCollector {
+    fn new(file_path: &Path) -> Self {
+        Self {
+            violations: Vec::new(),
+            file_path: file_path.to_path_buf(),
+        }
+    }
+
+    fn check_and_get_error_message(&self) -> Option<String> {
+        if self.violations.is_empty() {
+            return None;
+        }
+
+        let file_name = self.file_path.to_str().unwrap_or("?");
+        let mut error_msg = format!(
+            "\n❌ ERROR: Found {} disallowed 'let _ =' patterns in {}:\n",
+            self.violations.len(),
+            file_name
+        );
+
+        for violation in &self.violations {
+            error_msg.push_str(&format!("   {violation}\n"));
+        }
+
+        error_msg.push_str(
+            "\n⚠️ Directly ignoring values with 'let _ =' is forbidden in this project.\n",
+        );
+        error_msg.push_str(
+            "   Handle the result explicitly or restructure the code to avoid silent ignores.\n",
+        );
+
+        Some(error_msg)
+    }
+}
+
+impl TupleWildcardCollector {
+    fn new(file_path: &Path) -> Self {
+        Self {
+            violations: Vec::new(),
+            file_path: file_path.to_path_buf(),
+        }
+    }
+
+    fn check_and_get_error_message(&self) -> Option<String> {
+        if self.violations.is_empty() {
+            return None;
+        }
+
+        let file_name = self.file_path.to_str().unwrap_or("?");
+        let mut error_msg = format!(
+            "\n❌ ERROR: Found {} tuple destructuring patterns discarding values in {}:\n",
+            self.violations.len(),
+            file_name
+        );
+
+        for violation in &self.violations {
+            error_msg.push_str(&format!("   {violation}\n"));
+        }
+
+        error_msg.push_str(
+            "\n⚠️ Using '_' placeholders inside tuple destructuring is forbidden in this project.\n",
+        );
+        error_msg.push_str(
+            "   Bind every value explicitly or restructure the code so nothing is silently ignored.\n",
         );
 
         Some(error_msg)
@@ -326,6 +506,205 @@ impl Sink for ViolationCollector {
     }
 }
 
+impl Sink for DisallowedLetCollector {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, mat: &SinkMatch) -> Result<bool, Self::Error> {
+        let line_number = mat.line_number().unwrap_or(0);
+        let line_text = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end();
+
+        let is_pure_comment = line_text.trim_start().starts_with("//")
+            || (line_text.contains("/*")
+                && !line_text.contains("*/match")
+                && !line_text.contains("*/let"));
+
+        let mut is_in_string = false;
+        if line_text.contains("\"") {
+            let parts: Vec<&str> = line_text.split('\"').collect();
+            for (i, part) in parts.iter().enumerate() {
+                if i % 2 == 1 && part.contains("_") {
+                    is_in_string = true;
+                    break;
+                }
+            }
+        }
+
+        if is_pure_comment || is_in_string {
+            return Ok(true);
+        }
+
+        self.violations.push(format!("{line_number}:{line_text}"));
+
+        Ok(true)
+    }
+}
+
+impl Sink for TupleWildcardCollector {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, mat: &SinkMatch) -> Result<bool, Self::Error> {
+        let line_number = mat.line_number().unwrap_or(0);
+        let line_text = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end();
+
+        let is_pure_comment = line_text.trim_start().starts_with("//")
+            || (line_text.contains("/*")
+                && !line_text.contains("*/match")
+                && !line_text.contains("*/let"));
+
+        let mut is_in_string = false;
+        if line_text.contains("\"") {
+            let parts: Vec<&str> = line_text.split('\"').collect();
+            for (i, part) in parts.iter().enumerate() {
+                if i % 2 == 1 && part.contains("_") {
+                    is_in_string = true;
+                    break;
+                }
+            }
+        }
+
+        if is_pure_comment || is_in_string {
+            return Ok(true);
+        }
+
+        if tuple_pattern_is_fully_ignored(line_text) {
+            self.violations.push(format!("{line_number}:{line_text}"));
+        }
+
+        Ok(true)
+    }
+}
+
+fn tuple_pattern_is_fully_ignored(line_text: &str) -> bool {
+    let Some(pattern) = extract_tuple_pattern(line_text) else {
+        return false;
+    };
+
+    let components = split_top_level_components(pattern);
+    if components.is_empty() {
+        return false;
+    }
+
+    components
+        .into_iter()
+        .all(|component| is_component_ignored(component))
+}
+
+fn extract_tuple_pattern(line_text: &str) -> Option<&str> {
+    let let_pos = line_text.find("let")?;
+    let after_let = &line_text[let_pos + 3..];
+    let paren_start_rel = after_let.find('(')?;
+    let paren_start = let_pos + 3 + paren_start_rel;
+
+    let mut depth = 0usize;
+    let mut paren_end = None;
+    for (offset, ch) in line_text[paren_start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    paren_end = Some(paren_start + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let end = paren_end?;
+    Some(&line_text[paren_start + 1..end])
+}
+
+fn split_top_level_components(pattern: &str) -> Vec<&str> {
+    let mut components = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+
+    for (idx, ch) in pattern.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            ',' if depth == 0 => {
+                components.push(pattern[start..idx].trim());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+
+    if start <= pattern.len() {
+        components.push(pattern[start..].trim());
+    }
+
+    components.retain(|component| !component.is_empty());
+    components
+}
+
+fn is_component_ignored(component: &str) -> bool {
+    let trimmed = component.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let inner_components = split_top_level_components(inner);
+        return !inner_components.is_empty()
+            && inner_components
+                .into_iter()
+                .all(|inner_component| is_component_ignored(inner_component));
+    }
+
+    if trimmed.contains('@') {
+        return false;
+    }
+
+    let mut candidate = trimmed;
+    loop {
+        let stripped = candidate.trim_start();
+        if let Some(rest) = stripped.strip_prefix('&') {
+            candidate = rest;
+            continue;
+        }
+        if let Some(rest) = stripped.strip_prefix("mut ") {
+            candidate = rest;
+            continue;
+        }
+        if let Some(rest) = stripped.strip_prefix("ref ") {
+            candidate = rest;
+            continue;
+        }
+        candidate = stripped;
+        break;
+    }
+
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+
+    if candidate == "_" {
+        return true;
+    }
+
+    if candidate.starts_with('_')
+        && candidate
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return true;
+    }
+
+    false
+}
+
 // Implement the Sink trait for the forbidden comment collector
 impl Sink for ForbiddenCommentCollector {
     type Error = std::io::Error;
@@ -399,11 +778,6 @@ impl Sink for CustomUppercaseCollector {
         let alpha_chars: Vec<char> = comment_text.chars().filter(|c| c.is_alphabetic()).collect();
 
         if !alpha_chars.is_empty() {
-            // Exception: Allow short comments (e.g., abbreviations, formulas) to be uppercase
-            if alpha_chars.len() < 6 {
-                return Ok(true);
-            }
-
             let uppercase_count = alpha_chars.iter().filter(|c| c.is_uppercase()).count();
             let uppercase_ratio = uppercase_count as f64 / alpha_chars.len() as f64;
 
@@ -495,10 +869,31 @@ impl Sink for IgnoredTestCollector {
 
 fn main() {
     install_stage_panic_hook();
+    configure_linker_for_low_memory();
 
     // Always rerun this script if the build script itself changes.
     update_stage("initialization");
     println!("cargo:rerun-if-changed=build.rs");
+
+    // Emit build timestamp for version command (always, even when lint checks are skipped)
+    let build_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    println!("cargo:rustc-env=GNOMON_BUILD_TIMESTAMP={}", build_time);
+
+    // Capture release tag if provided by CI
+    if let Ok(release_tag) = std::env::var("GNOMON_RELEASE_TAG") {
+        println!("cargo:rustc-env=GNOMON_RELEASE_TAG={}", release_tag);
+    }
+
+    // Skip lint checks during release builds or cross-compilation
+    // (the grep crate won't be available in target deps during cross-compile)
+    if std::env::var("GNOMON_SKIP_LINT_CHECKS").is_ok() {
+        update_stage("skipping lint checks (GNOMON_SKIP_LINT_CHECKS set)");
+        return;
+    }
+
 
     // Manually check for unused variables in the build script
     update_stage("manual lint self-check");
@@ -516,6 +911,26 @@ fn main() {
     );
     emit_stage_detail(&underscore_report);
     all_violations.extend(underscore_violations);
+
+    // Scan Rust source files for disallowed `let _ = token;` patterns
+    update_stage("scan disallowed let ignore patterns");
+    let disallowed_let_violations = scan_for_disallowed_let_patterns();
+    let disallowed_let_report = format!(
+        "disallowed let pattern scan identified {} violation groups",
+        disallowed_let_violations.len()
+    );
+    emit_stage_detail(&disallowed_let_report);
+    all_violations.extend(disallowed_let_violations);
+
+    // Scan Rust source files for tuple destructuring patterns that discard values
+    update_stage("scan tuple destructuring ignores");
+    let tuple_wildcard_violations = scan_for_tuple_wildcard_patterns();
+    let tuple_wildcard_report = format!(
+        "tuple destructuring ignore scan identified {} violation groups",
+        tuple_wildcard_violations.len()
+    );
+    emit_stage_detail(&tuple_wildcard_report);
+    all_violations.extend(tuple_wildcard_violations);
 
     // Scan Rust source files for forbidden comment patterns
     update_stage("scan forbidden comment patterns");
@@ -578,7 +993,7 @@ fn manually_check_for_unused_variables() {
     let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let build_path = manifest_dir.join("build.rs");
+    let build_path = manifest_dir.join("shared/build.rs");
 
     if !build_path.exists() {
         emit_stage_detail("manual lint self-check: build script source not found");
@@ -683,7 +1098,7 @@ fn manually_check_for_unused_variables() {
         command_preview(&rustc_binary, &manual_lint_args)
     ));
 
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Some(cwd) = std::env::current_dir().ok() {
         emit_stage_detail(&format!(
             "manual lint self-check: current dir before spawn: {:?}",
             cwd
@@ -765,9 +1180,6 @@ fn manually_check_for_unused_variables() {
 }
 
 fn manual_lint_arguments(build_path: &Path) -> Vec<OsString> {
-    let out_dir = std::env::var_os("OUT_DIR").unwrap_or_else(|| OsString::from("target"));
-    let out_path = PathBuf::from(out_dir).join("build_lint_check");
-
     vec![
         OsString::from("--edition"),
         OsString::from("2021"),
@@ -781,8 +1193,6 @@ fn manual_lint_arguments(build_path: &Path) -> Vec<OsString> {
         OsString::from("bin"),
         OsString::from("--error-format"),
         OsString::from("human"),
-        OsString::from("-o"),
-        out_path.into_os_string(),
         build_path.as_os_str().to_os_string(),
     ]
 }
@@ -843,9 +1253,9 @@ fn scan_for_underscore_prefixes() -> Vec<String> {
             // This is more portable and robust.
             for entry in WalkDir::new(".")
                 .into_iter()
-                .filter_map(|e| e.ok()) // Ignore any errors during directory traversal.
-                .filter(|e| !is_in_target_directory(e.path())) // Exclude any target directories.
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok()) // Ignore any errors during directory traversal.
+                .filter(|e: &walkdir::DirEntry| !is_in_target_directory(e.path())) // Exclude any target directories.
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
             // Keep only .rs files.
             {
                 let path = entry.path();
@@ -860,7 +1270,7 @@ fn scan_for_underscore_prefixes() -> Vec<String> {
                 let is_estimate_rs = path
                     .to_str()
                     .is_some_and(|p| p.ends_with("calibrate/estimate.rs"));
-                if is_estimate_rs {
+                if is_estimate_rs && warnings_enabled() {
                     println!(
                         "cargo:warning=Analyzing estimate.rs for underscore-prefixed variables"
                     );
@@ -898,6 +1308,96 @@ fn scan_for_underscore_prefixes() -> Vec<String> {
     all_violations
 }
 
+fn scan_for_disallowed_let_patterns() -> Vec<String> {
+    let pattern = r"\blet\s+(?:mut\s+)?_\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;";
+    let mut all_violations = Vec::new();
+
+    match RegexMatcher::new_line_matcher(pattern) {
+        Ok(matcher) => {
+            let mut searcher = Searcher::new();
+
+            for entry in WalkDir::new(".")
+                .into_iter()
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_target_directory(e.path()))
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
+            {
+                let path = entry.path();
+
+                if std::fs::read_to_string(path).is_err() {
+                    continue;
+                }
+
+                let mut collector = DisallowedLetCollector::new(path);
+
+                if searcher
+                    .search_path(&matcher, path, &mut collector)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                if let Some(error_message) = collector.check_and_get_error_message() {
+                    all_violations.push(error_message);
+                }
+            }
+        }
+        Err(e) => {
+            all_violations.push(format!(
+                "Error creating regex matcher for disallowed let patterns: {}",
+                e
+            ));
+        }
+    }
+
+    all_violations
+}
+
+fn scan_for_tuple_wildcard_patterns() -> Vec<String> {
+    let pattern = r"\blet\s*\([^)]*\b_\b[^)]*\)\s*(?::[^=]*)?=";
+    let mut all_violations = Vec::new();
+
+    match RegexMatcher::new_line_matcher(pattern) {
+        Ok(matcher) => {
+            let mut searcher = Searcher::new();
+
+            for entry in WalkDir::new(".")
+                .into_iter()
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_target_directory(e.path()))
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
+            {
+                let path = entry.path();
+
+                if std::fs::read_to_string(path).is_err() {
+                    continue;
+                }
+
+                let mut collector = TupleWildcardCollector::new(path);
+
+                if searcher
+                    .search_path(&matcher, path, &mut collector)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                if let Some(error_message) = collector.check_and_get_error_message() {
+                    all_violations.push(error_message);
+                }
+            }
+        }
+        Err(e) => {
+            all_violations.push(format!(
+                "Error creating regex matcher for tuple wildcard patterns: {}",
+                e
+            ));
+        }
+    }
+
+    all_violations
+}
+
 fn is_doc_comment(line: &str) -> bool {
     line.trim_start().starts_with("///")
 }
@@ -925,10 +1425,10 @@ fn scan_for_forbidden_comment_patterns() -> Vec<String> {
 
             for entry in WalkDir::new(".")
                 .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| !is_in_target_directory(e.path())) // Exclude target directory
-                .filter(|e| e.file_name() != "build.rs") // Exclude the build script itself
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_target_directory(e.path())) // Exclude target directory
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs") // Exclude the build script itself
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
             {
                 let path = entry.path();
 
@@ -959,10 +1459,10 @@ fn scan_for_forbidden_comment_patterns() -> Vec<String> {
 
             for entry in WalkDir::new(".")
                 .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| !is_in_target_directory(e.path())) // Exclude target directory
-                .filter(|e| e.file_name() != "build.rs") // Exclude the build script itself
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_target_directory(e.path())) // Exclude target directory
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs") // Exclude the build script itself
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
             {
                 let path = entry.path();
 
@@ -994,10 +1494,10 @@ fn scan_for_forbidden_comment_patterns() -> Vec<String> {
 
             for entry in WalkDir::new(".")
                 .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| !is_in_target_directory(e.path()))
-                .filter(|e| e.file_name() != "build.rs")
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_target_directory(e.path()))
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs")
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
             {
                 let path = entry.path();
 
@@ -1027,10 +1527,10 @@ fn scan_for_forbidden_comment_patterns() -> Vec<String> {
 
             for entry in WalkDir::new(".")
                 .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| !is_in_target_directory(e.path()))
-                .filter(|e| e.file_name() != "build.rs")
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_target_directory(e.path()))
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs")
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
             {
                 let path = entry.path();
 
@@ -1066,10 +1566,10 @@ fn scan_for_allow_dead_code() -> Vec<String> {
 
             for entry in WalkDir::new(".")
                 .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| !is_in_target_directory(e.path())) // Exclude target directory
-                .filter(|e| e.file_name() != "build.rs") // Exclude the build script itself
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_target_directory(e.path())) // Exclude target directory
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs") // Exclude the build script itself
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
             {
                 let path = entry.path();
 
@@ -1119,10 +1619,10 @@ fn scan_for_ignored_tests() -> Vec<String> {
 
             for entry in WalkDir::new(".")
                 .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| !is_in_target_directory(e.path())) // Exclude target directory
-                .filter(|e| e.file_name() != "build.rs") // Exclude the build script itself
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_target_directory(e.path())) // Exclude target directory
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs") // Exclude the build script itself
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
             {
                 let path = entry.path();
 
