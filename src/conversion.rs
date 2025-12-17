@@ -481,13 +481,13 @@ where
                     let mut panel_borrow = panel_cell.borrow_mut();
                     // Note: harmonize_alleles registers alleles with panel for padding
                     // The mapping result could be used to remap GT indices if needed
-                    let _ = crate::harmonize::harmonize_alleles(
+                    drop(crate::harmonize::harmonize_alleles(
                         &all_input_alleles,
                         &ref_base,
                         &chrom,
                         pos,
                         &mut panel_borrow,
-                    );
+                    ));
                 }
                 summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
 

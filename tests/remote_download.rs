@@ -17,7 +17,7 @@ fn ensure_remote_reference(url: &str) -> Result<()> {
     // Clean up to conserve disk space on CI runners
     // The resource will be dropped, but explicitly remove the file too
     if let Some(parent) = path.parent() {
-        let _ = fs::remove_dir_all(parent);
+        drop(fs::remove_dir_all(parent));
     }
 
     Ok(())

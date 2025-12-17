@@ -100,7 +100,7 @@ fn benchmark_conversion(c: &mut Criterion) {
             let output = fixtures.dir.path().join("parallel.vcf");
             let config = fixtures.config(output.clone(), OutputFormat::Vcf);
             convert_dtc_file(config).expect("convert");
-            let _ = fs::remove_file(&output);
+            drop(fs::remove_file(&output));
         })
     });
 
@@ -110,7 +110,7 @@ fn benchmark_conversion(c: &mut Criterion) {
             let config = fixtures.config(output.clone(), OutputFormat::Vcf);
             let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
             pool.install(|| convert_dtc_file(config)).expect("convert");
-            let _ = fs::remove_file(&output);
+            drop(fs::remove_file(&output));
         })
     });
 
