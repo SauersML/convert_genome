@@ -111,7 +111,7 @@ impl<W> VariantWriter for vcf::io::Writer<W>
 where
     W: io::Write,
 {
-    fn write_variant(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
+    fn write_variant(&mut self, _: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
         VariantRecordWrite::write_variant_record(self, header, record)
     }
 }
@@ -120,13 +120,13 @@ impl<W> VariantWriter for bcf::io::Writer<W>
 where
     W: io::Write,
 {
-    fn write_variant(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
+    fn write_variant(&mut self, _: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
         VariantRecordWrite::write_variant_record(self, header, record)
     }
 }
 
 impl VariantWriter for PlinkWriter {
-    fn write_variant(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
+    fn write_variant(&mut self, _: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
         // Header not used for PLINK format but required by trait
         self.write_variant(record)
     }
@@ -1120,7 +1120,7 @@ mod tests {
             input_format: crate::input::InputFormat::Dtc,
             input_origin: "test_input.txt".into(),
             reference_fasta: Some(ref_path.clone()),
-            reference_origin: "dummy_ref".to_string(),
+            reference_origin: Some("dummy_ref".to_string()),
             reference_fai: None,
             reference_fai_origin: None,
             output: dir.path().join("out.vcf"),
@@ -1158,7 +1158,7 @@ mod tests {
             input: PathBuf::from("input.txt"),
             input_format: crate::input::InputFormat::Dtc,
             input_origin: String::from("input.txt"),
-            reference_fasta: fasta_path.path().to_path_buf(),
+            reference_fasta: Some(fasta_path.path().to_path_buf()),
             reference_origin: Some(fasta_path.path().to_string_lossy().to_string()),
             reference_fai: None,
             reference_fai_origin: None,
