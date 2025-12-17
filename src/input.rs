@@ -387,9 +387,7 @@ pub struct VcfSource {
 
 impl VcfSource {
     /// Create a new VcfSource using natural chromosome ordering (no reference required)
-    pub fn new_without_reference<R: BufRead>(
-        mut reader: vcf::io::Reader<R>,
-    ) -> io::Result<Self> {
+    pub fn new_without_reference<R: BufRead>(mut reader: vcf::io::Reader<R>) -> io::Result<Self> {
         let header = reader.read_header()?;
 
         let max_records = get_max_records_limit();
@@ -636,12 +634,12 @@ pub fn natural_contig_order(name: &str) -> (u32, String) {
         .trim_start_matches("chr")
         .trim_start_matches("Chr")
         .trim_start_matches("CHR");
-    
+
     // Try to parse as a number (autosomes 1-22)
     if let Ok(num) = normalized.parse::<u32>() {
         return (num, String::new());
     }
-    
+
     // Handle sex chromosomes and mitochondrial
     match normalized.to_uppercase().as_str() {
         "X" => (23, String::new()),

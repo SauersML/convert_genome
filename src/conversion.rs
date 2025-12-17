@@ -176,13 +176,15 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     );
 
     // Determine if reference is required based on input format and options
-    let requires_reference = matches!(config.input_format, crate::input::InputFormat::Dtc) 
+    let requires_reference = matches!(config.input_format, crate::input::InputFormat::Dtc)
         || config.standardize
         || config.panel.is_some();
-    
+
     let reference: Option<ReferenceGenome> = if let Some(ref fasta_path) = config.reference_fasta {
-        Some(ReferenceGenome::open(fasta_path, config.reference_fai.clone())
-            .with_context(|| "failed to open reference genome")?)
+        Some(
+            ReferenceGenome::open(fasta_path, config.reference_fai.clone())
+                .with_context(|| "failed to open reference genome")?,
+        )
     } else if requires_reference {
         return Err(anyhow!(
             "Reference FASTA is required for {} input or when using --standardize/--panel",
@@ -208,7 +210,10 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         // Detect build if using default GRCh38 - check if it actually matches
         if config.assembly == "GRCh38" {
             tracing::info!("Verifying genome build with check_build...");
-            match crate::inference::detect_build_from_dtc(&prescan_records, reference.as_ref().unwrap()) {
+            match crate::inference::detect_build_from_dtc(
+                &prescan_records,
+                reference.as_ref().unwrap(),
+            ) {
                 Ok(detected) => {
                     if detected != config.assembly {
                         tracing::warn!(
@@ -275,8 +280,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             let reader = BufReader::new(input);
             let dtc_reader = dtc::Reader::new(reader);
             // DTC format always requires reference (checked above)
-            let source =
-                crate::input::DtcSource::new(dtc_reader, reference.clone().unwrap(), config.clone());
+            let source = crate::input::DtcSource::new(
+                dtc_reader,
+                reference.clone().unwrap(),
+                config.clone(),
+            );
             Box::new(source)
         }
         crate::input::InputFormat::Vcf => {
@@ -410,7 +418,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         input_origin: config.input_origin.clone(),
         output_path: config.output.display().to_string(),
         output_format: Some(config.output_format),
-        reference_path: config.reference_fasta.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+        reference_path: config
+            .reference_fasta
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
         reference_origin: config.reference_origin.clone().unwrap_or_default(),
         assembly: config.assembly.clone(),
         standardize: config.standardize,
@@ -446,7 +458,11 @@ where
             Ok(record) => {
                 // Apply standardization if requested
                 let final_record = if config.standardize {
-                    match standardize_record(&record, reference.expect("reference required for standardize"), config) {
+                    match standardize_record(
+                        &record,
+                        reference.expect("reference required for standardize"),
+                        config,
+                    ) {
                         Ok(Some(standardized)) => standardized,
                         Ok(None) => continue, // Filtered out
                         Err(e) => {
@@ -914,7 +930,10 @@ pub fn parse_genotype_for_tests(raw: &str) -> Vec<DtcAllele> {
     parse_genotype(raw)
 }
 
-fn build_header(config: &ConversionConfig, reference: Option<&ReferenceGenome>) -> Result<vcf::Header> {
+fn build_header(
+    config: &ConversionConfig,
+    reference: Option<&ReferenceGenome>,
+) -> Result<vcf::Header> {
     let mut builder = vcf::Header::builder().set_file_format(FileFormat::new(4, 5));
 
     let genotype_format = Map::<Format>::from(format_key::GENOTYPE);
@@ -986,10 +1005,17 @@ fn build_header(config: &ConversionConfig, reference: Option<&ReferenceGenome>) 
         insert_other_record(&mut header, "assembly", config.assembly.clone())?;
     }
 
-    let reference_uri = if config.reference_origin.as_ref().map(|s| is_remote_source(s)).unwrap_or(false) {
+    let reference_uri = if config
+        .reference_origin
+        .as_ref()
+        .map(|s| is_remote_source(s))
+        .unwrap_or(false)
+    {
         config.reference_origin.clone().unwrap_or_default()
     } else {
-        config.reference_fasta.as_ref()
+        config
+            .reference_fasta
+            .as_ref()
             .map(|p| format!("file://{}", p.display()))
             .unwrap_or_else(|| "none".to_string())
     };
