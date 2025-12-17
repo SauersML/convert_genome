@@ -111,7 +111,7 @@ impl<W> VariantWriter for vcf::io::Writer<W>
 where
     W: io::Write,
 {
-    fn write_variant(&mut self, _: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
+    fn write_variant(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
         VariantRecordWrite::write_variant_record(self, header, record)
     }
 }
@@ -120,7 +120,7 @@ impl<W> VariantWriter for bcf::io::Writer<W>
 where
     W: io::Write,
 {
-    fn write_variant(&mut self, _: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
+    fn write_variant(&mut self, header: &vcf::Header, record: &RecordBuf) -> io::Result<()> {
         VariantRecordWrite::write_variant_record(self, header, record)
     }
 }
