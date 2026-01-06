@@ -80,12 +80,7 @@ fn benchmark_dtc_parsing(c: &mut Criterion) {
         b.iter(|| {
             let cursor = std::io::Cursor::new(&data);
             let reader = dtc::Reader::new(cursor);
-            let mut count = 0;
-            for record in reader {
-                drop(record);
-                count += 1;
-            }
-            black_box(count)
+            black_box(reader.count())
         })
     });
 }
@@ -98,19 +93,17 @@ fn benchmark_conversion(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("parallel", 25_000), |b| {
         b.iter(|| {
             let output = fixtures.dir.path().join("parallel.vcf");
-            let config = fixtures.config(output.clone(), OutputFormat::Vcf);
-            convert_dtc_file(config).expect("convert");
-            drop(fs::remove_file(&output));
+            let config = fixtures.config(output, OutputFormat::Vcf);
+            convert_dtc_file(config).expect("convert")
         })
     });
 
     group.bench_function(BenchmarkId::new("single_thread", 25_000), |b| {
         b.iter(|| {
             let output = fixtures.dir.path().join("single.vcf");
-            let config = fixtures.config(output.clone(), OutputFormat::Vcf);
+            let config = fixtures.config(output, OutputFormat::Vcf);
             let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-            pool.install(|| convert_dtc_file(config)).expect("convert");
-            drop(fs::remove_file(&output));
+            pool.install(|| convert_dtc_file(config)).expect("convert")
         })
     });
 

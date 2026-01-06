@@ -495,15 +495,16 @@ where
 
                     // Harmonize alleles against panel (handles strand flips)
                     let mut panel_borrow = panel_cell.borrow_mut();
-                    // Note: harmonize_alleles registers alleles with panel for padding
-                    // The mapping result could be used to remap GT indices if needed
-                    drop(crate::harmonize::harmonize_alleles(
+                    // Called for side effects: registers alleles with panel for padding
+                    if let Err(e) = crate::harmonize::harmonize_alleles(
                         &all_input_alleles,
                         &ref_base,
                         &chrom,
                         pos,
                         &mut panel_borrow,
-                    ));
+                    ) {
+                        tracing::debug!(chrom = %chrom, pos = pos, error = %e, "allele harmonization failed");
+                    }
                 }
                 summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
 
@@ -1136,9 +1137,10 @@ mod tests {
         // Setup temp reference
         let dir = tempfile::tempdir().unwrap();
         let ref_path = dir.path().join("ref.fa");
-        let mut file = std::fs::File::create(&ref_path).unwrap();
-        writeln!(file, ">1\nACGT").unwrap();
-        drop(file);
+        {
+            let mut file = std::fs::File::create(&ref_path).unwrap();
+            writeln!(file, ">1\nACGT").unwrap();
+        }
 
         let reference = crate::reference::ReferenceGenome::open(&ref_path, None).unwrap();
         let config = ConversionConfig {

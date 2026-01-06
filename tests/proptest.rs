@@ -25,9 +25,8 @@ proptest! {
     fn reader_handles_arbitrary_input(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
         let cursor = Cursor::new(data);
         let reader = dtc::Reader::new(cursor);
-        for record in reader {
-            drop(record);
-        }
+        // Exhaust iterator to verify it doesn't panic on arbitrary input
+        reader.for_each(|_| {});
     }
 }
 

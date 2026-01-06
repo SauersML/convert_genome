@@ -288,10 +288,11 @@ mod tests {
     fn reference_fetches_base() {
         let dir = tempfile::tempdir().unwrap();
         let fasta_path = dir.path().join("ref.fa");
-        let mut file = fs::File::create(&fasta_path).unwrap();
-        writeln!(file, ">chr1").unwrap();
-        writeln!(file, "ACGT").unwrap();
-        drop(file);
+        {
+            let mut file = fs::File::create(&fasta_path).unwrap();
+            writeln!(file, ">chr1").unwrap();
+            writeln!(file, "ACGT").unwrap();
+        }
 
         let reference = ReferenceGenome::open(&fasta_path, None).unwrap();
         assert_eq!(reference.base("1", 2).unwrap(), 'C');
@@ -307,14 +308,15 @@ mod tests {
         // Create a temporary FASTA with X, Y, M
         let dir = tempfile::tempdir().unwrap();
         let fasta_path = dir.path().join("ref_sex.fa");
-        let mut file = std::fs::File::create(&fasta_path).unwrap();
-        writeln!(file, ">chrX").unwrap();
-        writeln!(file, "ACGT").unwrap();
-        writeln!(file, ">chrY").unwrap();
-        writeln!(file, "ACGT").unwrap();
-        writeln!(file, ">chrM").unwrap();
-        writeln!(file, "ACGT").unwrap();
-        drop(file);
+        {
+            let mut file = std::fs::File::create(&fasta_path).unwrap();
+            writeln!(file, ">chrX").unwrap();
+            writeln!(file, "ACGT").unwrap();
+            writeln!(file, ">chrY").unwrap();
+            writeln!(file, "ACGT").unwrap();
+            writeln!(file, ">chrM").unwrap();
+            writeln!(file, "ACGT").unwrap();
+        }
 
         let reference = ReferenceGenome::open(&fasta_path, None).unwrap();
 

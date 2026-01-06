@@ -6,20 +6,14 @@ use serial_test::serial;
 use url::Url;
 
 /// Downloads a remote reference and validates it exists.
-/// Cleans up temp files after validation to conserve disk space.
+/// Temp files are cleaned up automatically when the RemoteResource is dropped.
 fn ensure_remote_reference(url: &str) -> Result<()> {
     let parsed = Url::parse(url)?;
     let resource = remote::fetch_remote_resource(&parsed)?;
     let path = resource.local_path().to_path_buf();
     let metadata = fs::metadata(&path)?;
     assert!(metadata.len() > 0, "downloaded file was empty");
-
-    // Clean up to conserve disk space on CI runners
-    // The resource will be dropped, but explicitly remove the file too
-    if let Some(parent) = path.parent() {
-        drop(fs::remove_dir_all(parent));
-    }
-
+    // resource (and its TempDir) is dropped here, cleaning up temp files
     Ok(())
 }
 

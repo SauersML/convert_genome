@@ -247,6 +247,7 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let prefix = temp_dir.path().join("test");
         let mut writer = PlinkWriter::new(&prefix)?;
+        {
 
         // Create a record with 2 ALTs: REF=A, ALT=C,G
         // Sample 1: 1/2 (C/G) -> should be Het for site 1 (A/C) and Het for site 2 (A/G)
@@ -275,9 +276,7 @@ mod tests {
             .build();
 
         writer.write_variant(&record)?;
-
-        // Verify BIM output
-        drop(writer); // Flush
+        } // writer goes out of scope and flushes here
 
         let bim_content = std::fs::read_to_string(prefix.with_extension("bim"))?;
         let lines: Vec<&str> = bim_content.lines().collect();

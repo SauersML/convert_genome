@@ -12,6 +12,7 @@ fn test_plink_writer_spec_example() {
     let prefix = dir.path().join("test");
 
     let mut writer = PlinkWriter::new(&prefix).expect("failed to create writer");
+    {
 
     // Keys for Samples
     let keys: Keys = vec![String::from("GT")].into_iter().collect();
@@ -96,8 +97,7 @@ fn test_plink_writer_spec_example() {
     writer.write_variant(&record1).unwrap();
     writer.write_variant(&record2).unwrap();
     writer.write_variant(&record3).unwrap();
-
-    drop(writer);
+    } // writer goes out of scope and flushes here
 
     let bed_content = fs::read(prefix.with_extension("bed")).unwrap();
     let expected = vec![
