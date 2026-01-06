@@ -246,36 +246,36 @@ mod tests {
     fn test_multiallelic_split() -> io::Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let prefix = temp_dir.path().join("test");
-        let mut writer = PlinkWriter::new(&prefix)?;
         {
+            let mut writer = PlinkWriter::new(&prefix)?;
 
-        // Create a record with 2 ALTs: REF=A, ALT=C,G
-        // Sample 1: 1/2 (C/G) -> should be Het for site 1 (A/C) and Het for site 2 (A/G)
-        // Sample 2: 0/1 (A/C) -> Het for site 1 (A/C), HomRef for site 2 (A/G)
-        // Sample 3: 2/2 (G/G) -> HomRef for site 1 (A/C), HomAlt for site 2 (A/G)
+            // Create a record with 2 ALTs: REF=A, ALT=C,G
+            // Sample 1: 1/2 (C/G) -> should be Het for site 1 (A/C) and Het for site 2 (A/G)
+            // Sample 2: 0/1 (A/C) -> Het for site 1 (A/C), HomRef for site 2 (A/G)
+            // Sample 3: 2/2 (G/G) -> HomRef for site 1 (A/C), HomAlt for site 2 (A/G)
 
-        use noodles::vcf::variant::record_buf::AlternateBases;
+            use noodles::vcf::variant::record_buf::AlternateBases;
 
-        // Mock samples
-        // noodles 0.x Samples::new takes (Keys, Vec<Vec<Option<Value>>>)
-        use noodles::vcf::variant::record_buf::samples::Keys;
-        let keys: Keys = vec![String::from("GT")].into_iter().collect();
-        let samples = vec![
-            vec![Some(Value::String("1/2".into()))],
-            vec![Some(Value::String("0/1".into()))],
-            vec![Some(Value::String("2/2".into()))],
-        ];
-        let samples = Samples::new(keys, samples);
+            // Mock samples
+            // noodles 0.x Samples::new takes (Keys, Vec<Vec<Option<Value>>>)
+            use noodles::vcf::variant::record_buf::samples::Keys;
+            let keys: Keys = vec![String::from("GT")].into_iter().collect();
+            let samples = vec![
+                vec![Some(Value::String("1/2".into()))],
+                vec![Some(Value::String("0/1".into()))],
+                vec![Some(Value::String("2/2".into()))],
+            ];
+            let samples = Samples::new(keys, samples);
 
-        let record = RecordBuf::builder()
-            .set_reference_sequence_name("1")
-            .set_variant_start(noodles::core::Position::try_from(100).unwrap())
-            .set_reference_bases("A")
-            .set_alternate_bases(AlternateBases::from(vec!["C".into(), "G".into()]))
-            .set_samples(samples)
-            .build();
+            let record = RecordBuf::builder()
+                .set_reference_sequence_name("1")
+                .set_variant_start(noodles::core::Position::try_from(100).unwrap())
+                .set_reference_bases("A")
+                .set_alternate_bases(AlternateBases::from(vec!["C".into(), "G".into()]))
+                .set_samples(samples)
+                .build();
 
-        writer.write_variant(&record)?;
+            writer.write_variant(&record)?;
         } // writer goes out of scope and flushes here
 
         let bim_content = std::fs::read_to_string(prefix.with_extension("bim"))?;
