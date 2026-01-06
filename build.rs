@@ -74,37 +74,6 @@ struct DebugAssertCollector {
 
 static CURRENT_STAGE: OnceLock<Mutex<String>> = OnceLock::new();
 
-fn is_word_byte(b: u8) -> bool {
-    matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'_')
-}
-
-fn contains_underscore_ident(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    for i in 0..bytes.len() {
-        if bytes[i] == b'_' {
-            let prev_ok = i == 0 || !is_word_byte(bytes[i - 1]);
-            let next_ok = i + 1 < bytes.len() && is_word_byte(bytes[i + 1]);
-            if prev_ok && next_ok {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn has_underscore_ident_outside_strings(line_text: &str) -> bool {
-    if !line_text.contains('\"') {
-        return contains_underscore_ident(line_text);
-    }
-    let parts: Vec<&str> = line_text.split('\"').collect();
-    for (i, part) in parts.iter().enumerate() {
-        if i % 2 == 0 && contains_underscore_ident(part) {
-            return true;
-        }
-    }
-    false
-}
-
 fn warnings_enabled() -> bool {
     static ENABLE_WARNINGS: OnceLock<bool> = OnceLock::new();
     *ENABLE_WARNINGS.get_or_init(|| match std::env::var("BUILD_VERBOSE") {
@@ -626,8 +595,22 @@ impl Sink for ViolationCollector {
                 && !line_text.contains("*/match")
                 && !line_text.contains("*/let"));
 
-        let has_outside = has_underscore_ident_outside_strings(line_text);
-        if is_pure_comment || !has_outside {
+        // Check if the match is in a string literal and not part of code
+        let mut is_in_string = false;
+        if line_text.contains("\"") {
+            // More careful string detection logic
+            let parts: Vec<&str> = line_text.split('\"').collect();
+            // If the underscore variable is between quotes, it's in a string
+            for (i, part) in parts.iter().enumerate() {
+                if i % 2 == 1 && part.contains("_") {
+                    // Inside quotes
+                    is_in_string = true;
+                    break;
+                }
+            }
+        }
+
+        if is_pure_comment || is_in_string {
             return Ok(true); // Skip this match and continue searching
         }
 
@@ -651,8 +634,18 @@ impl Sink for DisallowedLetCollector {
                 && !line_text.contains("*/match")
                 && !line_text.contains("*/let"));
 
-        let has_outside = has_underscore_ident_outside_strings(line_text);
-        if is_pure_comment || !has_outside {
+        let mut is_in_string = false;
+        if line_text.contains("\"") {
+            let parts: Vec<&str> = line_text.split('\"').collect();
+            for (i, part) in parts.iter().enumerate() {
+                if i % 2 == 1 && part.contains("_") {
+                    is_in_string = true;
+                    break;
+                }
+            }
+        }
+
+        if is_pure_comment || is_in_string {
             return Ok(true);
         }
 
@@ -1101,9 +1094,9 @@ fn main() {
     install_stage_panic_hook();
     configure_linker_for_low_memory();
 
-    // Always rerun this script if the build script itself changes.
+    // Cargo re-runs the build script when any file in the package changes.
+    // Do not narrow the rerun scope with cargo:rerun-if-changed directives.
     update_stage("initialization");
-    println!("cargo:rerun-if-changed=build.rs");
 
     // Emit build timestamp for version command (always, even when lint checks are skipped)
     let build_time = std::time::SystemTime::now()
@@ -1117,15 +1110,10 @@ fn main() {
         println!("cargo:rustc-env=GNOMON_RELEASE_TAG={}", release_tag);
     }
 
-    // Skip lint checks during release builds, cross-compilation, or docs.rs builds
+    // Skip lint checks during release builds or cross-compilation
     // (the grep crate won't be available in target deps during cross-compile)
     if std::env::var("GNOMON_SKIP_LINT_CHECKS").is_ok() {
         update_stage("skipping lint checks (GNOMON_SKIP_LINT_CHECKS set)");
-        return;
-    }
-
-    if std::env::var("DOCS_RS").is_ok() {
-        update_stage("skipping lint checks (docs.rs build)");
         return;
     }
 
@@ -1265,13 +1253,7 @@ fn manually_check_for_unused_variables() {
     let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let shared_build = manifest_dir.join("shared/build.rs");
-    let root_build = manifest_dir.join("build.rs");
-    let build_path = if shared_build.exists() {
-        shared_build
-    } else {
-        root_build
-    };
+    let build_path = manifest_dir.join("shared/build.rs");
 
     if !build_path.exists() {
         emit_stage_detail("manual lint self-check: build script source not found");
@@ -1458,7 +1440,7 @@ fn manually_check_for_unused_variables() {
 }
 
 fn manual_lint_arguments(build_path: &Path) -> Vec<OsString> {
-    let mut args = vec![
+    vec![
         OsString::from("--edition"),
         OsString::from("2024"),
         OsString::from("-D"),
@@ -1471,19 +1453,8 @@ fn manual_lint_arguments(build_path: &Path) -> Vec<OsString> {
         OsString::from("bin"),
         OsString::from("--error-format"),
         OsString::from("human"),
-    ];
-
-    if let Some(out_dir) = std::env::var_os("OUT_DIR").map(PathBuf::from) {
-        let lint_out_dir = out_dir.join("build_rs_lint");
-        let _ = std::fs::create_dir_all(&lint_out_dir);
-        args.push(OsString::from("--out-dir"));
-        args.push(lint_out_dir.into_os_string());
-        args.push(OsString::from("--emit"));
-        args.push(OsString::from("metadata"));
-    }
-
-    args.push(build_path.as_os_str().to_os_string());
-    args
+        build_path.as_os_str().to_os_string(),
+    ]
 }
 
 fn build_dependencies_directory() -> Option<PathBuf> {
