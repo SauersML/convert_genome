@@ -2,7 +2,7 @@ use crate::cli::Sex;
 use crate::reference::ParBoundaries;
 use std::{
     fs,
-    io::{self, BufReader},
+    io::{self},
     path::PathBuf,
 };
 
@@ -134,10 +134,9 @@ impl VariantWriter for PlinkWriter {
 
 /// Pre-scan a DTC file to collect records for inference.
 /// This reads the file once and returns records for both build and sex inference.
-fn prescan_dtc_records(input: &PathBuf) -> Result<Vec<dtc::Record>> {
-    let file = fs::File::open(input)
+fn prescan_dtc_records(input: &std::path::Path) -> Result<Vec<dtc::Record>> {
+    let reader = crate::smart_reader::open_input(input)
         .with_context(|| format!("failed to open input for inference: {}", input.display()))?;
-    let reader = BufReader::new(file);
     let dtc_reader = dtc::Reader::new(reader);
 
     // Collect records (using same max_records limit for safety)
@@ -275,9 +274,8 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // Instantiate Source Iterator
     let source: Box<dyn crate::input::VariantSource> = match config.input_format {
         crate::input::InputFormat::Dtc => {
-            let input = fs::File::open(&config.input)
+            let reader = crate::smart_reader::open_input(&config.input)
                 .with_context(|| format!("failed to open input {}", config.input.display()))?;
-            let reader = BufReader::new(input);
             let dtc_reader = dtc::Reader::new(reader);
             // DTC format always requires reference (checked above)
             let source = crate::input::DtcSource::new(
@@ -288,9 +286,8 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             Box::new(source)
         }
         crate::input::InputFormat::Vcf => {
-            let input = fs::File::open(&config.input)
+            let reader = crate::smart_reader::open_input(&config.input)
                 .with_context(|| format!("failed to open input {}", config.input.display()))?;
-            let reader = BufReader::new(input);
             let vcf_reader = vcf::io::Reader::new(reader);
             let source = if let Some(ref ref_genome) = reference {
                 crate::input::VcfSource::new(vcf_reader, ref_genome)
@@ -302,9 +299,9 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             Box::new(source)
         }
         crate::input::InputFormat::Bcf => {
-            let input = fs::File::open(&config.input)
+            let reader = crate::smart_reader::open_input(&config.input)
                 .with_context(|| format!("failed to open input {}", config.input.display()))?;
-            let bcf_reader = bcf::io::Reader::new(input);
+            let bcf_reader = bcf::io::Reader::new(reader);
             let source = if let Some(ref ref_genome) = reference {
                 crate::input::BcfSource::new(bcf_reader, ref_genome)
                     .with_context(|| "failed to initialize BCF source")?
@@ -315,7 +312,56 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             Box::new(source)
         }
         crate::input::InputFormat::Auto => {
-            return Err(anyhow!("Auto format detection failed or not resolved"));
+            // This should have been resolved by CLI, but if used as library, we might need to resolve it.
+            let format = crate::input::InputFormat::detect(&config.input);
+            match format {
+                crate::input::InputFormat::Dtc => {
+                    let reader =
+                        crate::smart_reader::open_input(&config.input).with_context(|| {
+                            format!("failed to open input {}", config.input.display())
+                        })?;
+                    let dtc_reader = dtc::Reader::new(reader);
+                    let source = crate::input::DtcSource::new(
+                        dtc_reader,
+                        reference.clone().unwrap(),
+                        config.clone(),
+                    );
+                    Box::new(source)
+                }
+                crate::input::InputFormat::Vcf => {
+                    let reader =
+                        crate::smart_reader::open_input(&config.input).with_context(|| {
+                            format!("failed to open input {}", config.input.display())
+                        })?;
+                    let vcf_reader = vcf::io::Reader::new(reader);
+                    let source = if let Some(ref ref_genome) = reference {
+                        crate::input::VcfSource::new(vcf_reader, ref_genome)
+                            .with_context(|| "failed to initialize VCF source")?
+                    } else {
+                        crate::input::VcfSource::new_without_reference(vcf_reader)
+                            .with_context(|| "failed to initialize VCF source")?
+                    };
+                    Box::new(source)
+                }
+                crate::input::InputFormat::Bcf => {
+                    let reader =
+                        crate::smart_reader::open_input(&config.input).with_context(|| {
+                            format!("failed to open input {}", config.input.display())
+                        })?;
+                    let bcf_reader = bcf::io::Reader::new(reader);
+                    let source = if let Some(ref ref_genome) = reference {
+                        crate::input::BcfSource::new(bcf_reader, ref_genome)
+                            .with_context(|| "failed to initialize BCF source")?
+                    } else {
+                        crate::input::BcfSource::new_without_reference(bcf_reader)
+                            .with_context(|| "failed to initialize BCF source")?
+                    };
+                    Box::new(source)
+                }
+                crate::input::InputFormat::Auto => {
+                    return Err(anyhow!("Auto format detection failed recursively"));
+                }
+            }
         }
     };
 

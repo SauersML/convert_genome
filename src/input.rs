@@ -30,33 +30,35 @@ pub enum InputFormat {
 
 impl InputFormat {
     pub fn detect(path: &std::path::Path) -> Self {
-        // First check file extension
+        use std::io::BufRead;
+
+        // Use smart reader to peel off compression layers (GZIP, ZIP, etc.)
+        if let Ok(mut reader) = crate::smart_reader::open_input(path) {
+            // Peek at the beginning of the stream
+            if let Ok(buf) = reader.fill_buf() {
+                if buf.len() >= 3 && &buf[..3] == b"BCF" {
+                    return Self::Bcf;
+                }
+                // VCF files typically start with '#' (0x23) for header
+                if !buf.is_empty() && buf[0] == b'#' {
+                    // It could be a comment in DTC, but usually VCF starts with ##fileformat=VCF
+                    // We only confidently return VCF if we see the strict header.
+                    if buf.starts_with(b"##fileformat=VCF") {
+                        return Self::Vcf;
+                    }
+                    // If it starts with '#' but not the strict header, it might be DTC with comments.
+                    // We fall through to extension check or DTC default.
+                }
+            }
+        }
+
+        // Fallback: Check file extension if content detection failed or ambiguous
+        // (Though smart_reader failure usually means file error)
         if let Some(filename) = path.file_name().map(|n| n.to_string_lossy().to_lowercase()) {
             if filename.ends_with(".vcf.gz") || filename.ends_with(".vcf") {
                 return Self::Vcf;
             } else if filename.ends_with(".bcf") || filename.ends_with(".bcf.gz") {
                 return Self::Bcf;
-            } else if filename.ends_with(".txt")
-                || filename.ends_with(".csv")
-                || filename.ends_with(".tsv")
-            {
-                return Self::Dtc;
-            }
-        }
-
-        // Check magic bytes for BCF (starts with 'BCF' = 0x42 0x43 0x46)
-        if let Ok(file) = std::fs::File::open(path) {
-            use std::io::Read;
-            let mut reader = std::io::BufReader::new(file);
-            let mut magic = [0u8; 3];
-            if reader.read_exact(&mut magic).is_ok() {
-                if &magic == b"BCF" {
-                    return Self::Bcf;
-                }
-                // VCF files typically start with '#' (0x23) for header
-                if magic[0] == b'#' {
-                    return Self::Vcf;
-                }
             }
         }
 
