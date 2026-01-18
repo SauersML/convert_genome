@@ -134,7 +134,7 @@ impl VariantWriter for PlinkWriter {
 
 /// Pre-scan a DTC file to collect records for inference.
 /// This reads the file once and returns records for both build and sex inference.
-fn prescan_dtc_records(input: &PathBuf) -> Result<Vec<dtc::Record>> {
+fn prescan_dtc_records(input: &std::path::Path) -> Result<Vec<dtc::Record>> {
     let reader = crate::smart_reader::open_input(input)
         .with_context(|| format!("failed to open input for inference: {}", input.display()))?;
     let dtc_reader = dtc::Reader::new(reader);
