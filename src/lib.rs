@@ -10,6 +10,7 @@ pub mod plink;
 pub mod reference;
 pub mod remote;
 pub mod report;
+pub mod smart_reader;
 
 pub use conversion::{ConversionConfig, OutputFormat, convert_dtc_file};
 
