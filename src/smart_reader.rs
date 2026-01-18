@@ -1,7 +1,7 @@
+use flate2::read::{DeflateDecoder, MultiGzDecoder};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
-use std::fs::File;
-use flate2::read::{MultiGzDecoder, DeflateDecoder};
 
 /// Opens a file and transparently peels off GZIP, BGZF, and ZIP layers
 /// to expose the underlying raw data stream.
@@ -31,7 +31,11 @@ pub fn open_input(path: &Path) -> anyhow::Result<Box<dyn BufRead + Send>> {
             // GZIP magic: 1f 8b
             is_gzip = buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b;
             // ZIP magic: PK\x03\x04 (Little Endian: 50 4b 03 04)
-            is_zip = buf.len() >= 4 && buf[0] == 0x50 && buf[1] == 0x4b && buf[2] == 0x03 && buf[3] == 0x04;
+            is_zip = buf.len() >= 4
+                && buf[0] == 0x50
+                && buf[1] == 0x4b
+                && buf[2] == 0x03
+                && buf[3] == 0x04;
         }
 
         if is_gzip {
@@ -52,7 +56,9 @@ pub fn open_input(path: &Path) -> anyhow::Result<Box<dyn BufRead + Send>> {
 }
 
 /// Reads the first entry of a ZIP stream.
-fn read_zip_first_entry(mut reader: Box<dyn BufRead + Send>) -> anyhow::Result<Box<dyn Read + Send>> {
+fn read_zip_first_entry(
+    mut reader: Box<dyn BufRead + Send>,
+) -> anyhow::Result<Box<dyn Read + Send>> {
     // Read 30 bytes Local File Header
     let mut header = [0u8; 30];
     reader.read_exact(&mut header)?;
@@ -61,7 +67,8 @@ fn read_zip_first_entry(mut reader: Box<dyn BufRead + Send>) -> anyhow::Result<B
     // Signature (0-3) should be 50 4b 03 04, detected by caller
     let flags = u16::from_le_bytes([header[6], header[7]]);
     let compression = u16::from_le_bytes([header[8], header[9]]);
-    let compressed_size = u32::from_le_bytes([header[18], header[19], header[20], header[21]]) as u64;
+    let compressed_size =
+        u32::from_le_bytes([header[18], header[19], header[20], header[21]]) as u64;
     // let uncompressed_size = u32::from_le_bytes([header[22], header[23], header[24], header[25]]);
     let name_len = u16::from_le_bytes([header[26], header[27]]) as usize;
     let extra_len = u16::from_le_bytes([header[28], header[29]]) as usize;
@@ -87,7 +94,9 @@ fn read_zip_first_entry(mut reader: Box<dyn BufRead + Send>) -> anyhow::Result<B
             // If bit 3 (0x0008) of flags is set, size is in Data Descriptor (after data).
             // For Store method, this is problematic for streaming if we don't know when to stop.
             if (flags & 0x0008) != 0 {
-                tracing::warn!("ZIP Stored entry has Data Descriptor (bit 3 set). Cannot determine size safely in stream. Reading until EOF.");
+                tracing::warn!(
+                    "ZIP Stored entry has Data Descriptor (bit 3 set). Cannot determine size safely in stream. Reading until EOF."
+                );
                 Ok(Box::new(reader))
             } else {
                 // Size is known in header

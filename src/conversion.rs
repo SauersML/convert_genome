@@ -316,8 +316,10 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             let format = crate::input::InputFormat::detect(&config.input);
             match format {
                 crate::input::InputFormat::Dtc => {
-                    let reader = crate::smart_reader::open_input(&config.input)
-                        .with_context(|| format!("failed to open input {}", config.input.display()))?;
+                    let reader =
+                        crate::smart_reader::open_input(&config.input).with_context(|| {
+                            format!("failed to open input {}", config.input.display())
+                        })?;
                     let dtc_reader = dtc::Reader::new(reader);
                     let source = crate::input::DtcSource::new(
                         dtc_reader,
@@ -327,8 +329,10 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                     Box::new(source)
                 }
                 crate::input::InputFormat::Vcf => {
-                    let reader = crate::smart_reader::open_input(&config.input)
-                        .with_context(|| format!("failed to open input {}", config.input.display()))?;
+                    let reader =
+                        crate::smart_reader::open_input(&config.input).with_context(|| {
+                            format!("failed to open input {}", config.input.display())
+                        })?;
                     let vcf_reader = vcf::io::Reader::new(reader);
                     let source = if let Some(ref ref_genome) = reference {
                         crate::input::VcfSource::new(vcf_reader, ref_genome)
@@ -340,8 +344,10 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                     Box::new(source)
                 }
                 crate::input::InputFormat::Bcf => {
-                    let reader = crate::smart_reader::open_input(&config.input)
-                        .with_context(|| format!("failed to open input {}", config.input.display()))?;
+                    let reader =
+                        crate::smart_reader::open_input(&config.input).with_context(|| {
+                            format!("failed to open input {}", config.input.display())
+                        })?;
                     let bcf_reader = bcf::io::Reader::new(reader);
                     let source = if let Some(ref ref_genome) = reference {
                         crate::input::BcfSource::new(bcf_reader, ref_genome)
@@ -352,7 +358,9 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                     };
                     Box::new(source)
                 }
-                crate::input::InputFormat::Auto => return Err(anyhow!("Auto format detection failed recursively")),
+                crate::input::InputFormat::Auto => {
+                    return Err(anyhow!("Auto format detection failed recursively"));
+                }
             }
         }
     };

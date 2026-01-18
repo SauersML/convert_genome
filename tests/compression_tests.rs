@@ -1,4 +1,3 @@
-
 #[test]
 fn test_dtc_with_comments() {
     let temp = assert_fs::TempDir::new().unwrap();
@@ -10,27 +9,37 @@ fn test_dtc_with_comments() {
     input.write_str(dtc_content).unwrap();
 
     let output = temp.child("out.vcf");
-    let config = create_config(input.path().to_path_buf(), ref_path, output.path().to_path_buf());
+    let config = create_config(
+        input.path().to_path_buf(),
+        ref_path,
+        output.path().to_path_buf(),
+    );
 
     // Should detect as DTC (because it fails VCF check) and convert successfully
     let summary = convert_dtc_file(config).unwrap();
     assert_eq!(summary.variant_records, 1);
 }
 
-use std::io::{Write, Cursor};
-use std::path::PathBuf;
 use assert_fs::prelude::*;
 use convert_genome::{ConversionConfig, OutputFormat, convert_dtc_file};
+use std::io::{Cursor, Write};
+use std::path::PathBuf;
 use zip::write::FileOptions;
 
-fn create_nested_file(dir: &assert_fs::TempDir, content: &str, layers: &[&str], filename: &str) -> PathBuf {
+fn create_nested_file(
+    dir: &assert_fs::TempDir,
+    content: &str,
+    layers: &[&str],
+    filename: &str,
+) -> PathBuf {
     let mut current_data = content.as_bytes().to_vec();
     let mut current_name = filename.to_string();
 
     for layer in layers.iter().rev() {
         match *layer {
             "gz" => {
-                let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
                 encoder.write_all(&current_data).unwrap();
                 current_data = encoder.finish().unwrap();
                 current_name = format!("{}.gz", current_name);
@@ -39,7 +48,8 @@ fn create_nested_file(dir: &assert_fs::TempDir, content: &str, layers: &[&str], 
                 let mut buf = Vec::new();
                 {
                     let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
-                    zip.start_file::<&str, ()>(&current_name, FileOptions::default()).unwrap();
+                    zip.start_file::<&str, ()>(&current_name, FileOptions::default())
+                        .unwrap();
                     zip.write_all(&current_data).unwrap();
                     zip.finish().unwrap();
                 }
@@ -92,7 +102,11 @@ fn test_plain_vcf() {
     input.write_str(vcf_content).unwrap();
 
     let output = temp.child("out.vcf");
-    let config = create_config(input.path().to_path_buf(), ref_path, output.path().to_path_buf());
+    let config = create_config(
+        input.path().to_path_buf(),
+        ref_path,
+        output.path().to_path_buf(),
+    );
 
     let summary = convert_dtc_file(config).unwrap();
     assert_eq!(summary.variant_records, 1);
@@ -157,7 +171,11 @@ fn test_lying_extension_gz_as_txt() {
     input.write_binary(&gz_data).unwrap();
 
     let output = temp.child("out.vcf");
-    let config = create_config(input.path().to_path_buf(), ref_path, output.path().to_path_buf());
+    let config = create_config(
+        input.path().to_path_buf(),
+        ref_path,
+        output.path().to_path_buf(),
+    );
 
     let summary = convert_dtc_file(config).unwrap();
     assert_eq!(summary.variant_records, 1);
@@ -173,7 +191,8 @@ fn test_lying_extension_zip_as_gz() {
     let mut buf = Vec::new();
     {
         let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
-        zip.start_file::<&str, ()>("test.vcf", FileOptions::default()).unwrap();
+        zip.start_file::<&str, ()>("test.vcf", FileOptions::default())
+            .unwrap();
         zip.write_all(vcf_content.as_bytes()).unwrap();
         zip.finish().unwrap();
     }
@@ -183,7 +202,11 @@ fn test_lying_extension_zip_as_gz() {
     input.write_binary(&buf).unwrap();
 
     let output = temp.child("out.vcf");
-    let config = create_config(input.path().to_path_buf(), ref_path, output.path().to_path_buf());
+    let config = create_config(
+        input.path().to_path_buf(),
+        ref_path,
+        output.path().to_path_buf(),
+    );
 
     let summary = convert_dtc_file(config).unwrap();
     assert_eq!(summary.variant_records, 1);
@@ -207,7 +230,7 @@ fn test_dtc_nested_compression() {
 
 #[test]
 fn test_double_gz() {
-     let temp = assert_fs::TempDir::new().unwrap();
+    let temp = assert_fs::TempDir::new().unwrap();
     let ref_path = create_reference(&temp);
     let vcf_content = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n1\t1\t.\tA\tC\t.\t.\t.\tGT\t0/1\n";
     // test.vcf.gz.gz
