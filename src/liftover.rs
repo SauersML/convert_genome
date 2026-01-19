@@ -823,7 +823,28 @@ mod tests {
         let chain_path = create_dummy_chain(&dir, "ambig.chain", chain_content);
         let chain_map = ChainMap::load(chain_path).unwrap();
 
-        // Position 150 maps to both chains - should be ambiguous
+        // Position 150 maps to both chains - highest score chain should win
+        let (chrom, pos, strand) = chain_map.lift("chr1", 150).unwrap();
+        assert_eq!(chrom, "chr1");
+        assert_eq!(pos, 250);
+        assert_eq!(strand, Strand::Forward);
+    }
+
+    #[test]
+    fn test_lift_overlap_score_tie_is_ambiguous() {
+        let dir = TempDir::new().unwrap();
+        // Two overlapping chains with the same score but different IDs.
+        // This should fail-closed as ambiguous.
+        let chain_content = concat!(
+            "chain 100 chr1 1000 + 100 200 chr1 1000 + 200 300 1\n",
+            "100 0 0\n",
+            "\n",
+            "chain 100 chr1 1000 + 100 200 chr2 1000 + 400 500 2\n",
+            "100 0 0\n",
+        );
+        let chain_path = create_dummy_chain(&dir, "tie.chain", chain_content);
+        let chain_map = ChainMap::load(chain_path).unwrap();
+
         let result = chain_map.lift("chr1", 150);
         assert_eq!(result, Err(LiftoverError::Ambiguous));
     }

@@ -686,7 +686,7 @@ where
                         r.contig_index(chrom_name).unwrap_or(usize::MAX)
                     } else {
                         let (idx, _) = crate::input::natural_contig_order(chrom_name);
-                        idx
+                        idx as usize
                     };
 
                     let pos_key = final_record

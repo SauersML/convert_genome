@@ -7,6 +7,7 @@ use crate::reference::ReferenceGenome;
 use crate::remote::{self};
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Strand orientation mode for the input file.
