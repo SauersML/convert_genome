@@ -281,16 +281,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Build detection failed: {}. Assuming input matches target.",
-                        e
-                    );
-                    inferred_build_opt = Some(config.assembly.clone());
-                    build_detection = Some(crate::report::BuildDetection {
-                        detected_build: config.assembly.clone(),
-                        hg19_match_rate: 0.0,
-                        hg38_match_rate: 1.0,
-                    });
+                    return Err(anyhow!(
+                        "Build detection failed: {}. Refusing to assume input matches target ({})",
+                        e,
+                        config.assembly
+                    ));
                 }
             }
         }
@@ -468,6 +463,8 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         }
     };
 
+    let needs_sort = liftover_chain.is_some();
+
     // Apply Liftover Adapter if active
     if let Some(chain) = liftover_chain {
         tracing::info!("Applying liftover adapter...");
@@ -496,6 +493,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 &config,
                 &mut summary,
                 padded_panel.as_ref(),
+                needs_sort,
             )?;
         }
         OutputFormat::Bcf => {
@@ -513,6 +511,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 &config,
                 &mut summary,
                 padded_panel.as_ref(),
+                needs_sort,
             )?;
         }
         OutputFormat::Plink => {
@@ -531,6 +530,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 &config,
                 &mut summary,
                 padded_panel.as_ref(),
+                needs_sort,
             )?;
         }
     }
@@ -614,6 +614,7 @@ fn process_records<S, W>(
     config: &ConversionConfig,
     summary: &mut crate::ConversionSummary,
     panel: Option<&std::cell::RefCell<crate::panel::PaddedPanel>>,
+    needs_sort: bool,
 ) -> Result<()>
 where
     S: crate::input::VariantSource,
@@ -678,21 +679,27 @@ where
 
                 summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
 
-                let chrom_name = final_record.reference_sequence_name();
-                let contig_key = if let Some(r) = reference {
-                    r.contig_index(chrom_name).unwrap_or(usize::MAX)
+                if needs_sort {
+                    let chrom_name = final_record.reference_sequence_name();
+                    let contig_key = if let Some(r) = reference {
+                        r.contig_index(chrom_name).unwrap_or(usize::MAX)
+                    } else {
+                        let (idx, _) = crate::input::natural_contig_order(chrom_name);
+                        idx
+                    };
+
+                    let pos_key = final_record
+                        .variant_start()
+                        .map(usize::from)
+                        .unwrap_or(0);
+
+                    buffered_records.push((contig_key, pos_key, ordinal, final_record));
+                    ordinal = ordinal.saturating_add(1);
                 } else {
-                    let (idx, _) = crate::input::natural_contig_order(chrom_name);
-                    idx
-                };
-
-                let pos_key = final_record
-                    .variant_start()
-                    .map(usize::from)
-                    .unwrap_or(0);
-
-                buffered_records.push((contig_key, pos_key, ordinal, final_record));
-                ordinal = ordinal.saturating_add(1);
+                    writer
+                        .write_variant(header, &final_record)
+                        .context("failed to write variant record")?;
+                }
             }
             Err(e) => {
                 summary.parse_errors += 1;
@@ -704,14 +711,16 @@ where
         }
     }
 
-    buffered_records.sort_by(|(a_contig, a_pos, a_ord, _), (b_contig, b_pos, b_ord, _)| {
-        (a_contig, a_pos, a_ord).cmp(&(b_contig, b_pos, b_ord))
-    });
+    if needs_sort {
+        buffered_records.sort_by(|(a_contig, a_pos, a_ord, _), (b_contig, b_pos, b_ord, _)| {
+            (a_contig, a_pos, a_ord).cmp(&(b_contig, b_pos, b_ord))
+        });
 
-    for (_, _, _, record) in buffered_records {
-        writer
-            .write_variant(header, &record)
-            .context("failed to write variant record")?;
+        for (_, _, _, record) in buffered_records {
+            writer
+                .write_variant(header, &record)
+                .context("failed to write variant record")?;
+        }
     }
 
     Ok(())
