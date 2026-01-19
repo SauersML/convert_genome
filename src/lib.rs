@@ -12,6 +12,7 @@ pub mod reference;
 pub mod remote;
 pub mod report;
 pub mod smart_reader;
+pub mod vcf_utils;
 
 pub use conversion::{ConversionConfig, OutputFormat, convert_dtc_file};
 

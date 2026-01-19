@@ -121,7 +121,10 @@ fn reports_unknown_chromosomes() -> Result<()> {
     // Add valid records to pass concordance check (>0.7)
     // 3 valid records (concordant), 1 unknown.
     // Concordance = 3/3 = 1.0 (unknown is skipped in check).
-    let input = write_dtc(&temp, "rs1\tUn\t1\tAA\nrs2\t1\t1\tAA\nrs3\t1\t2\tCC\nrs4\t1\t3\tGG\n")?;
+    let input = write_dtc(
+        &temp,
+        "rs1\tUn\t1\tAA\nrs2\t1\t1\tAA\nrs3\t1\t2\tCC\nrs4\t1\t3\tGG\n",
+    )?;
 
     let vcf_path = temp.child("unknown.vcf");
     let config = base_config(input, reference, vcf_path.path().to_path_buf());

@@ -27,7 +27,7 @@ use noodles::vcf::{
     variant::{
         io::Write as VariantRecordWrite,
         record::samples::keys::key as format_key,
-        record_buf::{RecordBuf, Samples, samples::sample::Value},
+        record_buf::RecordBuf,
     },
 };
 // rayon removed
@@ -36,6 +36,7 @@ use thiserror::Error;
 use time::{OffsetDateTime, macros::format_description};
 
 use crate::{
+    vcf_utils::remap_sample_genotypes,
     ConversionSummary,
     dtc::{self, Allele as DtcAllele, parse_genotype},
     liftover::{ChainRegistry, LiftoverAdapter},
@@ -251,23 +252,36 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 0.0
             };
 
-            tracing::info!("Target Concordance: {:.1}% ({} variants)", concordance * 100.0, total_checked);
+            tracing::info!(
+                "Target Concordance: {:.1}% ({} variants)",
+                concordance * 100.0,
+                total_checked
+            );
 
             if concordance < 0.7 {
-                tracing::warn!("Low concordance with target assembly ({}). Input build likely differs.", config.assembly);
+                tracing::warn!(
+                    "Low concordance with target assembly ({}). Input build likely differs.",
+                    config.assembly
+                );
 
                 // Heuristic: If target is GRCh38, assume input is GRCh37 (hg19)
                 // If target is GRCh37, assume input is GRCh38
                 let inferred = if config.assembly.contains("38") {
                     "GRCh37".to_string()
-                } else if config.assembly.contains("37") || config.assembly.to_lowercase().contains("hg19") {
+                } else if config.assembly.contains("37")
+                    || config.assembly.to_lowercase().contains("hg19")
+                {
                     "GRCh38".to_string()
                 } else {
                     "Unknown".to_string()
                 };
 
                 if inferred != "Unknown" {
-                    tracing::info!("Inferred input build: {}. Initiating Liftover to {}.", inferred, config.assembly);
+                    tracing::info!(
+                        "Inferred input build: {}. Initiating Liftover to {}.",
+                        inferred,
+                        config.assembly
+                    );
                     inferred_build_opt = Some(inferred.clone());
                     build_detection = Some(crate::report::BuildDetection {
                         detected_build: inferred.clone(),
@@ -278,33 +292,36 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                     // Setup Liftover
                     match ChainRegistry::new() {
                         Ok(registry) => {
-                             match registry.get_chain(&inferred, &config.assembly) {
+                            match registry.get_chain(&inferred, &config.assembly) {
                                 Ok(chain) => {
                                     liftover_chain = Some(Arc::new(chain));
                                     // Force standardization for liftover workflow
                                     config.standardize = true;
-                                },
+                                }
                                 Err(e) => tracing::error!("Failed to load chain file: {}", e),
-                             }
-                        },
+                            }
+                        }
                         Err(e) => tracing::error!("Failed to initialize ChainRegistry: {}", e),
                     }
                 }
             } else {
-                 tracing::info!("Concordance high. Input matches target assembly.");
-                 inferred_build_opt = Some(config.assembly.clone());
-                 build_detection = Some(crate::report::BuildDetection {
-                        detected_build: config.assembly.clone(),
-                        hg19_match_rate: 0.0,
-                        hg38_match_rate: 1.0,
-                 });
+                tracing::info!("Concordance high. Input matches target assembly.");
+                inferred_build_opt = Some(config.assembly.clone());
+                build_detection = Some(crate::report::BuildDetection {
+                    detected_build: config.assembly.clone(),
+                    hg19_match_rate: 0.0,
+                    hg38_match_rate: 1.0,
+                });
             }
         }
 
         // Infer sex if not provided
         if config.sex.is_none() {
             let build_for_sex = inferred_build_opt.as_ref().unwrap_or(&config.assembly);
-            tracing::info!("Sex not specified, inferring from input data (assuming {})...", build_for_sex);
+            tracing::info!(
+                "Sex not specified, inferring from input data (assuming {})...",
+                build_for_sex
+            );
             match crate::inference::infer_sex_from_records(&prescan_records, build_for_sex) {
                 Ok(inferred) => {
                     tracing::info!("Inferred sex: {:?}", inferred);
@@ -352,11 +369,15 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 reference.clone()
             };
 
-            let source = crate::input::DtcSource::new(
-                dtc_reader,
-                dtc_reference,
-                config.clone(),
-            );
+            // If liftover is active, we should NOT check PAR boundaries for ploidy
+            // because DtcSource is operating on Source coordinates, but config.par_boundaries
+            // are for Target coordinates.
+            let mut source_config = config.clone();
+            if liftover_chain.is_some() {
+                source_config.par_boundaries = None;
+            }
+
+            let source = crate::input::DtcSource::new(dtc_reader, dtc_reference, source_config);
             Box::new(source)
         }
         crate::input::InputFormat::Vcf => {
@@ -402,11 +423,13 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                         reference.clone()
                     };
 
-                    let source = crate::input::DtcSource::new(
-                        dtc_reader,
-                        dtc_reference,
-                        config.clone(),
-                    );
+                    let mut source_config = config.clone();
+                    if liftover_chain.is_some() {
+                        source_config.par_boundaries = None;
+                    }
+
+                    let source =
+                        crate::input::DtcSource::new(dtc_reader, dtc_reference, source_config);
                     Box::new(source)
                 }
                 crate::input::InputFormat::Vcf => {
@@ -449,7 +472,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // Apply Liftover Adapter if active
     if let Some(chain) = liftover_chain {
         tracing::info!("Applying liftover adapter...");
-        source = Box::new(LiftoverAdapter::new(source, chain, reference.clone().unwrap()));
+        source = Box::new(LiftoverAdapter::new(
+            source,
+            chain,
+            reference.clone().unwrap(),
+        ));
     }
 
     let mut summary = crate::ConversionSummary::default();
@@ -957,105 +984,6 @@ pub fn standardize_record(
     Ok(Some(builder.build()))
 }
 
-/// Remap genotype indices in all samples based on mapping
-fn remap_sample_genotypes(
-    samples: &noodles::vcf::variant::record_buf::Samples,
-    mapping: &std::collections::HashMap<usize, usize>,
-) -> noodles::vcf::variant::record_buf::Samples {
-    let keys = samples.keys();
-    let mut new_keys_vec = Vec::new();
-    // Filter keys: keep GT and safe fields (GQ, DP, MIN_DP), drop allele-dependent fields (PL, AD, GP)
-    for key in keys.as_ref().iter() {
-        if key == format_key::GENOTYPE || key == "GQ" || key == "DP" || key == "MIN_DP" {
-            new_keys_vec.push(key.clone());
-        } else {
-            tracing::debug!("Dropping field {} during polarization", key);
-        }
-    }
-
-    // Create new keys object
-    let new_keys: noodles::vcf::variant::record_buf::samples::Keys =
-        new_keys_vec.into_iter().collect();
-
-    let mut new_values = Vec::new();
-
-    for sample in samples.values() {
-        let mut new_sample_vals = Vec::new();
-
-        // Iterate through valid keys and extract values from original sample
-        for key in new_keys.as_ref().iter() {
-            let val_opt = sample.get(key).flatten().cloned();
-
-            if key == format_key::GENOTYPE {
-                if let Some(Value::String(gt_str)) = &val_opt {
-                    new_sample_vals.push(Some(Value::String(remap_gt_string(gt_str, mapping))));
-                } else {
-                    new_sample_vals.push(val_opt);
-                }
-            } else {
-                new_sample_vals.push(val_opt);
-            }
-        }
-        new_values.push(new_sample_vals);
-    }
-
-    Samples::new(new_keys, new_values)
-}
-
-/// Remap genotype indices in a GT string (e.g., "0/1" -> "1/0")
-/// Handles standard separators (/, |) and ignores '.'
-fn remap_gt_string(gt: &str, mapping: &std::collections::HashMap<usize, usize>) -> String {
-    // Split by separators, map, join back?
-    // Or char-by-char if single digits?
-    // GT might have multi-digit indices (e.g. 10). Char mapping is unsafe.
-    // Parse fully.
-
-    // Simple parser for VCF GT string:
-    // Split on first separator to detect phase?
-    // Actually, VCF GT is usually integers separated by / or |.
-
-    // We can use a regex or manual scan.
-    // Manual scan is safer and faster.
-    let mut result = String::with_capacity(gt.len());
-    let mut current_num = String::new();
-
-    for c in gt.chars() {
-        if c.is_ascii_digit() {
-            current_num.push(c);
-        } else {
-            // End of number
-            if !current_num.is_empty() {
-                if let Ok(idx) = current_num.parse::<usize>() {
-                    if let Some(new_idx) = mapping.get(&idx) {
-                        result.push_str(&new_idx.to_string());
-                    } else {
-                        // Keep original validity? Or warn?
-                        // If mapping incomplete, keep original (risky) or map to .?
-                        result.push_str(&current_num);
-                    }
-                } else {
-                    result.push_str(&current_num);
-                }
-                current_num.clear();
-            }
-            result.push(c);
-        }
-    }
-    // Final number
-    if !current_num.is_empty() {
-        if let Ok(idx) = current_num.parse::<usize>() {
-            if let Some(new_idx) = mapping.get(&idx) {
-                result.push_str(&new_idx.to_string());
-            } else {
-                result.push_str(&current_num);
-            }
-        } else {
-            result.push_str(&current_num);
-        }
-    }
-
-    result
-}
 
 #[doc(hidden)]
 pub fn format_genotype_for_tests(

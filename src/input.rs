@@ -138,7 +138,7 @@ impl DtcSource {
                 (idx, rec.position)
             });
         } else {
-             raw_records.sort_by_cached_key(|rec| {
+            raw_records.sort_by_cached_key(|rec| {
                 let (idx, _) = natural_contig_order(&rec.chromosome);
                 (idx, rec.position)
             });
