@@ -206,6 +206,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     let mut liftover_chain: Option<Arc<crate::liftover::ChainMap>> = None;
     let mut inferred_build_opt: Option<String> = None;
     let mut inferred_strand: Option<crate::source_ref::InferredStrand> = None;
+    let mut source_reference_for_liftover: Option<ReferenceGenome> = None;
 
     // build_detection variable is used in report_builder
     let mut build_detection: Option<crate::report::BuildDetection> = None;
@@ -296,9 +297,23 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             tracing::info!(build = %detected_build, "Inferring strand orientation for DTC input");
             let source_ref = crate::source_ref::load_source_reference(detected_build)
                 .with_context(|| "failed to load source reference for strand inference")?;
-            let strand = crate::source_ref::infer_strand_lock(&prescan_records, &source_ref)
-                .with_context(|| "strand inference failed")?;
-            inferred_strand = Some(strand);
+
+            match crate::source_ref::infer_strand_lock(&prescan_records, &source_ref) {
+                Ok(strand) => {
+                    inferred_strand = Some(strand);
+                    source_reference_for_liftover = Some(source_ref);
+                }
+                Err(e) => {
+                    // If liftover is required, strand uncertainty is a hard error.
+                    // If liftover is not required, allow conversion to proceed (it may emit
+                    // fewer or less-harmonized variants) but do not block empty/sparse inputs.
+                    if liftover_chain.is_some() {
+                        return Err(e).with_context(|| "strand inference failed");
+                    }
+                    tracing::warn!(error = %e, "strand inference failed; defaulting to Forward");
+                    inferred_strand = Some(crate::source_ref::InferredStrand::Forward);
+                }
+            }
         }
 
         // Infer sex if not provided
@@ -473,6 +488,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             source,
             chain,
             reference.clone().unwrap(),
+            source_reference_for_liftover.clone(),
         ));
     }
 
