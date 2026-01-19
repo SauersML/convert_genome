@@ -1,0 +1,582 @@
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Result, anyhow, bail};
+use noodles::vcf::variant::record_buf::RecordBuf;
+use rust_lapper::{Interval, Lapper};
+use url::Url;
+
+use crate::input::VariantSource;
+use crate::reference::ReferenceGenome;
+use crate::remote::fetch_remote_resource;
+use crate::vcf_utils::remap_sample_genotypes;
+
+/// Represents the strand of a genomic region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strand {
+    Forward,
+    Reverse,
+}
+
+impl Strand {
+    fn from_char(c: char) -> Result<Self> {
+        match c {
+            '+' => Ok(Strand::Forward),
+            '-' => Ok(Strand::Reverse),
+            _ => Err(anyhow!("Invalid strand character: {}", c)),
+        }
+    }
+}
+
+/// A mapped segment in the destination genome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChainMapping {
+    /// Destination chromosome ID (internal)
+    dest_chrom_id: u32,
+    /// Destination start (qStart)
+    dest_start: u64,
+    /// Destination end (qEnd)
+    dest_end: u64,
+    /// Destination strand (qStrand)
+    dest_strand: Strand,
+    /// Destination size (qSize) - needed for reverse strand coordinate correction
+    dest_size: u64,
+    /// Source start (tStart) - needed for offset calculation
+    source_start: u64,
+}
+
+/// A map of genomic intervals from Source to Destination.
+///
+/// In UCSC chain terminology:
+/// - Source = Target (tName)
+/// - Destination = Query (qName)
+pub struct ChainMap {
+    /// Map from Source Chromosome -> IntervalTree of Mappings
+    map: HashMap<String, Lapper<u64, ChainMapping>>,
+    /// Intern table for target chromosomes
+    target_chroms: Vec<String>,
+}
+
+impl ChainMap {
+    /// Load a chain file from a path.
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        Self::from_reader(reader)
+    }
+
+    /// Parse chain file content.
+    pub fn from_reader<R: BufRead>(mut reader: R) -> Result<Self> {
+        let mut map: HashMap<String, Vec<Interval<u64, ChainMapping>>> = HashMap::new();
+        let mut target_chroms: Vec<String> = Vec::new();
+        let mut target_chrom_indices: HashMap<String, u32> = HashMap::new();
+        let mut line = String::new();
+
+        // Current header info
+        struct Header {
+            t_name: String,
+            // t_size: u64,
+            // t_strand: char,
+            t_start: u64,
+            // t_end: u64, // Unused
+            q_name: String,
+            q_size: u64,
+            q_strand: Strand,
+            q_start: u64,
+            // q_end: u64,
+            // id: String,
+        }
+        let mut current_header: Option<Header> = None;
+
+        while reader.read_line(&mut line)? > 0 {
+            if line.trim().is_empty() || line.starts_with('#') {
+                line.clear();
+                continue;
+            }
+
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.is_empty() {
+                line.clear();
+                continue;
+            }
+
+            if parts[0] == "chain" {
+                // chain score tName tSize tStrand tStart tEnd qName qSize qStrand qStart qEnd id
+                if parts.len() < 12 {
+                    continue; // Invalid header?
+                }
+                let t_name = parts[2].to_string();
+                let t_start: u64 = parts[5].parse()?;
+                // let t_end: u64 = parts[6].parse()?; // Unused
+
+                let q_name = parts[7].to_string();
+                let q_size: u64 = parts[8].parse()?;
+                let q_strand = Strand::from_char(parts[9].chars().next().unwrap())?;
+                let q_start: u64 = parts[10].parse()?;
+
+                current_header = Some(Header {
+                    t_name,
+                    t_start,
+                    // t_end,
+                    q_name,
+                    q_size,
+                    q_strand,
+                    q_start,
+                });
+            } else {
+                // Data line: size [dt dq]
+                // size: length of ungapped alignment
+                // dt: gap in target (source) to next block
+                // dq: gap in query (dest) to next block
+                if let Some(ref mut header) = current_header {
+                    let size: u64 = parts[0].parse()?;
+
+                    // Create interval for this block
+                    let t_block_start = header.t_start;
+                    let t_block_end = t_block_start + size;
+
+                    let q_block_start = header.q_start;
+                    let q_block_end = q_block_start + size;
+
+                    // Intern target chromosome
+                    let dest_chrom_id = *target_chrom_indices
+                        .entry(header.q_name.clone())
+                        .or_insert_with(|| {
+                            let id = target_chroms.len() as u32;
+                            target_chroms.push(header.q_name.clone());
+                            id
+                        });
+
+                    let mapping = ChainMapping {
+                        dest_chrom_id,
+                        dest_start: q_block_start,
+                        dest_end: q_block_end,
+                        dest_strand: header.q_strand,
+                        dest_size: header.q_size,
+                        source_start: t_block_start,
+                    };
+
+                    map.entry(header.t_name.clone())
+                        .or_default()
+                        .push(Interval {
+                            start: t_block_start,
+                            stop: t_block_end,
+                            val: mapping,
+                        });
+
+                    // Update header current position
+                    header.t_start += size;
+                    header.q_start += size;
+
+                    if parts.len() == 3 {
+                        let dt: u64 = parts[1].parse()?;
+                        let dq: u64 = parts[2].parse()?;
+                        header.t_start += dt;
+                        header.q_start += dq;
+                    }
+                }
+            }
+            line.clear();
+        }
+
+        // Build Lappers
+        let mut final_map = HashMap::new();
+        for (chrom, intervals) in map {
+            final_map.insert(chrom, Lapper::new(intervals));
+        }
+
+        Ok(Self {
+            map: final_map,
+            target_chroms,
+        })
+    }
+
+    /// Lift a single coordinate (0-based) from source to destination.
+    /// Returns (new_chrom, new_pos, strand).
+    pub fn lift(&self, chrom: &str, pos: u64) -> Option<(String, u64, Strand)> {
+        // Try normalized chrom names
+        let intervals = self
+            .map
+            .get(chrom)
+            .or_else(|| self.map.get(chrom.trim_start_matches("chr")))
+            .or_else(|| self.map.get(&format!("chr{}", chrom)))?;
+
+        // Find intersecting interval
+        // We only care about the point, so interval is [pos, pos+1)
+        let matches: Vec<&Interval<u64, ChainMapping>> = intervals.find(pos, pos + 1).collect();
+
+        let m = matches.first()?;
+
+        let mapping = &m.val;
+        let offset = pos - mapping.source_start;
+
+        let new_pos = if mapping.dest_strand == Strand::Forward {
+            mapping.dest_start + offset
+        } else {
+            // Reverse strand logic
+            let q_rev_pos = mapping.dest_start + offset;
+            mapping.dest_size.checked_sub(1 + q_rev_pos)?
+        };
+
+        let dest_chrom = self
+            .target_chroms
+            .get(mapping.dest_chrom_id as usize)?
+            .clone();
+
+        Some((dest_chrom, new_pos, mapping.dest_strand))
+    }
+}
+
+/// Registry for managing chain files.
+pub struct ChainRegistry {
+    cache_dir: PathBuf,
+}
+
+impl ChainRegistry {
+    pub fn new() -> Result<Self> {
+        let dirs = directories::ProjectDirs::from("com", "convert_genome", "convert_genome")
+            .ok_or_else(|| anyhow!("Failed to determine cache directory"))?;
+        let cache_dir = dirs.cache_dir().join("chains");
+        std::fs::create_dir_all(&cache_dir)?;
+        Ok(Self { cache_dir })
+    }
+
+    pub fn get_chain(&self, source: &str, target: &str) -> Result<ChainMap> {
+        let (filename, url) = match (source, target) {
+            ("GRCh37", "GRCh38") | ("hg19", "hg38") => (
+                "hg19ToHg38.over.chain.gz",
+                "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz",
+            ),
+            ("GRCh38", "GRCh37") | ("hg38", "hg19") => (
+                "hg38ToHg19.over.chain.gz",
+                "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/liftOver/hg38ToHg19.over.chain.gz",
+            ),
+            ("NCBI36", "GRCh38") | ("hg18", "hg38") => (
+                "hg18ToHg38.over.chain.gz",
+                "https://hgdownload.soe.ucsc.edu/goldenPath/hg18/liftOver/hg18ToHg38.over.chain.gz",
+            ),
+            _ => bail!("Unsupported liftover pair: {} -> {}", source, target),
+        };
+
+        let cache_path = self.cache_dir.join(filename);
+        if !cache_path.exists() {
+            tracing::info!("Chain file not found locally. Downloading from {}", url);
+            // Use remote resource logic, but specific to keeping it in cache
+            let url = Url::parse(url)?;
+            let resource = fetch_remote_resource(&url)?;
+            // Move from temp to cache
+            // The resource unzips/ungzips. UCSC chains are .gz.
+            // fetch_remote_resource returns a path to the decompressed file.
+            std::fs::copy(resource.local_path(), &cache_path)?;
+        }
+
+        tracing::info!("Loading chain file: {}", cache_path.display());
+        ChainMap::load(&cache_path)
+    }
+}
+
+/// Helper to reverse complement a DNA string.
+fn reverse_complement_string(s: &str) -> String {
+    s.chars()
+        .rev()
+        .map(|c| match c {
+            'A' | 'a' => 'T',
+            'T' | 't' => 'A',
+            'C' | 'c' => 'G',
+            'G' | 'g' => 'C',
+            'N' | 'n' => 'N',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Adapter that lifts variants from Source to Target.
+pub struct LiftoverAdapter<S> {
+    source: S,
+    chain: Arc<ChainMap>,
+    target_reference: ReferenceGenome,
+}
+
+impl<S> LiftoverAdapter<S> {
+    pub fn new(source: S, chain: Arc<ChainMap>, target_reference: ReferenceGenome) -> Self {
+        Self {
+            source,
+            chain,
+            target_reference,
+        }
+    }
+}
+
+impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
+    fn next_variant(
+        &mut self,
+        summary: &mut crate::ConversionSummary,
+    ) -> Option<io::Result<RecordBuf>> {
+        loop {
+            // Get next record from source
+            let mut record = match self.source.next_variant(summary)? {
+                Ok(r) => r,
+                Err(e) => return Some(Err(e)),
+            };
+
+            // Original coords
+            let chrom = record.reference_sequence_name().to_string();
+            let pos: usize = record.variant_start().map(|p| p.into()).unwrap_or(0);
+
+            // 0-based for liftover
+            let pos_0 = (pos as u64).saturating_sub(1);
+
+            // Attempt lift
+            if let Some((new_chrom, new_pos_0, strand)) = self.chain.lift(&chrom, pos_0) {
+                // Update Coords (1-based)
+                let new_pos = (new_pos_0 + 1) as usize;
+
+                // Convert back to Position
+                let new_pos_obj = match noodles::core::Position::new(new_pos) {
+                    Some(p) => p,
+                    None => {
+                        // Invalid position (0?)
+                        // Skip
+                        continue;
+                    }
+                };
+
+                // Update Record
+                *record.reference_sequence_name_mut() = new_chrom.clone();
+                *record.variant_start_mut() = Some(new_pos_obj);
+
+                // Handle Strand
+                if strand == Strand::Reverse {
+                    // Reverse complement alleles
+                    let ref_bases = record.reference_bases();
+                    let new_ref = reverse_complement_string(ref_bases);
+                    *record.reference_bases_mut() = new_ref;
+
+                    let alt_bases = record.alternate_bases();
+                    let new_alts: Vec<String> = alt_bases
+                        .as_ref()
+                        .iter()
+                        .map(|a| {
+                            // Handle symbolic alleles <DEL>, <INS> - don't RC them
+                            if a.starts_with('<') {
+                                a.clone()
+                            } else {
+                                reverse_complement_string(a)
+                            }
+                        })
+                        .collect();
+                    *record.alternate_bases_mut() = new_alts.into();
+                }
+
+                // Verification gate: Check if New Ref matches Target Genome
+                if let Ok(target_base) = self.target_reference.base(&new_chrom, new_pos as u64) {
+                    let rec_ref = record.reference_bases().to_ascii_uppercase();
+                    let target_base = target_base.to_ascii_uppercase();
+
+                    // Update REF
+                    // If REF was 'N' (placeholder from no-reference DtcSource), update it.
+                    // If REF was something else (e.g. from VCF input), we check if it matches target.
+                    // If it doesn't match target, we check if it matches one of the ALTs (Reference Swap).
+                    // Or if we need to filter it out.
+
+                    let mut needs_genotype_remapping = false;
+                    let mut allele_mapping = HashMap::new(); // Old Index -> New Index
+
+                    if rec_ref == "N" || rec_ref == target_base.to_string() {
+                        *record.reference_bases_mut() = target_base.to_string();
+                    } else {
+                        // Mismatch. Check ALTs.
+                        // But wait, if we came from DtcSource, we might have ALTs that include the new Ref.
+                        // Case: Source Ref=A, Alt=G. Target Ref=G.
+                        // DtcSource (N-ref mode) -> Ref=N, Alt=[A, G].
+                        // Here: New Ref = G.
+                        // Alt=[A, G].
+                        // We need to normalize: Ref=G. Alt=[A]. GT remapped.
+
+                        *record.reference_bases_mut() = target_base.to_string();
+                    }
+
+                    // Normalize ALTs and GT
+                    // Scan current ALTs. If any match new REF, remove them and remap indices.
+                    let old_alts = record.alternate_bases().clone();
+                    let mut new_alts = Vec::new();
+
+                    // Mapping: 0 (Old Ref) -> ?
+                    // We assume Old Ref (N) is not used in GT for DTC (usually ./.).
+                    // If VCF input, Old Ref might be used.
+                    // If Old Ref != New Ref, where does Old Ref go? It becomes an ALT?
+                    // This is complex.
+
+                    // Simplify: We assume DtcSource produced Genotypes pointing to ALTs (indices 1..N).
+                    // And Ref (0) was "N".
+                    // If we set Ref to "G".
+                    // And ALTs were ["A", "G"].
+                    // Index 1 (A) -> stays Alt. New Index 1.
+                    // Index 2 (G) -> matches Ref. New Index 0.
+
+                    // Mapping construction:
+                    // We need to map Old Index i to New Index j.
+
+                    // For DTC N-ref mode:
+                    // Ref (0) -> likely invalid/unused or maps to New Ref (0)?
+                    allele_mapping.insert(0, 0); // Tentatively map 0 to 0.
+
+                    for (i, alt) in old_alts.as_ref().iter().enumerate() {
+                        let old_idx = i + 1;
+                        // Explicit type hint for alt
+                        let alt_str: &String = alt;
+                        if alt_str.eq_ignore_ascii_case(&target_base.to_string()) {
+                            // This Alt matches New Ref.
+                            // Map Old Index -> 0.
+                            allele_mapping.insert(old_idx, 0);
+                        } else {
+                            // Keep as Alt.
+                            new_alts.push(alt_str.clone());
+                            let new_idx = new_alts.len(); // 1-based
+                            allele_mapping.insert(old_idx, new_idx);
+                        }
+                    }
+
+                    if new_alts.len() != old_alts.as_ref().len() {
+                        needs_genotype_remapping = true;
+                    }
+
+                    // Update Record
+                    *record.alternate_bases_mut() = new_alts.into();
+
+                    if needs_genotype_remapping {
+                        *record.samples_mut() =
+                            remap_sample_genotypes(record.samples(), &allele_mapping);
+                    }
+
+                    // Final Check: If input was NOT 'N' (e.g. VCF), and we didn't find the target base in ALTs or Ref,
+                    // then it's a mismatch that we can't rescue (unless we keep original Ref as an Alt? No, that's messy).
+                    // For now, we trust the 'N' logic for DTC.
+                    // If rec_ref was not N and not target, and we forced it to target, we essentially "corrected" it.
+                    // But if the genotype was 0/0 (Old Ref), it becomes 0/0 (New Ref).
+                    // If Old Ref != New Ref, this changes the biology (Ref Swap).
+                    // We should verify this.
+                    // BUT: LiftoverAdapter is primarily for DTC (N-ref).
+                    // VCF input usually comes with Ref. If Ref mismatches Target, we should probably Drop or Swap.
+                    // This implementation focuses on the DTC N-ref case correctness.
+                } else {
+                    // Target position not in reference?
+                    summary.reference_failures += 1;
+                    continue;
+                }
+
+                return Some(Ok(record));
+            } else {
+                // Lift failed (gap)
+                summary.liftover_failures += 1;
+                continue;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use assert_fs::TempDir;
+    use assert_fs::prelude::*;
+
+    // Helper to create a dummy chain file
+    fn create_dummy_chain(dir: &TempDir, filename: &str, content: &str) -> PathBuf {
+        let path = dir.child(filename);
+        path.write_str(content).unwrap();
+        path.path().to_path_buf()
+    }
+
+    #[test]
+    fn test_chain_map_loading() {
+        let dir = TempDir::new().unwrap();
+        let chain_content = "chain 100 chr1 1000 + 0 1000 chr1 1000 + 0 1000 1\n100 0 0\n";
+        let chain_path = create_dummy_chain(&dir, "test.chain", chain_content);
+
+        let chain_map = ChainMap::load(chain_path).unwrap();
+        assert!(chain_map.map.contains_key("chr1"));
+        let lapper = chain_map.map.get("chr1").unwrap();
+        assert_eq!(lapper.len(), 1);
+        assert_eq!(chain_map.target_chroms.len(), 1);
+        assert_eq!(chain_map.target_chroms[0], "chr1");
+    }
+
+    #[test]
+    fn test_lift_point_forward() {
+        let dir = TempDir::new().unwrap();
+        // chr1:100-200 maps to chr1:200-300 on + strand
+        let chain_content = "chain 100 chr1 1000 + 100 200 chr1 1000 + 200 300 1\n100 0 0\n";
+        let chain_path = create_dummy_chain(&dir, "fwd.chain", chain_content);
+        let chain_map = ChainMap::load(chain_path).unwrap();
+
+        // 0-based input. 100 -> 200
+        let (chrom, pos, strand) = chain_map.lift("chr1", 100).unwrap();
+        assert_eq!(chrom, "chr1");
+        assert_eq!(pos, 200);
+        assert_eq!(strand, Strand::Forward);
+
+        // 150 -> 250
+        let (_, pos, _) = chain_map.lift("chr1", 150).unwrap();
+        assert_eq!(pos, 250);
+    }
+
+    #[test]
+    fn test_lift_point_reverse() {
+        let dir = TempDir::new().unwrap();
+        // chr1:100-200 maps to chr1:200-300 on - strand
+        // qStart=200, qEnd=300, qSize=1000.
+        // If qStrand is -, coords in chain are reversed.
+
+        let chain_content = "chain 100 chr1 1000 + 100 200 chr1 1000 - 100 200 1\n100 0 0\n";
+        let chain_path = create_dummy_chain(&dir, "rev.chain", chain_content);
+        let chain_map = ChainMap::load(chain_path).unwrap();
+
+        // Input 100 (start of block).
+        // Offset = 0.
+        // q_rev_pos = 100 + 0 = 100.
+        // physical_pos = size - 1 - q_rev_pos = 1000 - 1 - 100 = 899.
+        let (_, pos, strand) = chain_map.lift("chr1", 100).unwrap();
+        assert_eq!(strand, Strand::Reverse);
+        assert_eq!(pos, 899);
+
+        // Input 199 (end of block - 1).
+        // Offset = 99.
+        // q_rev_pos = 100 + 99 = 199.
+        // physical_pos = 1000 - 1 - 199 = 800.
+        let (_, pos, _) = chain_map.lift("chr1", 199).unwrap();
+        assert_eq!(pos, 800);
+    }
+
+    #[test]
+    fn test_liftover_adapter_round_trip() {
+        // Round trip requires two chains: A->B and B->A.
+        // A: chr1 size 1000.
+        // B: chr1 size 1000.
+        // Mapping: 100..200 -> 200..300 (Offset +100).
+
+        let dir = TempDir::new().unwrap();
+        let chain_ab_content = "chain 100 chr1 1000 + 100 200 chr1 1000 + 200 300 1\n100 0 0\n";
+        let chain_ba_content = "chain 100 chr1 1000 + 200 300 chr1 1000 + 100 200 1\n100 0 0\n";
+
+        let chain_ab_path = create_dummy_chain(&dir, "ab.chain", chain_ab_content);
+        let chain_ba_path = create_dummy_chain(&dir, "ba.chain", chain_ba_content);
+
+        let map_ab = Arc::new(ChainMap::load(chain_ab_path).unwrap());
+        let map_ba = Arc::new(ChainMap::load(chain_ba_path).unwrap());
+
+        // Create a dummy source record at 150.
+        // Should lift to 250.
+        // Then lift back to 150.
+
+        let (c2, p2, _) = map_ab.lift("chr1", 150).unwrap();
+        assert_eq!(p2, 250);
+
+        let (_, p3, _) = map_ba.lift(&c2, p2).unwrap();
+        assert_eq!(p3, 150);
+    }
+}

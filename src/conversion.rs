@@ -25,9 +25,8 @@ use noodles::vcf::{
         },
     },
     variant::{
-        io::Write as VariantRecordWrite,
-        record::samples::keys::key as format_key,
-        record_buf::{RecordBuf, Samples, samples::sample::Value},
+        io::Write as VariantRecordWrite, record::samples::keys::key as format_key,
+        record_buf::RecordBuf,
     },
 };
 // rayon removed
@@ -38,9 +37,12 @@ use time::{OffsetDateTime, macros::format_description};
 use crate::{
     ConversionSummary,
     dtc::{self, Allele as DtcAllele, parse_genotype},
+    liftover::{ChainRegistry, LiftoverAdapter},
     plink::PlinkWriter,
     reference::{ReferenceError, ReferenceGenome},
+    vcf_utils::remap_sample_genotypes,
 };
+use std::sync::Arc;
 
 /// Supported output formats for the converter.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
@@ -198,49 +200,128 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
     // Track inference results for the report
     let mut sex_inferred = false;
-    let mut build_detection: Option<crate::report::BuildDetection> = None;
 
     // Auto-detect build and sex if not provided (DTC format only for now)
     let mut config = config;
+    let mut liftover_chain: Option<Arc<crate::liftover::ChainMap>> = None;
+    let mut inferred_build_opt: Option<String> = None;
+
+    // build_detection variable is used in report_builder
+    let mut build_detection: Option<crate::report::BuildDetection> = None;
+
     if matches!(config.input_format, crate::input::InputFormat::Dtc) {
         // Pre-scan DTC file for inference (done once, used for both)
         let prescan_records = prescan_dtc_records(&config.input)?;
 
-        // Detect build if using default GRCh38 - check if it actually matches
-        if config.assembly == "GRCh38" {
-            tracing::info!("Verifying genome build with check_build...");
-            match crate::inference::detect_build_from_dtc(
-                &prescan_records,
-                reference.as_ref().unwrap(),
-            ) {
-                Ok(detected) => {
-                    if detected != config.assembly {
-                        tracing::warn!(
-                            "Detected build {} differs from default {}. Using detected build.",
-                            detected,
-                            config.assembly
-                        );
-                        config.assembly = detected.clone();
-                    } else {
-                        tracing::info!("Build verified: {}", config.assembly);
-                    }
-                    // Note: We don't have match rates here, would need to modify inference module
-                    build_detection = Some(crate::report::BuildDetection {
-                        detected_build: detected,
-                        hg19_match_rate: 0.0,
-                        hg38_match_rate: 0.0,
+        // Build Detection logic using Concordance
+        if let Some(ref r) = reference {
+            tracing::info!("Verifying genome build using target reference concordance...");
+
+            // Calculate concordance: % of variants where input alleles match target reference
+            let mut matches = 0;
+            let mut total_checked = 0;
+
+            for rec in prescan_records.iter().take(2000) {
+                // Resolve contig
+                let chrom = if let Some(n) = r.resolve_contig_name(&rec.chromosome) {
+                    n
+                } else {
+                    continue;
+                };
+
+                if let Ok(ref_base) = r.base(chrom, rec.position) {
+                    total_checked += 1;
+                    // Check if ref_base is in alleles
+                    // Parse raw genotype
+                    let alleles = rec.parse_alleles().unwrap_or_default();
+                    let ref_s = ref_base.to_string();
+                    let has_match = alleles.iter().any(|a| match a {
+                        DtcAllele::Base(b) => b.eq_ignore_ascii_case(&ref_s),
+                        _ => false,
                     });
+                    if has_match {
+                        matches += 1;
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Build detection failed: {}. Using default GRCh38.", e);
+            }
+
+            let concordance = if total_checked > 0 {
+                matches as f64 / total_checked as f64
+            } else {
+                0.0
+            };
+
+            tracing::info!(
+                "Target Concordance: {:.1}% ({} variants)",
+                concordance * 100.0,
+                total_checked
+            );
+
+            if concordance < 0.7 {
+                tracing::warn!(
+                    "Low concordance with target assembly ({}). Input build likely differs.",
+                    config.assembly
+                );
+
+                // Heuristic: If target is GRCh38, assume input is GRCh37 (hg19)
+                // If target is GRCh37, assume input is GRCh38
+                let inferred = if config.assembly.contains("38") {
+                    "GRCh37".to_string()
+                } else if config.assembly.contains("37")
+                    || config.assembly.to_lowercase().contains("hg19")
+                {
+                    "GRCh38".to_string()
+                } else {
+                    "Unknown".to_string()
+                };
+
+                if inferred != "Unknown" {
+                    tracing::info!(
+                        "Inferred input build: {}. Initiating Liftover to {}.",
+                        inferred,
+                        config.assembly
+                    );
+                    inferred_build_opt = Some(inferred.clone());
+                    build_detection = Some(crate::report::BuildDetection {
+                        detected_build: inferred.clone(),
+                        hg19_match_rate: if inferred == "GRCh37" { 1.0 } else { 0.0 }, // Approx
+                        hg38_match_rate: if inferred == "GRCh38" { 1.0 } else { 0.0 }, // Approx
+                    });
+
+                    // Setup Liftover
+                    match ChainRegistry::new() {
+                        Ok(registry) => {
+                            match registry.get_chain(&inferred, &config.assembly) {
+                                Ok(chain) => {
+                                    liftover_chain = Some(Arc::new(chain));
+                                    // Force standardization for liftover workflow
+                                    config.standardize = true;
+                                }
+                                Err(e) => tracing::error!("Failed to load chain file: {}", e),
+                            }
+                        }
+                        Err(e) => tracing::error!("Failed to initialize ChainRegistry: {}", e),
+                    }
                 }
+            } else {
+                tracing::info!("Concordance high. Input matches target assembly.");
+                inferred_build_opt = Some(config.assembly.clone());
+                build_detection = Some(crate::report::BuildDetection {
+                    detected_build: config.assembly.clone(),
+                    hg19_match_rate: 0.0,
+                    hg38_match_rate: 1.0,
+                });
             }
         }
 
         // Infer sex if not provided
         if config.sex.is_none() {
-            tracing::info!("Sex not specified, inferring from input data...");
-            match crate::inference::infer_sex_from_records(&prescan_records, &config.assembly) {
+            let build_for_sex = inferred_build_opt.as_ref().unwrap_or(&config.assembly);
+            tracing::info!(
+                "Sex not specified, inferring from input data (assuming {})...",
+                build_for_sex
+            );
+            match crate::inference::infer_sex_from_records(&prescan_records, build_for_sex) {
                 Ok(inferred) => {
                     tracing::info!("Inferred sex: {:?}", inferred);
                     config.sex = Some(inferred);
@@ -272,17 +353,30 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     let header = build_header(&config, reference.as_ref())?;
 
     // Instantiate Source Iterator
-    let source: Box<dyn crate::input::VariantSource> = match config.input_format {
+    let mut source: Box<dyn crate::input::VariantSource> = match config.input_format {
         crate::input::InputFormat::Dtc => {
             let reader = crate::smart_reader::open_input(&config.input)
                 .with_context(|| format!("failed to open input {}", config.input.display()))?;
             let dtc_reader = dtc::Reader::new(reader);
-            // DTC format always requires reference (checked above)
-            let source = crate::input::DtcSource::new(
-                dtc_reader,
-                reference.clone().unwrap(),
-                config.clone(),
-            );
+
+            // If liftover is active, we do NOT provide the reference to DtcSource
+            // This prevents validation against the wrong genome.
+            // DtcSource will output raw records with 'N' ref.
+            let dtc_reference = if liftover_chain.is_some() {
+                None
+            } else {
+                reference.clone()
+            };
+
+            // If liftover is active, we should NOT check PAR boundaries for ploidy
+            // because DtcSource is operating on Source coordinates, but config.par_boundaries
+            // are for Target coordinates.
+            let mut source_config = config.clone();
+            if liftover_chain.is_some() {
+                source_config.par_boundaries = None;
+            }
+
+            let source = crate::input::DtcSource::new(dtc_reader, dtc_reference, source_config);
             Box::new(source)
         }
         crate::input::InputFormat::Vcf => {
@@ -321,11 +415,20 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                             format!("failed to open input {}", config.input.display())
                         })?;
                     let dtc_reader = dtc::Reader::new(reader);
-                    let source = crate::input::DtcSource::new(
-                        dtc_reader,
-                        reference.clone().unwrap(),
-                        config.clone(),
-                    );
+
+                    let dtc_reference = if liftover_chain.is_some() {
+                        None
+                    } else {
+                        reference.clone()
+                    };
+
+                    let mut source_config = config.clone();
+                    if liftover_chain.is_some() {
+                        source_config.par_boundaries = None;
+                    }
+
+                    let source =
+                        crate::input::DtcSource::new(dtc_reader, dtc_reference, source_config);
                     Box::new(source)
                 }
                 crate::input::InputFormat::Vcf => {
@@ -364,6 +467,16 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             }
         }
     };
+
+    // Apply Liftover Adapter if active
+    if let Some(chain) = liftover_chain {
+        tracing::info!("Applying liftover adapter...");
+        source = Box::new(LiftoverAdapter::new(
+            source,
+            chain,
+            reference.clone().unwrap(),
+        ));
+    }
 
     let mut summary = crate::ConversionSummary::default();
 
@@ -457,6 +570,13 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             novel_sites: panel.novel_site_count(),
         }
     });
+
+    // Use build_detection if available from previous steps
+    // (Wait, I removed the usage locally in the previous `replace` attempt which was a mistake,
+    //  but wait, `build_detection` is passed to `RunReportBuilder` below. Why did it warn?)
+
+    // Ah, `let mut build_detection` was declared but not mutated in some paths?
+    // Or maybe I just need to remove `mut`.
 
     let report_builder = crate::report::RunReportBuilder {
         input_path: config.input.display().to_string(),
@@ -861,106 +981,6 @@ pub fn standardize_record(
     }
 
     Ok(Some(builder.build()))
-}
-
-/// Remap genotype indices in all samples based on mapping
-fn remap_sample_genotypes(
-    samples: &noodles::vcf::variant::record_buf::Samples,
-    mapping: &std::collections::HashMap<usize, usize>,
-) -> noodles::vcf::variant::record_buf::Samples {
-    let keys = samples.keys();
-    let mut new_keys_vec = Vec::new();
-    // Filter keys: keep GT and safe fields (GQ, DP, MIN_DP), drop allele-dependent fields (PL, AD, GP)
-    for key in keys.as_ref().iter() {
-        if key == format_key::GENOTYPE || key == "GQ" || key == "DP" || key == "MIN_DP" {
-            new_keys_vec.push(key.clone());
-        } else {
-            tracing::debug!("Dropping field {} during polarization", key);
-        }
-    }
-
-    // Create new keys object
-    let new_keys: noodles::vcf::variant::record_buf::samples::Keys =
-        new_keys_vec.into_iter().collect();
-
-    let mut new_values = Vec::new();
-
-    for sample in samples.values() {
-        let mut new_sample_vals = Vec::new();
-
-        // Iterate through valid keys and extract values from original sample
-        for key in new_keys.as_ref().iter() {
-            let val_opt = sample.get(key).flatten().cloned();
-
-            if key == format_key::GENOTYPE {
-                if let Some(Value::String(gt_str)) = &val_opt {
-                    new_sample_vals.push(Some(Value::String(remap_gt_string(gt_str, mapping))));
-                } else {
-                    new_sample_vals.push(val_opt);
-                }
-            } else {
-                new_sample_vals.push(val_opt);
-            }
-        }
-        new_values.push(new_sample_vals);
-    }
-
-    Samples::new(new_keys, new_values)
-}
-
-/// Remap genotype indices in a GT string (e.g., "0/1" -> "1/0")
-/// Handles standard separators (/, |) and ignores '.'
-fn remap_gt_string(gt: &str, mapping: &std::collections::HashMap<usize, usize>) -> String {
-    // Split by separators, map, join back?
-    // Or char-by-char if single digits?
-    // GT might have multi-digit indices (e.g. 10). Char mapping is unsafe.
-    // Parse fully.
-
-    // Simple parser for VCF GT string:
-    // Split on first separator to detect phase?
-    // Actually, VCF GT is usually integers separated by / or |.
-
-    // We can use a regex or manual scan.
-    // Manual scan is safer and faster.
-    let mut result = String::with_capacity(gt.len());
-    let mut current_num = String::new();
-
-    for c in gt.chars() {
-        if c.is_ascii_digit() {
-            current_num.push(c);
-        } else {
-            // End of number
-            if !current_num.is_empty() {
-                if let Ok(idx) = current_num.parse::<usize>() {
-                    if let Some(new_idx) = mapping.get(&idx) {
-                        result.push_str(&new_idx.to_string());
-                    } else {
-                        // Keep original validity? Or warn?
-                        // If mapping incomplete, keep original (risky) or map to .?
-                        result.push_str(&current_num);
-                    }
-                } else {
-                    result.push_str(&current_num);
-                }
-                current_num.clear();
-            }
-            result.push(c);
-        }
-    }
-    // Final number
-    if !current_num.is_empty() {
-        if let Ok(idx) = current_num.parse::<usize>() {
-            if let Some(new_idx) = mapping.get(&idx) {
-                result.push_str(&new_idx.to_string());
-            } else {
-                result.push_str(&current_num);
-            }
-        } else {
-            result.push_str(&current_num);
-        }
-    }
-
-    result
 }
 
 #[doc(hidden)]

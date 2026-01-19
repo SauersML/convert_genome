@@ -4,6 +4,7 @@ pub mod dtc;
 pub mod harmonize;
 pub mod inference;
 pub mod input;
+pub mod liftover;
 pub mod panel;
 pub mod panel_writer;
 pub mod plink;
@@ -11,6 +12,7 @@ pub mod reference;
 pub mod remote;
 pub mod report;
 pub mod smart_reader;
+pub mod vcf_utils;
 
 pub use conversion::{ConversionConfig, OutputFormat, convert_dtc_file};
 
@@ -28,6 +30,9 @@ pub struct ConversionSummary {
     pub invalid_genotypes: usize,
     pub symbolic_allele_records: usize,
     pub parse_errors: usize,
+    // Liftover stats
+    pub liftover_failures: usize,
+    pub liftover_mismatches: usize,
 }
 
 impl ConversionSummary {
