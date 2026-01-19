@@ -31,6 +31,22 @@ impl Strand {
     }
 }
 
+/// Errors that can occur during liftover coordinate mapping.
+/// These enable fail-closed behavior with explicit rejection reasons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiftoverError {
+    /// No chain interval found for this position
+    Unmapped,
+    /// Multiple chain intervals found (ambiguous mapping)
+    Ambiguous,
+    /// Alleles are incompatible with target reference
+    IncompatibleAlleles,
+    /// Target contig not found in reference
+    ContigNotFound,
+    /// Indel/SV spans multiple chain intervals
+    Straddled,
+}
+
 /// A mapped segment in the destination genome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChainMapping {
@@ -195,22 +211,28 @@ impl ChainMap {
     }
 
     /// Lift a single coordinate (0-based) from source to destination.
-    /// Returns (new_chrom, new_pos, strand).
-    pub fn lift(&self, chrom: &str, pos: u64) -> Option<(String, u64, Strand)> {
+    /// Returns (new_chrom, new_pos, strand) or an error if unmapped/ambiguous.
+    ///
+    /// Fails closed: ambiguous mappings (multiple chain hits) are rejected.
+    pub fn lift(&self, chrom: &str, pos: u64) -> Result<(String, u64, Strand), LiftoverError> {
         // Try normalized chrom names
         let intervals = self
             .map
             .get(chrom)
             .or_else(|| self.map.get(chrom.trim_start_matches("chr")))
-            .or_else(|| self.map.get(&format!("chr{}", chrom)))?;
+            .or_else(|| self.map.get(&format!("chr{}", chrom)))
+            .ok_or(LiftoverError::Unmapped)?;
 
-        // Find intersecting interval
-        // We only care about the point, so interval is [pos, pos+1)
-        let matches: Vec<&Interval<u64, ChainMapping>> = intervals.find(pos, pos + 1).collect();
+        // Find intersecting interval - use next() instead of collect() for performance
+        let mut iter = intervals.find(pos, pos + 1);
+        let first = iter.next().ok_or(LiftoverError::Unmapped)?;
 
-        let m = matches.first()?;
+        // Check for ambiguous multi-mapping (fail-closed)
+        if iter.next().is_some() {
+            return Err(LiftoverError::Ambiguous);
+        }
 
-        let mapping = &m.val;
+        let mapping = &first.val;
         let offset = pos - mapping.source_start;
 
         let new_pos = if mapping.dest_strand == Strand::Forward {
@@ -218,15 +240,19 @@ impl ChainMap {
         } else {
             // Reverse strand logic
             let q_rev_pos = mapping.dest_start + offset;
-            mapping.dest_size.checked_sub(1 + q_rev_pos)?
+            mapping
+                .dest_size
+                .checked_sub(1 + q_rev_pos)
+                .ok_or(LiftoverError::Unmapped)?
         };
 
         let dest_chrom = self
             .target_chroms
-            .get(mapping.dest_chrom_id as usize)?
-            .clone();
+            .get(mapping.dest_chrom_id as usize)
+            .cloned()
+            .ok_or(LiftoverError::Unmapped)?;
 
-        Some((dest_chrom, new_pos, mapping.dest_strand))
+        Ok((dest_chrom, new_pos, mapping.dest_strand))
     }
 }
 
@@ -326,154 +352,207 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
             let chrom = record.reference_sequence_name().to_string();
             let pos: usize = record.variant_start().map(|p| p.into()).unwrap_or(0);
 
+            // Check for indels/SVs - reject them (not supported yet)
+            let ref_bases = record.reference_bases();
+            let alt_bases = record.alternate_bases();
+            let is_snp = ref_bases.len() == 1
+                && alt_bases
+                    .as_ref()
+                    .iter()
+                    .all(|a| a.len() == 1 && !a.starts_with('<'));
+
+            if !is_snp {
+                // Reject indels and SVs - liftover not safe for them
+                summary.liftover_straddled += 1;
+                tracing::debug!(
+                    chrom = %chrom,
+                    pos = pos,
+                    "Rejecting non-SNP variant (indel/SV liftover not supported)"
+                );
+                continue;
+            }
+
             // 0-based for liftover
             let pos_0 = (pos as u64).saturating_sub(1);
 
-            // Attempt lift
-            if let Some((new_chrom, new_pos_0, strand)) = self.chain.lift(&chrom, pos_0) {
-                // Update Coords (1-based)
-                let new_pos = (new_pos_0 + 1) as usize;
-
-                // Convert back to Position
-                let new_pos_obj = match noodles::core::Position::new(new_pos) {
-                    Some(p) => p,
-                    None => {
-                        // Invalid position (0?)
-                        // Skip
-                        continue;
-                    }
-                };
-
-                // Update Record
-                *record.reference_sequence_name_mut() = new_chrom.clone();
-                *record.variant_start_mut() = Some(new_pos_obj);
-
-                // Handle Strand
-                if strand == Strand::Reverse {
-                    // Reverse complement alleles
-                    let ref_bases = record.reference_bases();
-                    let new_ref = reverse_complement_string(ref_bases);
-                    *record.reference_bases_mut() = new_ref;
-
-                    let alt_bases = record.alternate_bases();
-                    let new_alts: Vec<String> = alt_bases
-                        .as_ref()
-                        .iter()
-                        .map(|a| {
-                            // Handle symbolic alleles <DEL>, <INS> - don't RC them
-                            if a.starts_with('<') {
-                                a.clone()
-                            } else {
-                                reverse_complement_string(a)
-                            }
-                        })
-                        .collect();
-                    *record.alternate_bases_mut() = new_alts.into();
+            // Attempt lift with explicit error handling
+            let lift_result = self.chain.lift(&chrom, pos_0);
+            let (new_chrom, new_pos_0, strand) = match lift_result {
+                Ok(result) => result,
+                Err(LiftoverError::Unmapped) => {
+                    summary.liftover_unmapped += 1;
+                    continue;
                 }
+                Err(LiftoverError::Ambiguous) => {
+                    summary.liftover_ambiguous += 1;
+                    tracing::debug!(
+                        chrom = %chrom,
+                        pos = pos,
+                        "Rejecting variant with ambiguous multi-mapping"
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    summary.liftover_unmapped += 1;
+                    continue;
+                }
+            };
 
-                // Verification gate: Check if New Ref matches Target Genome
-                if let Ok(target_base) = self.target_reference.base(&new_chrom, new_pos as u64) {
-                    let rec_ref = record.reference_bases().to_ascii_uppercase();
-                    let target_base = target_base.to_ascii_uppercase();
-
-                    // Update REF
-                    // If REF was 'N' (placeholder from no-reference DtcSource), update it.
-                    // If REF was something else (e.g. from VCF input), we check if it matches target.
-                    // If it doesn't match target, we check if it matches one of the ALTs (Reference Swap).
-                    // Or if we need to filter it out.
-
-                    let mut needs_genotype_remapping = false;
-                    let mut allele_mapping = HashMap::new(); // Old Index -> New Index
-
-                    if rec_ref == "N" || rec_ref == target_base.to_string() {
-                        *record.reference_bases_mut() = target_base.to_string();
+            // Canonicalize contig name using target reference
+            let canonical_chrom = match self.target_reference.resolve_contig_name(&new_chrom) {
+                Some(name) => name.to_string(),
+                None => {
+                    // Try with chr prefix stripped/added
+                    let alt_name = if new_chrom.starts_with("chr") {
+                        new_chrom.trim_start_matches("chr").to_string()
                     } else {
-                        // Mismatch. Check ALTs.
-                        // But wait, if we came from DtcSource, we might have ALTs that include the new Ref.
-                        // Case: Source Ref=A, Alt=G. Target Ref=G.
-                        // DtcSource (N-ref mode) -> Ref=N, Alt=[A, G].
-                        // Here: New Ref = G.
-                        // Alt=[A, G].
-                        // We need to normalize: Ref=G. Alt=[A]. GT remapped.
-
-                        *record.reference_bases_mut() = target_base.to_string();
-                    }
-
-                    // Normalize ALTs and GT
-                    // Scan current ALTs. If any match new REF, remove them and remap indices.
-                    let old_alts = record.alternate_bases().clone();
-                    let mut new_alts = Vec::new();
-
-                    // Mapping: 0 (Old Ref) -> ?
-                    // We assume Old Ref (N) is not used in GT for DTC (usually ./.).
-                    // If VCF input, Old Ref might be used.
-                    // If Old Ref != New Ref, where does Old Ref go? It becomes an ALT?
-                    // This is complex.
-
-                    // Simplify: We assume DtcSource produced Genotypes pointing to ALTs (indices 1..N).
-                    // And Ref (0) was "N".
-                    // If we set Ref to "G".
-                    // And ALTs were ["A", "G"].
-                    // Index 1 (A) -> stays Alt. New Index 1.
-                    // Index 2 (G) -> matches Ref. New Index 0.
-
-                    // Mapping construction:
-                    // We need to map Old Index i to New Index j.
-
-                    // For DTC N-ref mode:
-                    // Ref (0) -> likely invalid/unused or maps to New Ref (0)?
-                    allele_mapping.insert(0, 0); // Tentatively map 0 to 0.
-
-                    for (i, alt) in old_alts.as_ref().iter().enumerate() {
-                        let old_idx = i + 1;
-                        // Explicit type hint for alt
-                        let alt_str: &String = alt;
-                        if alt_str.eq_ignore_ascii_case(&target_base.to_string()) {
-                            // This Alt matches New Ref.
-                            // Map Old Index -> 0.
-                            allele_mapping.insert(old_idx, 0);
-                        } else {
-                            // Keep as Alt.
-                            new_alts.push(alt_str.clone());
-                            let new_idx = new_alts.len(); // 1-based
-                            allele_mapping.insert(old_idx, new_idx);
+                        format!("chr{}", new_chrom)
+                    };
+                    match self.target_reference.resolve_contig_name(&alt_name) {
+                        Some(name) => name.to_string(),
+                        None => {
+                            summary.liftover_contig_missing += 1;
+                            tracing::debug!(
+                                new_chrom = %new_chrom,
+                                "Target contig not found in reference"
+                            );
+                            continue;
                         }
                     }
+                }
+            };
 
-                    if new_alts.len() != old_alts.as_ref().len() {
-                        needs_genotype_remapping = true;
-                    }
+            // Update Coords (1-based)
+            let new_pos = (new_pos_0 + 1) as usize;
 
-                    // Update Record
-                    *record.alternate_bases_mut() = new_alts.into();
+            // Convert to Position
+            let new_pos_obj = match noodles::core::Position::new(new_pos) {
+                Some(p) => p,
+                None => continue,
+            };
 
-                    if needs_genotype_remapping {
-                        *record.samples_mut() =
-                            remap_sample_genotypes(record.samples(), &allele_mapping);
-                    }
+            // Handle Strand - reverse complement if needed
+            if strand == Strand::Reverse {
+                let new_ref = reverse_complement_string(ref_bases);
+                *record.reference_bases_mut() = new_ref;
 
-                    // Final Check: If input was NOT 'N' (e.g. VCF), and we didn't find the target base in ALTs or Ref,
-                    // then it's a mismatch that we can't rescue (unless we keep original Ref as an Alt? No, that's messy).
-                    // For now, we trust the 'N' logic for DTC.
-                    // If rec_ref was not N and not target, and we forced it to target, we essentially "corrected" it.
-                    // But if the genotype was 0/0 (Old Ref), it becomes 0/0 (New Ref).
-                    // If Old Ref != New Ref, this changes the biology (Ref Swap).
-                    // We should verify this.
-                    // BUT: LiftoverAdapter is primarily for DTC (N-ref).
-                    // VCF input usually comes with Ref. If Ref mismatches Target, we should probably Drop or Swap.
-                    // This implementation focuses on the DTC N-ref case correctness.
-                } else {
-                    // Target position not in reference?
+                let new_alts: Vec<String> = alt_bases
+                    .as_ref()
+                    .iter()
+                    .map(|a| {
+                        if a.starts_with('<') {
+                            a.clone()
+                        } else {
+                            reverse_complement_string(a)
+                        }
+                    })
+                    .collect();
+                *record.alternate_bases_mut() = new_alts.into();
+            }
+
+            // Get target reference base for compatibility check
+            let target_base = match self.target_reference.base(&canonical_chrom, new_pos as u64) {
+                Ok(b) => b.to_ascii_uppercase(),
+                Err(_) => {
                     summary.reference_failures += 1;
                     continue;
                 }
+            };
 
-                return Some(Ok(record));
+            // Get current alleles after potential strand flip
+            let rec_ref = record.reference_bases().to_ascii_uppercase();
+            let rec_alts: Vec<String> = record
+                .alternate_bases()
+                .as_ref()
+                .iter()
+                .map(|a| a.to_ascii_uppercase())
+                .collect();
+
+            // Build set of all called alleles
+            let mut all_alleles: Vec<String> = vec![rec_ref.clone()];
+            all_alleles.extend(rec_alts.iter().cloned());
+
+            // ALLELE COMPATIBILITY CHECK (fail-closed)
+            // For DTC N-ref mode: we need the target base to be one of the alleles
+            // For VCF: we need either REF matches target, or we can do a ref swap
+            let target_base_str = target_base.to_string();
+
+            if rec_ref == "N" {
+                // DTC N-ref mode: target base must be in the alt alleles
+                // We'll set REF = target and remove it from ALTs
+                if !rec_alts.iter().any(|a| a.eq_ignore_ascii_case(&target_base_str)) {
+                    // Target base not in alleles - incompatible
+                    summary.liftover_incompatible += 1;
+                    tracing::debug!(
+                        chrom = %chrom,
+                        pos = pos,
+                        target_base = %target_base,
+                        alleles = ?rec_alts,
+                        "Rejecting: target reference base not in called alleles"
+                    );
+                    continue;
+                }
+
+                // Set REF to target base
+                *record.reference_bases_mut() = target_base_str.clone();
+
+                // Remove target base from ALTs and remap genotypes
+                let mut new_alts = Vec::new();
+                let mut allele_mapping = HashMap::new();
+                allele_mapping.insert(0, 0); // Old REF (N, unused) -> New REF
+
+                for (i, alt) in rec_alts.iter().enumerate() {
+                    let old_idx = i + 1;
+                    if alt.eq_ignore_ascii_case(&target_base_str) {
+                        // This ALT is now REF
+                        allele_mapping.insert(old_idx, 0);
+                    } else {
+                        new_alts.push(alt.clone());
+                        allele_mapping.insert(old_idx, new_alts.len());
+                    }
+                }
+
+                *record.alternate_bases_mut() = new_alts.into();
+                *record.samples_mut() =
+                    remap_sample_genotypes(record.samples(), &allele_mapping);
             } else {
-                // Lift failed (gap)
-                summary.liftover_failures += 1;
-                continue;
+                // VCF mode: REF should match target, or we reject
+                // (Reference swap is complex and error-prone - fail closed)
+                if !rec_ref.eq_ignore_ascii_case(&target_base_str) {
+                    // Check if target is in ALTs for possible ref swap
+                    if rec_alts.iter().any(|a| a.eq_ignore_ascii_case(&target_base_str)) {
+                        // Could do ref swap, but that's complex and risky
+                        // For fail-closed, we reject
+                        summary.liftover_incompatible += 1;
+                        tracing::debug!(
+                            chrom = %chrom,
+                            pos = pos,
+                            rec_ref = %rec_ref,
+                            target_base = %target_base,
+                            "Rejecting: REF mismatch (ref swap not implemented)"
+                        );
+                        continue;
+                    } else {
+                        // Neither REF nor ALTs match target - definitely incompatible
+                        summary.liftover_incompatible += 1;
+                        tracing::debug!(
+                            chrom = %chrom,
+                            pos = pos,
+                            rec_ref = %rec_ref,
+                            target_base = %target_base,
+                            "Rejecting: alleles incompatible with target reference"
+                        );
+                        continue;
+                    }
+                }
+                // REF matches target - good to go
             }
+
+            // Update record with canonical chrom and new position
+            *record.reference_sequence_name_mut() = canonical_chrom;
+            *record.variant_start_mut() = Some(new_pos_obj);
+
+            return Some(Ok(record));
         }
     }
 }
@@ -578,5 +657,41 @@ mod tests {
 
         let (_, p3, _) = map_ba.lift(&c2, p2).unwrap();
         assert_eq!(p3, 150);
+    }
+
+    #[test]
+    fn test_lift_unmapped_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let chain_content = "chain 100 chr1 1000 + 100 200 chr1 1000 + 200 300 1\n100 0 0\n";
+        let chain_path = create_dummy_chain(&dir, "test.chain", chain_content);
+        let chain_map = ChainMap::load(chain_path).unwrap();
+
+        // Position outside the mapped interval should return Unmapped
+        let result = chain_map.lift("chr1", 50);
+        assert_eq!(result, Err(LiftoverError::Unmapped));
+
+        // Unknown chromosome should return Unmapped
+        let result = chain_map.lift("chr99", 150);
+        assert_eq!(result, Err(LiftoverError::Unmapped));
+    }
+
+    #[test]
+    fn test_lift_ambiguous_returns_error() {
+        let dir = TempDir::new().unwrap();
+        // Create overlapping intervals - same source maps to two destinations
+        // This simulates a segmental duplication scenario
+        let chain_content = concat!(
+            "chain 100 chr1 1000 + 100 200 chr1 1000 + 200 300 1\n",
+            "100 0 0\n",
+            "\n",
+            "chain 90 chr1 1000 + 100 200 chr2 1000 + 400 500 2\n",
+            "100 0 0\n",
+        );
+        let chain_path = create_dummy_chain(&dir, "ambig.chain", chain_content);
+        let chain_map = ChainMap::load(chain_path).unwrap();
+
+        // Position 150 maps to both chains - should be ambiguous
+        let result = chain_map.lift("chr1", 150);
+        assert_eq!(result, Err(LiftoverError::Ambiguous));
     }
 }

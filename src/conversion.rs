@@ -213,104 +213,92 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         // Pre-scan DTC file for inference (done once, used for both)
         let prescan_records = prescan_dtc_records(&config.input)?;
 
-        // Build Detection logic using Concordance
+        // Build Detection using check_build library (position-only, not allele-based)
+        // This avoids false liftover triggers on homozygous-alt sites
         if let Some(ref r) = reference {
-            tracing::info!("Verifying genome build using target reference concordance...");
+            tracing::info!("Detecting genome build using check_build (position-only)...");
 
-            // Calculate concordance: % of variants where input alleles match target reference
-            let mut matches = 0;
-            let mut total_checked = 0;
+            match crate::inference::detect_build_from_dtc(&prescan_records, r) {
+                Ok(detected_build) => {
+                    tracing::info!("Detected input build: {}", detected_build);
+                    inferred_build_opt = Some(detected_build.clone());
 
-            for rec in prescan_records.iter().take(2000) {
-                // Resolve contig
-                let chrom = if let Some(n) = r.resolve_contig_name(&rec.chromosome) {
-                    n
-                } else {
-                    continue;
-                };
+                    // Normalize build names for comparison
+                    let detected_normalized = detected_build.to_lowercase();
+                    let target_normalized = config.assembly.to_lowercase();
 
-                if let Ok(ref_base) = r.base(chrom, rec.position) {
-                    total_checked += 1;
-                    // Check if ref_base is in alleles
-                    // Parse raw genotype
-                    let alleles = rec.parse_alleles().unwrap_or_default();
-                    let ref_s = ref_base.to_string();
-                    let has_match = alleles.iter().any(|a| match a {
-                        DtcAllele::Base(b) => b.eq_ignore_ascii_case(&ref_s),
-                        _ => false,
-                    });
-                    if has_match {
-                        matches += 1;
-                    }
-                }
-            }
+                    let builds_match = (detected_normalized.contains("37")
+                        || detected_normalized.contains("hg19"))
+                        && (target_normalized.contains("37") || target_normalized.contains("hg19"))
+                        || (detected_normalized.contains("38")
+                            || detected_normalized.contains("hg38"))
+                            && (target_normalized.contains("38")
+                                || target_normalized.contains("hg38"));
 
-            let concordance = if total_checked > 0 {
-                matches as f64 / total_checked as f64
-            } else {
-                0.0
-            };
+                    if !builds_match {
+                        tracing::info!(
+                            "Detected build {} differs from target {}. Initiating liftover.",
+                            detected_build,
+                            config.assembly
+                        );
 
-            tracing::info!(
-                "Target Concordance: {:.1}% ({} variants)",
-                concordance * 100.0,
-                total_checked
-            );
+                        build_detection = Some(crate::report::BuildDetection {
+                            detected_build: detected_build.clone(),
+                            hg19_match_rate: if detected_build == "GRCh37" {
+                                1.0
+                            } else {
+                                0.0
+                            },
+                            hg38_match_rate: if detected_build == "GRCh38" {
+                                1.0
+                            } else {
+                                0.0
+                            },
+                        });
 
-            if concordance < 0.7 {
-                tracing::warn!(
-                    "Low concordance with target assembly ({}). Input build likely differs.",
-                    config.assembly
-                );
-
-                // Heuristic: If target is GRCh38, assume input is GRCh37 (hg19)
-                // If target is GRCh37, assume input is GRCh38
-                let inferred = if config.assembly.contains("38") {
-                    "GRCh37".to_string()
-                } else if config.assembly.contains("37")
-                    || config.assembly.to_lowercase().contains("hg19")
-                {
-                    "GRCh38".to_string()
-                } else {
-                    "Unknown".to_string()
-                };
-
-                if inferred != "Unknown" {
-                    tracing::info!(
-                        "Inferred input build: {}. Initiating Liftover to {}.",
-                        inferred,
-                        config.assembly
-                    );
-                    inferred_build_opt = Some(inferred.clone());
-                    build_detection = Some(crate::report::BuildDetection {
-                        detected_build: inferred.clone(),
-                        hg19_match_rate: if inferred == "GRCh37" { 1.0 } else { 0.0 }, // Approx
-                        hg38_match_rate: if inferred == "GRCh38" { 1.0 } else { 0.0 }, // Approx
-                    });
-
-                    // Setup Liftover
-                    match ChainRegistry::new() {
-                        Ok(registry) => {
-                            match registry.get_chain(&inferred, &config.assembly) {
-                                Ok(chain) => {
-                                    liftover_chain = Some(Arc::new(chain));
-                                    // Force standardization for liftover workflow
-                                    config.standardize = true;
+                        // Setup Liftover
+                        match ChainRegistry::new() {
+                            Ok(registry) => {
+                                match registry.get_chain(&detected_build, &config.assembly) {
+                                    Ok(chain) => {
+                                        liftover_chain = Some(Arc::new(chain));
+                                        // Force standardization for liftover workflow
+                                        config.standardize = true;
+                                    }
+                                    Err(e) => tracing::error!("Failed to load chain file: {}", e),
                                 }
-                                Err(e) => tracing::error!("Failed to load chain file: {}", e),
                             }
+                            Err(e) => tracing::error!("Failed to initialize ChainRegistry: {}", e),
                         }
-                        Err(e) => tracing::error!("Failed to initialize ChainRegistry: {}", e),
+                    } else {
+                        tracing::info!("Build matches target assembly. No liftover needed.");
+                        build_detection = Some(crate::report::BuildDetection {
+                            detected_build: config.assembly.clone(),
+                            hg19_match_rate: if target_normalized.contains("37") {
+                                1.0
+                            } else {
+                                0.0
+                            },
+                            hg38_match_rate: if target_normalized.contains("38") {
+                                1.0
+                            } else {
+                                0.0
+                            },
+                        });
                     }
                 }
-            } else {
-                tracing::info!("Concordance high. Input matches target assembly.");
-                inferred_build_opt = Some(config.assembly.clone());
-                build_detection = Some(crate::report::BuildDetection {
-                    detected_build: config.assembly.clone(),
-                    hg19_match_rate: 0.0,
-                    hg38_match_rate: 1.0,
-                });
+                Err(e) => {
+                    tracing::warn!(
+                        "Build detection failed: {}. Assuming input matches target.",
+                        e
+                    );
+                    inferred_build_opt = Some(config.assembly.clone());
+                    build_detection = Some(crate::report::BuildDetection {
+                        detected_build: config.assembly.clone(),
+                        hg19_match_rate: 0.0,
+                        hg38_match_rate: 1.0,
+                    });
+                }
             }
         }
 

@@ -30,9 +30,12 @@ pub struct ConversionSummary {
     pub invalid_genotypes: usize,
     pub symbolic_allele_records: usize,
     pub parse_errors: usize,
-    // Liftover stats
-    pub liftover_failures: usize,
-    pub liftover_mismatches: usize,
+    // Liftover stats - specific rejection reasons
+    pub liftover_unmapped: usize,       // No chain interval found
+    pub liftover_ambiguous: usize,      // Multiple chain intervals (rejected)
+    pub liftover_incompatible: usize,   // Alleles incompatible with target reference
+    pub liftover_straddled: usize,      // Indel spans multiple intervals
+    pub liftover_contig_missing: usize, // Target contig not in reference
 }
 
 impl ConversionSummary {
