@@ -251,11 +251,10 @@ pub fn infer_strand_lock(
     }
 
     if n_tested < 50 {
-        tracing::warn!(
-            "Too few informative SNPs ({}) for strand inference. Defaulting to Forward.",
+        bail!(
+            "Too few informative SNPs ({}) for strand inference. Refusing to guess strand.",
             n_tested
         );
-        return Ok(InferredStrand::Forward);
     }
 
     let plus_frac = matching_plus as f64 / n_tested as f64;
@@ -290,7 +289,19 @@ fn is_transversion(rec: &DtcRecord) -> bool {
     // If Alleles are {A, T} -> Bad. {C, G} -> Bad.
 
     // Just parse from string for speed
-    let genotype = &rec.genotype;
+    let genotype = rec.genotype.to_ascii_uppercase();
+
+    // Exclude non-SNP encodings commonly seen in DTC files.
+    // We only want clear A/C/G/T alleles for strand inference.
+    if genotype.contains('I')
+        || genotype.contains('D')
+        || genotype.contains('-')
+        || genotype.contains('<')
+        || genotype.contains('>')
+        || genotype.contains('.')
+    {
+        return false;
+    }
 
     // Quick check logic
     // If it contains A and T -> Bad
@@ -308,8 +319,8 @@ fn is_transversion(rec: &DtcRecord) -> bool {
         return false;
     }
 
-    // Must have at least some bases
-    has_a || has_t || has_c || has_g 
+    // Must have at least some bases, and avoid N/other ambiguity.
+    (has_a || has_t || has_c || has_g) && !genotype.contains('N')
 }
 
 fn normalize_chrom(c: &str) -> String {
