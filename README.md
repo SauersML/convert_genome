@@ -6,40 +6,6 @@
 
 `convert_genome` converts direct-to-consumer (DTC) genotype exports (23andMe, AncestryDNA, MyHeritage, etc.) into standard [VCF](https://samtools.github.io/hts-specs/VCFv4.5.pdf), [BCF](https://samtools.github.io/hts-specs/BCFv2_qref.pdf), or [PLINK](https://www.cog-genomics.org/plink/1.9/formats) binary formats. The converter supports remote references via HTTP(S) and handles compressed `.gz` and `.zip` archives.
 
-## Table of Contents
-
-- [Features](#features)
-- [Installation](#installation)
-  - [Automatic Install (Recommended)](#automatic-install-recommended)
-  - [Manual installation](#manual-installation)
-- [CLI Usage](#cli-usage)
-  - [Supported Inputs](#supported-inputs)
-  - [Workflow Examples](#workflow-examples)
-    - [Simple Format Conversion](#simple-format-conversion)
-    - [Preparing for Imputation](#preparing-for-imputation)
-    - [Handling Ancient/Old Data](#handling-ancientold-data)
-  - [Flag Deep Dives](#flag-deep-dives)
-    - [`--standardize`](#--standardize)
-    - [`--panel`](#--panel)
-    - [`--sex`](#--sex)
-    - [`--assembly`](#--assembly)
-- [Using as a Rust Library](#using-as-a-rust-library)
-  - [Add the Dependency](#add-the-dependency)
-  - [Core Types and Entry Points](#core-types-and-entry-points)
-  - [Minimal Example](#minimal-example)
-- [Genome Build Detection \& Liftover](#genome-build-detection--liftover)
-  - [How does it know?](#how-does-it-know)
-  - [Liftover Details](#liftover-details)
-- [How It Works (Data Processing Logic)](#how-it-works-data-processing-logic)
-  - [Strand Flipping Logic](#strand-flipping-logic)
-  - [Ploidy Enforcement](#ploidy-enforcement)
-  - [Build Detection](#build-detection)
-- [Output Report](#output-report)
-  - [Why the report matters](#why-the-report-matters)
-  - [Key field definitions](#key-field-definitions)
-- [Project Architecture](#project-architecture)
-- [Contributing](#contributing)
-
 ## Features
 
 - **Multiple output formats**: VCF text, BCF binary, and PLINK 1.9 binary (.bed/.bim/.fam).
@@ -355,25 +321,3 @@ Liftover-specific counters are also included:
 - `liftover_incompatible`: alleles incompatible with target reference checks
 - `liftover_straddled`: endpoints do not lift consistently (e.g., indel spans blocks)
 - `liftover_contig_missing`: lifted contig does not exist in target reference
-
-## Project Architecture
-
-### Core modules
-
-- `src/cli.rs` – Argument parsing and top-level command dispatch.
-- `src/conversion.rs` – Conversion pipeline, report generation, and record translation.
-- `src/dtc.rs` – Parser for DTC genotype exports (23andMe, AncestryDNA, etc.).
-- `src/imputation.rs` – Logic for sex inference and build detection.
-- `src/inference.rs` – Logic for sex inference and build detection.
-- `src/harmonize.rs` – Allele harmonization against reference panels.
-- `src/panel.rs` – Reference panel loading and management.
-- `src/report.rs` – JSON run report generation.
-- `src/reference.rs` – Reference genome loader, contig metadata, and cached base access.
-- `src/remote.rs` – Remote fetching with HTTP(S) support and archive extraction.
-- `src/plink.rs` – PLINK 1.9 binary format writer (.bed/.bim/.fam).
-
-## Contributing
-
-1. Install the nightly toolchain (`rustup toolchain install nightly`).
-2. Run formatting and linting before submitting: `cargo fmt` and `cargo clippy --all-targets -- -D warnings`.
-3. Execute the full test suite (debug + release) and benchmarks.
