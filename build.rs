@@ -1,7 +1,7 @@
 use grep::regex::RegexMatcher;
 use grep::searcher::{Searcher, Sink, SinkMatch};
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Write};
+use std::io::{self, Cursor, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use walkdir::WalkDir;
@@ -70,6 +70,43 @@ struct EmptyBlockCollector {
 struct DebugAssertCollector {
     violations: Vec<String>,
     file_path: PathBuf,
+}
+
+// A custom collector for forbidden TODO/FIXME/"for now" comments
+struct TodoCommentCollector {
+    violations: Vec<String>,
+    file_path: PathBuf,
+}
+
+// A custom collector for meaningless conditionals where both branches are identical
+struct MeaninglessConditionalCollector {
+    violations: Vec<String>,
+    file_path: PathBuf,
+}
+
+// A custom collector for #[allow(clippy::no_effect)] with no-op variable access
+struct NoEffectCollector {
+    violations: Vec<String>,
+    file_path: PathBuf,
+}
+
+// A custom collector for "omitted for brevity" comments
+struct OmittedForBrevityCollector {
+    violations: Vec<String>,
+    file_path: PathBuf,
+}
+
+// A custom collector for #[deprecated] attributes
+struct DeprecatedCollector {
+    violations: Vec<String>,
+    file_path: PathBuf,
+}
+
+// A custom collector for placeholder stub functions
+struct PlaceholderStubCollector {
+    violations: Vec<String>,
+    file_path: PathBuf,
+    file_content: String,
 }
 
 static CURRENT_STAGE: OnceLock<Mutex<String>> = OnceLock::new();
@@ -501,8 +538,12 @@ impl DropUsageCollector {
             error_msg.push_str(&format!("   {violation}\n"));
         }
 
-        error_msg.push_str("\n⚠️ Explicit drop(...) calls are forbidden in this project.\n");
-        error_msg.push_str("   Restructure the code to let values go out of scope naturally.\n");
+        error_msg.push_str(
+            "\n⚠️ Explicit drop(...) calls are forbidden in this project.\n",
+        );
+        error_msg.push_str(
+            "   Restructure the code to let values go out of scope naturally.\n",
+        );
 
         Some(error_msg)
     }
@@ -532,7 +573,9 @@ impl EmptyBlockCollector {
             error_msg.push_str(&format!("   {violation}\n"));
         }
 
-        error_msg.push_str("\n⚠️ Empty control-flow blocks are forbidden in this project.\n");
+        error_msg.push_str(
+            "\n⚠️ Empty control-flow blocks are forbidden in this project.\n",
+        );
         error_msg.push_str("   Remove the block or add meaningful logic.\n");
 
         Some(error_msg)
@@ -565,6 +608,233 @@ impl DebugAssertCollector {
 
         error_msg.push_str("\n⚠️ debug_assert! is forbidden in this project.\n");
         error_msg.push_str("   Use assert! instead.\n");
+
+        Some(error_msg)
+    }
+}
+
+impl TodoCommentCollector {
+    fn new(file_path: &Path) -> Self {
+        Self {
+            violations: Vec::new(),
+            file_path: file_path.to_path_buf(),
+        }
+    }
+
+    fn check_and_get_error_message(&self) -> Option<String> {
+        if self.violations.is_empty() {
+            return None;
+        }
+
+        let file_name = self.file_path.to_str().unwrap_or("?");
+        let mut error_msg = format!(
+            "\n❌ ERROR: Found {} TODO/FIXME comments in {}:\n",
+            self.violations.len(),
+            file_name
+        );
+
+        for violation in &self.violations {
+            error_msg.push_str(&format!("   {violation}\n"));
+        }
+
+        error_msg.push_str("\n⚠️ TODO/FIXME/\"for now\" COMMENTS ARE FORBIDDEN IN THIS PROJECT!\n");
+        error_msg.push_str("   These comments indicate incomplete work. DO IT NOW!\n");
+        error_msg.push_str("   Do NOT just remove the comment - implement the thing first!\n");
+
+        Some(error_msg)
+    }
+}
+
+impl MeaninglessConditionalCollector {
+    fn new(file_path: &Path) -> Self {
+        Self {
+            violations: Vec::new(),
+            file_path: file_path.to_path_buf(),
+        }
+    }
+
+    fn check_and_get_error_message(&self) -> Option<String> {
+        if self.violations.is_empty() {
+            return None;
+        }
+
+        let file_name = self.file_path.to_str().unwrap_or("?");
+        let mut error_msg = format!(
+            "\n❌ ERROR: Found {} meaningless conditionals in {}:\n",
+            self.violations.len(),
+            file_name
+        );
+
+        for violation in &self.violations {
+            error_msg.push_str(&format!("   {violation}\n"));
+        }
+
+        error_msg.push_str(
+            "\n⚠️ Meaningless conditionals (identical if/else branches) are STRICTLY FORBIDDEN.\n",
+        );
+        error_msg.push_str("   Either remove the conditional entirely or ensure branches differ.\n");
+        error_msg.push_str(
+            "   If-else with same result is an anti-pattern to make unused variables appear used.\n",
+        );
+
+        Some(error_msg)
+    }
+}
+
+impl NoEffectCollector {
+    fn new(file_path: &Path) -> Self {
+        Self {
+            violations: Vec::new(),
+            file_path: file_path.to_path_buf(),
+        }
+    }
+
+    fn check_and_get_error_message(&self) -> Option<String> {
+        if self.violations.is_empty() {
+            return None;
+        }
+
+        let file_name = self.file_path.to_str().unwrap_or("?");
+        let mut error_msg = format!(
+            "\n❌ ERROR: Found {} #[allow(clippy::no_effect)] attributes in {}:\n",
+            self.violations.len(),
+            file_name
+        );
+
+        for violation in &self.violations {
+            error_msg.push_str(&format!("   {violation}\n"));
+        }
+
+        error_msg.push_str(
+            "\n⚠️ #[allow(clippy::no_effect)] IS STRICTLY FORBIDDEN IN THIS PROJECT!\n",
+        );
+        error_msg.push_str(
+            "   This is used to suppress warnings about no-op variable access like { variable_name; }\n",
+        );
+        error_msg.push_str(
+            "   If a parameter is truly unused, delete it and refactor the function signature.\n",
+        );
+        error_msg.push_str(
+            "   Do NOT use no-op statements to pretend variables are being used.\n",
+        );
+
+        Some(error_msg)
+    }
+}
+
+impl OmittedForBrevityCollector {
+    fn new(file_path: &Path) -> Self {
+        Self {
+            violations: Vec::new(),
+            file_path: file_path.to_path_buf(),
+        }
+    }
+
+    fn check_and_get_error_message(&self) -> Option<String> {
+        if self.violations.is_empty() {
+            return None;
+        }
+
+        let file_name = self.file_path.to_str().unwrap_or("?");
+        let mut error_msg = format!(
+            "\n❌ ERROR: Found {} \"omitted for brevity\" comments in {}:\n",
+            self.violations.len(),
+            file_name
+        );
+
+        for violation in &self.violations {
+            error_msg.push_str(&format!("   {violation}\n"));
+        }
+
+        error_msg.push_str(
+            "\n⚠️ \"OMITTED FOR BREVITY\" COMMENTS ARE STRICTLY FORBIDDEN IN THIS PROJECT!\n",
+        );
+        error_msg.push_str(
+            "   These comments hide incomplete implementations or deleted code.\n",
+        );
+        error_msg.push_str(
+            "   DO NOT omit anything. Include all code, tests, and implementations.\n",
+        );
+
+        Some(error_msg)
+    }
+}
+
+impl DeprecatedCollector {
+    fn new(file_path: &Path) -> Self {
+        Self {
+            violations: Vec::new(),
+            file_path: file_path.to_path_buf(),
+        }
+    }
+
+    fn check_and_get_error_message(&self) -> Option<String> {
+        if self.violations.is_empty() {
+            return None;
+        }
+
+        let file_name = self.file_path.to_str().unwrap_or("?");
+        let mut error_msg = format!(
+            "\n❌ ERROR: Found {} #[deprecated] attributes in {}:\n",
+            self.violations.len(),
+            file_name
+        );
+
+        for violation in &self.violations {
+            error_msg.push_str(&format!("   {violation}\n"));
+        }
+
+        error_msg.push_str(
+            "\n⚠️ #[deprecated] ATTRIBUTES ARE STRICTLY FORBIDDEN IN THIS PROJECT!\n",
+        );
+        error_msg.push_str(
+            "   Deprecated code keeps dead API surface area alive unnecessarily.\n",
+        );
+        error_msg.push_str(
+            "   If code is no longer needed, DELETE it completely. Do not deprecate it.\n",
+        );
+
+        Some(error_msg)
+    }
+}
+
+impl PlaceholderStubCollector {
+    fn new(file_path: &Path, content: &str) -> Self {
+        Self {
+            violations: Vec::new(),
+            file_path: file_path.to_path_buf(),
+            file_content: content.to_string(),
+        }
+    }
+
+    fn check_and_get_error_message(&self) -> Option<String> {
+        if self.violations.is_empty() {
+            return None;
+        }
+
+        let file_name = self.file_path.to_str().unwrap_or("?");
+        let mut error_msg = format!(
+            "\n❌ ERROR: Found {} placeholder stub functions in {}:\n",
+            self.violations.len(),
+            file_name
+        );
+
+        for violation in &self.violations {
+            error_msg.push_str(&format!("   {violation}\n"));
+        }
+
+        error_msg.push_str(
+            "\n⚠️ PLACEHOLDER STUB FUNCTIONS ARE STRICTLY FORBIDDEN IN THIS PROJECT!\n",
+        );
+        error_msg.push_str(
+            "   Functions that return Ok(Self { ... }) with all empty vectors/hashmaps are placeholders.\n",
+        );
+        error_msg.push_str(
+            "   These exist solely to satisfy the compiler without doing actual work.\n",
+        );
+        error_msg.push_str(
+            "   Implement the function properly instead of using empty placeholders.\n",
+        );
 
         Some(error_msg)
     }
@@ -1067,6 +1337,143 @@ impl Sink for DebugAssertCollector {
     }
 }
 
+impl Sink for TodoCommentCollector {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, mat: &SinkMatch) -> Result<bool, Self::Error> {
+        let line_number = mat.line_number().unwrap_or(0);
+        let line_text = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end();
+
+        self.violations.push(format!("{line_number}:{line_text}"));
+
+        Ok(true)
+    }
+}
+
+impl Sink for MeaninglessConditionalCollector {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, mat: &SinkMatch) -> Result<bool, Self::Error> {
+        let line_number = mat.line_number().unwrap_or(0);
+        let line_text = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end();
+
+        // Skip pure comments
+        let trimmed = line_text.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") {
+            return Ok(true);
+        }
+
+        // Extract the two branches from the if-else expression
+        // Pattern: if COND { BRANCH1 } else { BRANCH2 }
+        if let Some((branch1, branch2)) = extract_if_else_branches(line_text) {
+            let b1 = branch1.trim();
+            let b2 = branch2.trim();
+            if b1 == b2 && !b1.is_empty() {
+                self.violations.push(format!("{line_number}:{line_text}"));
+            }
+        }
+
+        Ok(true)
+    }
+}
+
+// Helper function to extract branches from a single-line if-else expression
+fn extract_if_else_branches(line: &str) -> Option<(String, String)> {
+    // Find "if" followed by condition and two brace-delimited blocks
+    let if_pos = line.find("if ")?;
+    let rest = &line[if_pos..];
+
+    // Find the first opening brace (start of then-branch)
+    let first_open = rest.find('{')?;
+    let after_first_open = &rest[first_open + 1..];
+
+    // Find the matching close brace for the then-branch
+    // Simple approach: find first } (works for single expressions)
+    let first_close = after_first_open.find('}')?;
+    let branch1 = &after_first_open[..first_close];
+
+    // Now look for "else {"
+    let after_first_block = &after_first_open[first_close + 1..];
+    let else_pos = after_first_block.find("else")?;
+    let after_else = &after_first_block[else_pos + 4..];
+
+    // Find the opening brace after else
+    let second_open = after_else.find('{')?;
+    let after_second_open = &after_else[second_open + 1..];
+
+    // Find the closing brace
+    let second_close = after_second_open.find('}')?;
+    let branch2 = &after_second_open[..second_close];
+
+    Some((branch1.to_string(), branch2.to_string()))
+}
+
+impl Sink for NoEffectCollector {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, mat: &SinkMatch) -> Result<bool, Self::Error> {
+        let line_number = mat.line_number().unwrap_or(0);
+        let line_text = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end();
+        self.violations.push(format!("{line_number}:{line_text}"));
+        Ok(true)
+    }
+}
+
+impl Sink for OmittedForBrevityCollector {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, mat: &SinkMatch) -> Result<bool, Self::Error> {
+        let line_number = mat.line_number().unwrap_or(0);
+        let line_text = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end();
+        self.violations.push(format!("{line_number}:{line_text}"));
+        Ok(true)
+    }
+}
+
+impl Sink for DeprecatedCollector {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, mat: &SinkMatch) -> Result<bool, Self::Error> {
+        let line_number = mat.line_number().unwrap_or(0);
+        let line_text = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end();
+        self.violations.push(format!("{line_number}:{line_text}"));
+        Ok(true)
+    }
+}
+
+impl Sink for PlaceholderStubCollector {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, mat: &SinkMatch) -> Result<bool, Self::Error> {
+        let line_number = mat.line_number().unwrap_or(0);
+        let line_text = std::str::from_utf8(mat.bytes()).unwrap_or("").trim_end();
+
+        // Check if this is actually a placeholder stub by examining surrounding context
+        let lines: Vec<&str> = self.file_content.lines().collect();
+        let line_idx = line_number as usize;
+        if line_idx > 0 && line_idx <= lines.len() {
+            let start_idx = line_idx - 1;
+            let end_idx = (start_idx + 10).min(lines.len());
+            let context = lines[start_idx..end_idx].join("\n");
+
+            // Check if this looks like a placeholder with multiple empty collections
+            let empty_count = context.matches("vec![]").count()
+                + context.matches("Vec::new()").count()
+                + context.matches("HashMap::new()").count()
+                + context.matches("BTreeMap::new()").count()
+                + context.matches("BTreeSet::new()").count()
+                + context.matches("HashSet::new()").count();
+
+            // If there are 2+ empty collections, it's likely a placeholder
+            if empty_count >= 2 {
+                self.violations.push(format!("{line_number}:{line_text}"));
+            }
+        }
+
+        Ok(true)
+    }
+}
+
 #[derive(Clone, Debug)]
 enum EmptyBlockTokenKind {
     Ident(String),
@@ -1216,6 +1623,75 @@ fn main() {
     emit_stage_detail(&debug_assert_report);
     all_violations.extend(debug_assert_violations);
 
+    // Scan for TODO/FIXME/"for now" comments
+    update_stage("scan TODO/FIXME comments");
+    let todo_violations = scan_for_todo_comments();
+    let todo_report = format!(
+        "TODO/FIXME comment scan identified {} violation groups",
+        todo_violations.len()
+    );
+    emit_stage_detail(&todo_report);
+    all_violations.extend(todo_violations);
+
+    // Scan for meaningless conditionals (same branches)
+    update_stage("scan meaningless conditionals");
+    let meaningless_cond_violations = scan_for_meaningless_conditionals();
+    let meaningless_cond_report = format!(
+        "meaningless conditional scan identified {} violation groups",
+        meaningless_cond_violations.len()
+    );
+    emit_stage_detail(&meaningless_cond_report);
+    all_violations.extend(meaningless_cond_violations);
+
+    // Scan for fake usage patterns (dummy checks masking unused variables)
+    update_stage("scan fake usage patterns");
+    let fake_usage_violations = scan_for_fake_usage();
+    let fake_usage_report = format!(
+        "fake usage scan identified {} violation groups",
+        fake_usage_violations.len()
+    );
+    emit_stage_detail(&fake_usage_report);
+    all_violations.extend(fake_usage_violations);
+    // Scan for #[allow(clippy::no_effect)] attributes
+    update_stage("scan #[allow(clippy::no_effect)] attributes");
+    let no_effect_violations = scan_for_no_effect_allow();
+    let no_effect_report = format!(
+        "no_effect allow scan identified {} violation groups",
+        no_effect_violations.len()
+    );
+    emit_stage_detail(&no_effect_report);
+    all_violations.extend(no_effect_violations);
+
+    // Scan for "omitted for brevity" and similar comments
+    update_stage("scan omitted for brevity comments");
+    let omitted_violations = scan_for_omitted_for_brevity();
+    let omitted_report = format!(
+        "omitted for brevity scan identified {} violation groups",
+        omitted_violations.len()
+    );
+    emit_stage_detail(&omitted_report);
+    all_violations.extend(omitted_violations);
+
+    // Scan for #[deprecated] attributes
+    update_stage("scan #[deprecated] attributes");
+    let deprecated_violations = scan_for_deprecated();
+    let deprecated_report = format!(
+        "deprecated attribute scan identified {} violation groups",
+        deprecated_violations.len()
+    );
+    emit_stage_detail(&deprecated_report);
+    all_violations.extend(deprecated_violations);
+
+    // Scan for placeholder stub functions
+    update_stage("scan placeholder stub functions");
+    let placeholder_violations = scan_for_placeholder_stubs();
+    let placeholder_report = format!(
+        "placeholder stub scan identified {} violation groups",
+        placeholder_violations.len()
+    );
+    emit_stage_detail(&placeholder_report);
+    all_violations.extend(placeholder_violations);
+
     // If any violations were found, print them all and exit with error
     if !all_violations.is_empty() {
         update_stage("report validation errors");
@@ -1247,23 +1723,16 @@ fn manually_check_for_unused_variables() {
     let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
+    let build_path = manifest_dir.join("build.rs");
 
-    // Support both workspace (shared/build.rs) and standalone (build.rs) configurations
-    let shared_build_path = manifest_dir.join("shared/build.rs");
-    let toplevel_build_path = manifest_dir.join("build.rs");
-
-    let build_path = if shared_build_path.exists() {
-        shared_build_path
-    } else if toplevel_build_path.exists() {
-        toplevel_build_path
-    } else {
+    if !build_path.exists() {
         emit_stage_detail("manual lint self-check: build script source not found");
         eprintln!(
-            "manual lint self-check fatal error: build script source file not found at {:?} or {:?}",
-            shared_build_path, toplevel_build_path
+            "manual lint self-check fatal error: build script source file {:?} is missing",
+            build_path
         );
         std::process::exit(1);
-    };
+    }
 
     let deps_dir = match build_dependencies_directory() {
         Some(path) => path,
@@ -1467,6 +1936,7 @@ fn build_dependencies_directory() -> Option<PathBuf> {
 fn locate_build_dependency(deps_dir: &Path, crate_name: &str) -> Option<PathBuf> {
     let prefix = format!("lib{crate_name}-");
     let mut candidate: Option<PathBuf> = None;
+    let mut candidate_mtime = std::time::SystemTime::UNIX_EPOCH;
 
     if let Ok(entries) = std::fs::read_dir(deps_dir) {
         for entry in entries.flatten() {
@@ -1481,8 +1951,14 @@ fn locate_build_dependency(deps_dir: &Path, crate_name: &str) -> Option<PathBuf>
             };
 
             if file_name.starts_with(&prefix) {
-                candidate = Some(path);
-                break;
+                if let Ok(metadata) = std::fs::metadata(&path) {
+                    if let Ok(mtime) = metadata.modified() {
+                        if candidate.is_none() || mtime > candidate_mtime {
+                            candidate = Some(path);
+                            candidate_mtime = mtime;
+                        }
+                    }
+                }
             }
         }
     }
@@ -1870,8 +2346,13 @@ fn scan_for_allow_dead_code() -> Vec<String> {
 }
 
 fn scan_for_ignored_tests() -> Vec<String> {
-    // Regex pattern to find #[ignore] test attributes
-    let pattern = r"#\s*\[\s*ignore\s*\]";
+    // Regex pattern to find #[ignore] test attributes in all forms:
+    // - #[ignore]
+    // - #[ignore = "reason"]
+    // - #[ignore("reason")]
+    // - #[cfg_attr(..., ignore)]
+    // - #[cfg_attr(..., ignore = "reason")]
+    let pattern = r"#\s*\[.*\bignore\b";
     let mut all_violations = Vec::new();
 
     match RegexMatcher::new_line_matcher(pattern) {
@@ -1922,6 +2403,52 @@ fn scan_for_ignored_tests() -> Vec<String> {
     all_violations
 }
 
+fn scan_for_todo_comments() -> Vec<String> {
+    // Regex pattern to find TODO/FIXME/"for now" comments (case insensitive)
+    // Matches: TODO, FIXME, XXX, "for now" in comments
+    let pattern = r"(?i)//.*\b(TODO|FIXME|XXX|for now)\b";
+    let mut all_violations = Vec::new();
+
+    match RegexMatcher::new_line_matcher(pattern) {
+        Ok(matcher) => {
+            let mut searcher = Searcher::new();
+
+            for entry in WalkDir::new(".")
+                .into_iter()
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_ignored_directory(e.path()))
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs") // Exclude the build script itself
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
+            {
+                let path = entry.path();
+
+                match std::fs::read_to_string(path) {
+                    Ok(_) => {}
+                    Err(_) => continue,
+                };
+
+                let mut collector = TodoCommentCollector::new(path);
+
+                if searcher
+                    .search_path(&matcher, path, &mut collector)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                if let Some(error_message) = collector.check_and_get_error_message() {
+                    all_violations.push(error_message);
+                }
+            }
+        }
+        Err(e) => {
+            all_violations.push(format!("Error creating TODO comment regex matcher: {}", e));
+        }
+    }
+
+    all_violations
+}
+
 fn scan_for_drop_in_build_scripts() -> Vec<String> {
     let pattern = r"\bdrop\s*\(";
     let mut all_violations = Vec::new();
@@ -1935,9 +2462,7 @@ fn scan_for_drop_in_build_scripts() -> Vec<String> {
                 .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
                 .filter(|e: &walkdir::DirEntry| !is_in_ignored_directory(e.path()))
                 .filter(|e: &walkdir::DirEntry| {
-                    e.path()
-                        .file_name()
-                        .is_some_and(|name| name == OsStr::new("build.rs"))
+                    e.path().file_name().is_some_and(|name| name == OsStr::new("build.rs"))
                 })
             {
                 let path = entry.path();
@@ -2006,7 +2531,10 @@ fn scan_for_drop_usage() -> Vec<String> {
             }
         }
         Err(e) => {
-            all_violations.push(format!("Error creating drop usage regex matcher: {}", e));
+            all_violations.push(format!(
+                "Error creating drop usage regex matcher: {}",
+                e
+            ));
         }
     }
 
@@ -2075,7 +2603,248 @@ fn scan_for_debug_assert_usage() -> Vec<String> {
             }
         }
         Err(e) => {
-            all_violations.push(format!("Error creating debug_assert regex matcher: {}", e));
+            all_violations.push(format!(
+                "Error creating debug_assert regex matcher: {}",
+                e
+            ));
+        }
+    }
+
+    all_violations
+}
+
+fn scan_for_meaningless_conditionals() -> Vec<String> {
+    // Match single-line if-else expressions to find candidates
+    // The Sink implementation will then compare the branches
+    let pattern = r"if\s+.+\s*\{[^}]+\}\s*else\s*\{[^}]+\}";
+    let mut all_violations = Vec::new();
+
+    match RegexMatcher::new_line_matcher(pattern) {
+        Ok(matcher) => {
+            let mut searcher = Searcher::new();
+
+            for entry in WalkDir::new(".")
+                .into_iter()
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_ignored_directory(e.path()))
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
+            {
+                let path = entry.path();
+
+                if std::fs::read_to_string(path).is_err() {
+                    continue;
+                }
+
+                let mut collector = MeaninglessConditionalCollector::new(path);
+
+                if searcher
+                    .search_path(&matcher, path, &mut collector)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                if let Some(error_message) = collector.check_and_get_error_message() {
+                    all_violations.push(error_message);
+                }
+            }
+        }
+        Err(e) => {
+            all_violations.push(format!(
+                "Error creating meaningless conditional regex matcher: {}",
+                e
+            ));
+        }
+    }
+
+    all_violations
+}
+
+fn scan_for_no_effect_allow() -> Vec<String> {
+    let pattern = r"#\s*\[\s*allow\s*\(\s*clippy\s*::\s*no_effect\s*\)\s*\]";
+    let mut all_violations = Vec::new();
+
+    match RegexMatcher::new_line_matcher(pattern) {
+        Ok(matcher) => {
+            let mut searcher = Searcher::new();
+
+            for entry in WalkDir::new(".")
+                .into_iter()
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_ignored_directory(e.path()))
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs")
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
+            {
+                let path = entry.path();
+
+                if std::fs::read_to_string(path).is_err() {
+                    continue;
+                }
+
+                let mut collector = NoEffectCollector::new(path);
+
+                if searcher
+                    .search_path(&matcher, path, &mut collector)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                if let Some(error_message) = collector.check_and_get_error_message() {
+                    all_violations.push(error_message);
+                }
+            }
+        }
+        Err(e) => {
+            all_violations.push(format!(
+                "Error creating no_effect allow regex matcher: {}",
+                e
+            ));
+        }
+    }
+
+    all_violations
+}
+
+fn scan_for_omitted_for_brevity() -> Vec<String> {
+    // Match various forms of "omitted for brevity" and similar placeholders
+    // Pattern includes: "omitted for brevity", "not shown", "elided", "truncated", "abbreviated", etc.
+    let pattern = r"(omitted\s+for\s+brevity|not\s+shown|elided\s+for|truncated\s+for|abbreviated\s+for|removed\s+for\s+brevity|excluded\s+for\s+brevity|skipped\s+for\s+brevity|hidden\s+for\s+brevity)";
+    let mut all_violations = Vec::new();
+
+    match RegexMatcher::new_line_matcher(pattern) {
+        Ok(matcher) => {
+            let mut searcher = Searcher::new();
+
+            for entry in WalkDir::new(".")
+                .into_iter()
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_ignored_directory(e.path()))
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs")
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
+            {
+                let path = entry.path();
+
+                if std::fs::read_to_string(path).is_err() {
+                    continue;
+                }
+
+                let mut collector = OmittedForBrevityCollector::new(path);
+
+                if searcher
+                    .search_path(&matcher, path, &mut collector)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                if let Some(error_message) = collector.check_and_get_error_message() {
+                    all_violations.push(error_message);
+                }
+            }
+        }
+        Err(e) => {
+            all_violations.push(format!(
+                "Error creating omitted for brevity regex matcher: {}",
+                e
+            ));
+        }
+    }
+
+    all_violations
+}
+
+fn scan_for_deprecated() -> Vec<String> {
+    let pattern = r"#\s*\[\s*deprecated";
+    let mut all_violations = Vec::new();
+
+    match RegexMatcher::new_line_matcher(pattern) {
+        Ok(matcher) => {
+            let mut searcher = Searcher::new();
+
+            for entry in WalkDir::new(".")
+                .into_iter()
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_ignored_directory(e.path()))
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs")
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
+            {
+                let path = entry.path();
+
+                if std::fs::read_to_string(path).is_err() {
+                    continue;
+                }
+
+                let mut collector = DeprecatedCollector::new(path);
+
+                if searcher
+                    .search_path(&matcher, path, &mut collector)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                if let Some(error_message) = collector.check_and_get_error_message() {
+                    all_violations.push(error_message);
+                }
+            }
+        }
+        Err(e) => {
+            all_violations.push(format!(
+                "Error creating deprecated attribute regex matcher: {}",
+                e
+            ));
+        }
+    }
+
+    all_violations
+}
+
+fn scan_for_placeholder_stubs() -> Vec<String> {
+    // Match functions returning Ok(Self { with empty collections
+    // Pattern: Ok(Self { followed by lines with vec![], HashMap::new(), etc., and closing })
+    let pattern = r"Ok\(Self\s*\{";
+    let mut all_violations = Vec::new();
+
+    match RegexMatcher::new_line_matcher(pattern) {
+        Ok(matcher) => {
+            let mut searcher = Searcher::new();
+
+            for entry in WalkDir::new(".")
+                .into_iter()
+                .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
+                .filter(|e: &walkdir::DirEntry| !is_in_ignored_directory(e.path()))
+                .filter(|e: &walkdir::DirEntry| e.file_name() != "build.rs")
+                .filter(|e: &walkdir::DirEntry| e.path().extension().is_some_and(|ext| ext == "rs"))
+            {
+                let path = entry.path();
+
+                let content = match std::fs::read_to_string(path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                // Find all Ok(Self { matches
+                let mut collector = PlaceholderStubCollector::new(path, &content);
+
+                if searcher
+                    .search_path(&matcher, path, &mut collector)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                // Check if the collector found any violations
+                if let Some(error_message) = collector.check_and_get_error_message() {
+                    all_violations.push(error_message);
+                }
+            }
+        }
+        Err(e) => {
+            all_violations.push(format!(
+                "Error creating placeholder stub regex matcher: {}",
+                e
+            ));
         }
     }
 
@@ -2619,4 +3388,140 @@ fn is_in_target_directory(path: impl AsRef<Path>) -> bool {
 
 fn is_in_ignored_directory(path: impl AsRef<Path>) -> bool {
     is_in_target_directory(path.as_ref()) || is_in_hidden_directory(path.as_ref())
+}
+
+fn scan_for_fake_usage() -> Vec<String> {
+    // Check for "if var.len() ... { return; }" pattern where var is otherwise unused
+    let pattern = r"if\s+(!?\s*[a-zA-Z_]\w*)\.(?:len|is_empty)\(\)\s*(?:[!=<>]+[^\{]+)?\{\s*return\s*;?\s*\}";
+    let matcher = match RegexMatcher::new_line_matcher(pattern) {
+        Ok(m) => m,
+        Err(e) => return vec![format!("Error creating fake usage regex: {}", e)],
+    };
+
+    let mut all_violations = Vec::new();
+
+    for entry in WalkDir::new(".")
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| !is_in_ignored_directory(e.path()))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+    {
+        let path = entry.path();
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Sanitize to avoid matching in comments/strings, and for accurate counting
+        let sanitized_bytes = strip_comments_and_strings_for_content(&content);
+        let sanitized = String::from_utf8_lossy(&sanitized_bytes);
+
+        let mut collector = FakeUsageCandidateCollector::new();
+        if Searcher::new()
+            .search_reader(
+                &matcher,
+                Cursor::new(&sanitized_bytes),
+                &mut collector,
+            )
+            .is_err()
+        {
+            continue;
+        }
+
+        for (var_raw, line_num, line_text) in collector.candidates {
+            // Clean up var name (remove !, whitespace)
+            let var = var_raw.trim_start_matches('!').trim();
+
+            // Count occurrences in the WHOLE file (sanitized)
+            // We use word boundary check
+            let count = count_variable_occurrences(&sanitized, var);
+
+            // If count is low (<= 2), it means it's likely only used in signature/let and this check
+            // We use a threshold of 2: One for definition/signature, one for the check itself.
+            // If it's used anywhere else, count would be >= 3.
+            if count <= 2 {
+                let file_name = path.to_str().unwrap_or("?");
+                let mut msg = format!(
+                    "\n❌ ERROR: Found fake usage of variable '{}' in {}:{}:\n",
+                    var, file_name, line_num
+                );
+                msg.push_str(&format!("   {}\n", line_text));
+                msg.push_str("\n⚠️ This looks like a dummy check to mask an unused variable.\n");
+                msg.push_str("   \"No-Op Variable Access\": The variable is checked but never referenced again.\n");
+                msg.push_str("   Remove the variable (or rename to _) and the check.\n");
+                all_violations.push(msg);
+            }
+        }
+    }
+    all_violations
+}
+
+struct FakeUsageCandidateCollector {
+    candidates: Vec<(String, u64, String)>, // var_raw, line_num, line_text
+}
+
+impl FakeUsageCandidateCollector {
+    fn new() -> Self {
+        Self {
+            candidates: Vec::new(),
+        }
+    }
+}
+
+impl Sink for FakeUsageCandidateCollector {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _: &Searcher, mat: &SinkMatch) -> Result<bool, Self::Error> {
+        let line_number = mat.line_number().unwrap_or(0);
+        let line_text = std::str::from_utf8(mat.bytes()).unwrap_or("").trim();
+
+        // Extract variable name manually since we can't get capture groups easily
+        // Pattern: if (!? var) . (len|is_empty)
+        if let Some(if_idx) = line_text.find("if") {
+            let after_if = &line_text[if_idx + 2..];
+            if let Some(dot_idx) = after_if.find('.') {
+                let var_part = &after_if[..dot_idx];
+                self.candidates.push((
+                    var_part.trim().to_string(),
+                    line_number,
+                    line_text.to_string(),
+                ));
+            }
+        }
+
+        Ok(true)
+    }
+}
+
+fn count_variable_occurrences(text: &str, var: &str) -> usize {
+    let mut count = 0;
+    for (idx, _) in text.match_indices(var) {
+        if is_word_boundary(text, idx, var.len()) {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn is_word_boundary(text: &str, idx: usize, len: usize) -> bool {
+    let before = if idx == 0 {
+        None
+    } else {
+        text[..idx].chars().last()
+    };
+    let after = text[idx + len..].chars().next();
+
+    let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+
+    if let Some(c) = before {
+        if is_word_char(c) {
+            return false;
+        }
+    }
+    if let Some(c) = after {
+        if is_word_char(c) {
+            return false;
+        }
+    }
+    true
 }
