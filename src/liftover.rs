@@ -71,7 +71,7 @@ struct ChainMapping {
 /// - Destination = Query (qName)
 pub struct ChainMap {
     /// Map from Source Chromosome -> IntervalTree of Mappings
-    map: HashMap<String, Lapper<u64, ChainMapping>>,
+    map: HashMap<String, Arc<Lapper<u64, ChainMapping>>>,
     /// Intern table for target chromosomes
     target_chroms: Vec<String>,
 }
@@ -198,10 +198,20 @@ impl ChainMap {
             line.clear();
         }
 
-        // Build Lappers
-        let mut final_map = HashMap::new();
+        // Build Lappers and insert both chr and non-chr aliases to avoid allocations in lift().
+        let mut final_map: HashMap<String, Arc<Lapper<u64, ChainMapping>>> = HashMap::new();
         for (chrom, intervals) in map {
-            final_map.insert(chrom, Lapper::new(intervals));
+            let lapper = Arc::new(Lapper::new(intervals));
+
+            // Insert exact key
+            final_map.insert(chrom.clone(), Arc::clone(&lapper));
+
+            // Insert alias key with/without "chr" prefix.
+            if let Some(stripped) = chrom.strip_prefix("chr") {
+                final_map.insert(stripped.to_string(), Arc::clone(&lapper));
+            } else {
+                final_map.insert(format!("chr{}", chrom), Arc::clone(&lapper));
+            }
         }
 
         Ok(Self {
@@ -215,12 +225,11 @@ impl ChainMap {
     ///
     /// Fails closed: ambiguous mappings (multiple chain hits) are rejected.
     pub fn lift(&self, chrom: &str, pos: u64) -> Result<(String, u64, Strand), LiftoverError> {
-        // Try normalized chrom names
+        // Try normalized chrom names (no allocations in hot loop).
         let intervals = self
             .map
             .get(chrom)
             .or_else(|| self.map.get(chrom.trim_start_matches("chr")))
-            .or_else(|| self.map.get(&format!("chr{}", chrom)))
             .ok_or(LiftoverError::Unmapped)?;
 
         // Find intersecting interval - use next() instead of collect() for performance
