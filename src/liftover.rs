@@ -119,27 +119,68 @@ impl ChainMap {
                 continue;
             }
 
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.is_empty() {
+            let mut it = line.split_whitespace();
+            let Some(first) = it.next() else {
                 line.clear();
                 continue;
-            }
+            };
 
-            if parts[0] == "chain" {
+            if first == "chain" {
                 // chain score tName tSize tStrand tStart tEnd qName qSize qStrand qStart qEnd id
-                if parts.len() < 13 {
-                    continue; // Invalid header?
-                }
-                let score: u64 = parts[1].parse()?;
-                let t_name = parts[2].to_string();
-                let t_start: u64 = parts[5].parse()?;
+                let Some(score_s) = it.next() else {
+                    line.clear();
+                    continue;
+                };
+                let Some(t_name_s) = it.next() else {
+                    line.clear();
+                    continue;
+                };
+                // Skip tSize, tStrand
+                let _ = it.next();
+                let _ = it.next();
+                let Some(t_start_s) = it.next() else {
+                    line.clear();
+                    continue;
+                };
                 // let t_end: u64 = parts[6].parse()?; // Unused
 
-                let q_name = parts[7].to_string();
-                let q_size: u64 = parts[8].parse()?;
-                let q_strand = Strand::from_char(parts[9].chars().next().unwrap())?;
-                let q_start: u64 = parts[10].parse()?;
-                let chain_id: u32 = parts[12].parse()?;
+                // Skip tEnd
+                let _ = it.next();
+
+                let Some(q_name_s) = it.next() else {
+                    line.clear();
+                    continue;
+                };
+                let Some(q_size_s) = it.next() else {
+                    line.clear();
+                    continue;
+                };
+                let Some(q_strand_s) = it.next() else {
+                    line.clear();
+                    continue;
+                };
+                let Some(q_start_s) = it.next() else {
+                    line.clear();
+                    continue;
+                };
+
+                // Skip qEnd
+                let _ = it.next();
+
+                let Some(chain_id_s) = it.next() else {
+                    line.clear();
+                    continue;
+                };
+
+                let score: u64 = score_s.parse()?;
+                let t_name = t_name_s.to_string();
+                let t_start: u64 = t_start_s.parse()?;
+
+                let q_name = q_name_s.to_string();
+                let q_size: u64 = q_size_s.parse()?;
+                let q_strand = Strand::from_char(q_strand_s.chars().next().unwrap())?;
+                let q_start: u64 = q_start_s.parse()?;
+                let chain_id: u32 = chain_id_s.parse()?;
 
                 current_header = Some(Header {
                     score,
@@ -158,7 +199,8 @@ impl ChainMap {
                 // dt: gap in target (source) to next block
                 // dq: gap in query (dest) to next block
                 if let Some(ref mut header) = current_header {
-                    let size: u64 = parts[0].parse()?;
+                    let size_s = first;
+                    let size: u64 = size_s.parse()?;
 
                     // Create interval for this block
                     let t_block_start = header.t_start;
@@ -199,9 +241,11 @@ impl ChainMap {
                     header.t_start += size;
                     header.q_start += size;
 
-                    if parts.len() == 3 {
-                        let dt: u64 = parts[1].parse()?;
-                        let dq: u64 = parts[2].parse()?;
+                    let dt_opt = it.next();
+                    let dq_opt = it.next();
+                    if let (Some(dt_s), Some(dq_s)) = (dt_opt, dq_opt) {
+                        let dt: u64 = dt_s.parse()?;
+                        let dq: u64 = dq_s.parse()?;
                         header.t_start += dt;
                         header.q_start += dq;
                     }
