@@ -483,41 +483,39 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
             let target_base_str = target_base.to_string();
 
             if rec_ref == "N" {
-                // DTC N-ref mode: target base must be in the alt alleles
-                // We'll set REF = target and remove it from ALTs
-                if !rec_alts
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(&target_base_str))
-                {
-                    // Target base not in alleles - incompatible
-                    summary.liftover_incompatible += 1;
-                    tracing::debug!(
-                        chrom = %chrom,
-                        pos = pos,
-                        target_base = %target_base,
-                        alleles = ?rec_alts,
-                        "Rejecting: target reference base not in called alleles"
-                    );
-                    continue;
-                }
-
-                // Set REF to target base
+                // DTC N-ref mode: input REF is a placeholder.
+                // Always set REF = target base and treat any called allele that equals the
+                // target base as a REF allele (GT index 0). Other called alleles become ALTs.
                 *record.reference_bases_mut() = target_base_str.clone();
 
-                // Remove target base from ALTs and remap genotypes
-                let mut new_alts = Vec::new();
-                let mut allele_mapping = HashMap::new();
-                allele_mapping.insert(0, 0); // Old REF (N, unused) -> New REF
+                let mut new_alts: Vec<String> = Vec::new();
+                let mut allele_to_new_idx: HashMap<String, usize> = HashMap::new();
+                let mut allele_mapping: HashMap<usize, usize> = HashMap::new();
+
+                // Old REF (N placeholder) -> New REF
+                allele_mapping.insert(0, 0);
 
                 for (i, alt) in rec_alts.iter().enumerate() {
                     let old_idx = i + 1;
+
                     if alt.eq_ignore_ascii_case(&target_base_str) {
-                        // This ALT is now REF
+                        // This called allele matches the target reference base.
                         allele_mapping.insert(old_idx, 0);
+                        continue;
+                    }
+
+                    // De-duplicate ALTs while maintaining deterministic indices.
+                    let key = alt.to_ascii_uppercase();
+                    let new_idx = if let Some(idx) = allele_to_new_idx.get(&key) {
+                        *idx
                     } else {
                         new_alts.push(alt.clone());
-                        allele_mapping.insert(old_idx, new_alts.len());
-                    }
+                        let idx = new_alts.len();
+                        allele_to_new_idx.insert(key, idx);
+                        idx
+                    };
+
+                    allele_mapping.insert(old_idx, new_idx);
                 }
 
                 *record.alternate_bases_mut() = new_alts.into();

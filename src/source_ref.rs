@@ -1,9 +1,13 @@
 use anyhow::{Context, Result, anyhow, bail};
+use flate2::read::GzDecoder;
 use url::Url;
 
 use crate::dtc::{self, Record as DtcRecord};
 use crate::reference::ReferenceGenome;
 use crate::remote::{self};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 
 /// Strand orientation mode for the input file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -12,6 +16,68 @@ pub enum StrandMode {
     Auto, // Infer from data (default)
     Forward, // Force forward strand (no flipping)
     Reverse, // Force reverse strand (flip everything)
+}
+
+fn xdg_cache_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = std::env::var("HOME").context("HOME not set; cannot determine cache directory")?;
+    Ok(PathBuf::from(home).join(".cache"))
+}
+
+fn check_build_cache_dir() -> Result<PathBuf> {
+    Ok(xdg_cache_dir()?.join("check_build"))
+}
+
+fn convert_genome_refs_dir() -> Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("com", "convert_genome", "convert_genome")
+        .ok_or_else(|| anyhow!("Failed to determine cache directory"))?;
+    Ok(dirs.cache_dir().join("refs"))
+}
+
+fn build_to_check_build_filename(build: &str) -> Option<&'static str> {
+    let normalized = build.to_lowercase();
+    if normalized.contains("37") || normalized.contains("hg19") {
+        Some("hg19.fa.gz")
+    } else if normalized.contains("38") || normalized.contains("hg38") {
+        Some("hg38.fa.gz")
+    } else {
+        None
+    }
+}
+
+fn build_to_uncompressed_name(build: &str) -> Option<&'static str> {
+    let normalized = build.to_lowercase();
+    if normalized.contains("37") || normalized.contains("hg19") {
+        Some("hg19.fa")
+    } else if normalized.contains("38") || normalized.contains("hg38") {
+        Some("hg38.fa")
+    } else {
+        None
+    }
+}
+
+fn decompress_gzip_to_path(gz_path: &Path, out_path: &Path) -> Result<()> {
+    let input = fs::File::open(gz_path)
+        .with_context(|| format!("failed to open gz reference {}", gz_path.display()))?;
+    let mut decoder = GzDecoder::new(input);
+
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = out_path.with_extension("fa.tmp");
+    let output = fs::File::create(&tmp_path)
+        .with_context(|| format!("failed to create output {}", tmp_path.display()))?;
+    let mut writer = io::BufWriter::new(output);
+    io::copy(&mut decoder, &mut writer)
+        .with_context(|| format!("failed to decompress {}", gz_path.display()))?;
+    writer.flush()?;
+
+    fs::rename(&tmp_path, out_path)
+        .with_context(|| format!("failed to finalize {}", out_path.display()))?;
+    Ok(())
 }
 
 /// Inferred strand state of the file.
@@ -58,7 +124,6 @@ impl SourceReferenceRegistry {
 
 /// Download and open a source reference genome.
 pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
-    // 1. Check if we can get a URL
     let url = SourceReferenceRegistry::get_url(build).ok_or_else(|| {
         anyhow!(
             "Unknown build '{}', cannot download source reference",
@@ -66,72 +131,47 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
         )
     })?;
 
-    // 2. Download/Fetch
-    // This handles caching in the temp dir/cache dir logic of remote.rs?
-    // remote.rs uses TempDir which disappears. We need a persistent cache.
-    // ChainRegistry has a persistent cache. We should probably use that or similar.
-    // For now, let's use remote::fetch_remote_resource which downloads to temp.
-    // This is expensive if done every run.
-    // TODO: Improve caching. But for now, correctness > performance.
+    let refs_dir = convert_genome_refs_dir()?;
+    fs::create_dir_all(&refs_dir)?;
 
-    // START_HACK: For the purpose of this task, I'll assume efficient caching isn't the primary blocker,
-    // although downloading 3GB every run is bad.
-    // However, I should probably check if the user has a local cache mechanism.
-    // The "ChainRegistry" used `directories` crate. I should use similar logic here.
+    let uncompressed_name = build_to_uncompressed_name(build)
+        .ok_or_else(|| anyhow!("Unknown build '{}', cannot map to reference filename", build))?;
+    let reference_path = refs_dir.join(uncompressed_name);
 
-    let dirs = directories::ProjectDirs::from("com", "convert_genome", "convert_genome")
-        .ok_or_else(|| anyhow!("Failed to determine cache directory"))?;
-    let cache_dir = dirs.cache_dir().join("genomes");
-    std::fs::create_dir_all(&cache_dir)?;
+    // If we already expanded it, just use it.
+    if reference_path.exists() {
+        return ReferenceGenome::open(&reference_path, None).with_context(|| {
+            format!(
+                "Failed to open source reference at {}",
+                reference_path.display()
+            )
+        });
+    }
 
-    let filename = url.path_segments().unwrap().next_back().unwrap();
-    let target_path = cache_dir.join(filename);
+    // Try to reuse check_build's cached .fa.gz.
+    if let Some(check_build_filename) = build_to_check_build_filename(build) {
+        let check_build_gz = check_build_cache_dir()?.join(check_build_filename);
+        if check_build_gz.exists() {
+            tracing::info!(
+                gz = %check_build_gz.display(),
+                out = %reference_path.display(),
+                "expanding check_build cached reference"
+            );
+            decompress_gzip_to_path(&check_build_gz, &reference_path)?;
+            return ReferenceGenome::open(&reference_path, None).with_context(|| {
+                format!(
+                    "Failed to open source reference at {}",
+                    reference_path.display()
+                )
+            });
+        }
+    }
 
-    // Check if exists
-    // Note: This logic duplicates remote.rs partially but makes it persistent.
-    let reference_path = if target_path.exists() {
-        // Assume valid?
-        // If it's .gz, we need to make sure it's decompressed?
-        // ReferenceGenome expects .fa usually.
-        // If we downloaded hg19.fa.gz, we might want to keep it compressed if noodles supports it (bgzip),
-        // but standard gzip isn't indexed by FAI usually.
-        // Let's rely on standard handling:
-        // If it's .gz, we might need to decompress to a .fa file.
-        target_path
-    } else {
-        tracing::info!("Downloading source reference from {}", url);
-        // Use a temporary download then move
-        let resource = remote::fetch_remote_resource(&url)?;
-        // The resource is likely in a temp dir. Copy to cache.
-        // resource.local_path() is the prepared file.
-        let cached_file = if resource
-            .local_path()
-            .extension()
-            .is_some_and(|e| e == "gz")
-        {
-            // It's still gzip? prepare_downloaded_file usually decompresses if it sees .gz
-            // Let's check remote.rs: prepare_downloaded_file calls decompress_gzip.
-            // So resource.local_path() is decompressed.
-            let name = filename.strip_suffix(".gz").unwrap_or(filename);
-            cache_dir.join(name)
-        } else {
-            target_path
-        };
+    // Fallback: download ourselves if check_build cache is missing.
+    tracing::info!("Downloading source reference from {}", url);
+    let resource = remote::fetch_remote_resource(&url)?;
+    fs::copy(resource.local_path(), &reference_path)?;
 
-        // Copy/Move
-        // Note: caching a 3GB file is heavy.
-        std::fs::copy(resource.local_path(), &cached_file)?;
-        cached_file
-    };
-
-    // Open Reference
-    // We assume FAI exists or can be generated?
-    // Noodles ReferenceGenome::open expects an FAI or generates one?
-    // Actually our ReferenceGenome::open wrapper (in reference.rs) takes an optional FAI path.
-    // If not provided, does it generate?
-    // index.rs mechanism...
-
-    // Just try opening
     ReferenceGenome::open(&reference_path, None).with_context(|| {
         format!(
             "Failed to open source reference at {}",

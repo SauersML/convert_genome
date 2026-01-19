@@ -619,6 +619,9 @@ where
     S: crate::input::VariantSource,
     W: VariantWriter,
 {
+    let mut buffered_records: Vec<(usize, usize, usize, RecordBuf)> = Vec::new();
+    let mut ordinal: usize = 0;
+
     while let Some(result) = source.next_variant(summary) {
         match result {
             Ok(record) => {
@@ -672,11 +675,24 @@ where
                         tracing::debug!(chrom = %chrom, pos = pos, error = %e, "allele harmonization failed");
                     }
                 }
+
                 summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
 
-                writer
-                    .write_variant(header, &final_record)
-                    .context("failed to write variant record")?;
+                let chrom_name = final_record.reference_sequence_name();
+                let contig_key = if let Some(r) = reference {
+                    r.contig_index(chrom_name).unwrap_or(usize::MAX)
+                } else {
+                    let (idx, _) = crate::input::natural_contig_order(chrom_name);
+                    idx
+                };
+
+                let pos_key = final_record
+                    .variant_start()
+                    .map(usize::from)
+                    .unwrap_or(0);
+
+                buffered_records.push((contig_key, pos_key, ordinal, final_record));
+                ordinal = ordinal.saturating_add(1);
             }
             Err(e) => {
                 summary.parse_errors += 1;
@@ -686,6 +702,16 @@ where
                 tracing::warn!(error = %e, "failed to parse/convert input record");
             }
         }
+    }
+
+    buffered_records.sort_by(|(a_contig, a_pos, a_ord, _), (b_contig, b_pos, b_ord, _)| {
+        (a_contig, a_pos, a_ord).cmp(&(b_contig, b_pos, b_ord))
+    });
+
+    for (_, _, _, record) in buffered_records {
+        writer
+            .write_variant(header, &record)
+            .context("failed to write variant record")?;
     }
 
     Ok(())
