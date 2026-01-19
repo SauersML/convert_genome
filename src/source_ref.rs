@@ -98,7 +98,7 @@ impl SourceReferenceRegistry {
         // URLs for basic FASTA files (no alts/patches for speed/simplicity)
         if normalized.contains("37") || normalized.contains("hg19") {
             // Using a reliable source for hg19 fasta (e.g., from UCSC or similar)
-            // For now, let's use a placeholder or a known public URL.
+            // Use a known public UCSC URL.
             // Using GRC assembly from NCBI or similar is best.
             // Let's use the one from the project's S3 or similar if available, otherwise a public one.
             // User didn't specify, so I'll suggest a standard UCSC hg19 URL.

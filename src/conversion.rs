@@ -201,7 +201,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // Track inference results for the report
     let mut sex_inferred = false;
 
-    // Auto-detect build and sex if not provided (DTC format only for now)
+    // Auto-detect build and sex if not provided (DTC format only)
     let mut config = config;
     let mut liftover_chain: Option<Arc<crate::liftover::ChainMap>> = None;
     let mut inferred_build_opt: Option<String> = None;
