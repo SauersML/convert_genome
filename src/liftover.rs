@@ -50,6 +50,10 @@ pub enum LiftoverError {
 /// A mapped segment in the destination genome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChainMapping {
+    /// Chain ID (from chain header)
+    chain_id: u32,
+    /// Chain score (from chain header)
+    chain_score: u64,
     /// Destination chromosome ID (internal)
     dest_chrom_id: u32,
     /// Destination start (qStart)
@@ -93,6 +97,7 @@ impl ChainMap {
 
         // Current header info
         struct Header {
+            score: u64,
             t_name: String,
             // t_size: u64,
             // t_strand: char,
@@ -102,6 +107,7 @@ impl ChainMap {
             q_size: u64,
             q_strand: Strand,
             q_start: u64,
+            chain_id: u32,
             // q_end: u64,
             // id: String,
         }
@@ -121,9 +127,10 @@ impl ChainMap {
 
             if parts[0] == "chain" {
                 // chain score tName tSize tStrand tStart tEnd qName qSize qStrand qStart qEnd id
-                if parts.len() < 12 {
+                if parts.len() < 13 {
                     continue; // Invalid header?
                 }
+                let score: u64 = parts[1].parse()?;
                 let t_name = parts[2].to_string();
                 let t_start: u64 = parts[5].parse()?;
                 // let t_end: u64 = parts[6].parse()?; // Unused
@@ -132,8 +139,10 @@ impl ChainMap {
                 let q_size: u64 = parts[8].parse()?;
                 let q_strand = Strand::from_char(parts[9].chars().next().unwrap())?;
                 let q_start: u64 = parts[10].parse()?;
+                let chain_id: u32 = parts[12].parse()?;
 
                 current_header = Some(Header {
+                    score,
                     t_name,
                     t_start,
                     // t_end,
@@ -141,6 +150,7 @@ impl ChainMap {
                     q_size,
                     q_strand,
                     q_start,
+                    chain_id,
                 });
             } else {
                 // Data line: size [dt dq]
@@ -167,6 +177,8 @@ impl ChainMap {
                         });
 
                     let mapping = ChainMapping {
+                        chain_id: header.chain_id,
+                        chain_score: header.score,
                         dest_chrom_id,
                         dest_start: q_block_start,
                         dest_end: q_block_end,
@@ -232,16 +244,36 @@ impl ChainMap {
             .or_else(|| self.map.get(chrom.trim_start_matches("chr")))
             .ok_or(LiftoverError::Unmapped)?;
 
-        // Find intersecting interval - use next() instead of collect() for performance
+        // Resolve overlaps by selecting the highest-score chain.
+        // If there is a score tie across different chain IDs, fail-closed as ambiguous.
         let mut iter = intervals.find(pos, pos + 1);
-        let first = iter.next().ok_or(LiftoverError::Unmapped)?;
+        let mut best: Option<&Interval<u64, ChainMapping>> = None;
+        let mut tied = false;
+        while let Some(hit) = iter.next() {
+            match best {
+                None => {
+                    best = Some(hit);
+                    tied = false;
+                }
+                Some(current) => {
+                    let a = &current.val;
+                    let b = &hit.val;
+                    if b.chain_score > a.chain_score {
+                        best = Some(hit);
+                        tied = false;
+                    } else if b.chain_score == a.chain_score && b.chain_id != a.chain_id {
+                        tied = true;
+                    }
+                }
+            }
+        }
 
-        // Check for ambiguous multi-mapping (fail-closed)
-        if iter.next().is_some() {
+        let best = best.ok_or(LiftoverError::Unmapped)?;
+        if tied {
             return Err(LiftoverError::Ambiguous);
         }
 
-        let mapping = &first.val;
+        let mapping = &best.val;
         let offset = pos - mapping.source_start;
 
         let new_pos = if mapping.dest_strand == Strand::Forward {
@@ -378,46 +410,98 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
-            let is_snp = ref_bases.len() == 1
-                && alt_bases
-                    .iter()
-                    .all(|a| a.len() == 1 && !a.starts_with('<'));
+            let is_symbolic = alt_bases.iter().any(|a| a.starts_with('<'));
+            let is_snp = ref_bases.len() == 1 && alt_bases.iter().all(|a| a.len() == 1) && !is_symbolic;
 
-            if !is_snp {
-                // Reject indels and SVs - liftover not safe for them
-                summary.liftover_straddled += 1;
-                tracing::debug!(
-                    chrom = %chrom,
-                    pos = pos,
-                    "Rejecting non-SNP variant (indel/SV liftover not supported)"
-                );
-                continue;
-            }
+            // Basic indel endpoint liftover (non-symbolic only). SV/symbolic remain unsupported.
+            let is_simple_indel = !is_snp
+                && !is_symbolic
+                && ref_bases.len() >= 1
+                && alt_bases.iter().all(|a| !a.is_empty());
 
             // Convert to 0-based for liftover (safe because pos > 0).
             let pos_0 = (pos as u64) - 1;
 
-            // Attempt lift with explicit error handling
-            let lift_result = self.chain.lift(&chrom, pos_0);
-            let (new_chrom, new_pos_0, strand) = match lift_result {
-                Ok(result) => result,
-                Err(LiftoverError::Unmapped) => {
-                    summary.liftover_unmapped += 1;
+            let (new_chrom, new_pos_0, strand) = if is_snp {
+                // Attempt lift with explicit error handling
+                let lift_result = self.chain.lift(&chrom, pos_0);
+                match lift_result {
+                    Ok(result) => result,
+                    Err(LiftoverError::Unmapped) => {
+                        summary.liftover_unmapped += 1;
+                        continue;
+                    }
+                    Err(LiftoverError::Ambiguous) => {
+                        summary.liftover_ambiguous += 1;
+                        tracing::debug!(
+                            chrom = %chrom,
+                            pos = pos,
+                            "Rejecting variant with ambiguous multi-mapping"
+                        );
+                        continue;
+                    }
+                    Err(_) => {
+                        summary.liftover_unmapped += 1;
+                        continue;
+                    }
+                }
+            } else if is_simple_indel {
+                // Endpoint liftover: lift start and end of the REF span.
+                let ref_len = ref_bases.len() as u64;
+                let source_dist = ref_len.saturating_sub(1);
+                let end_pos_0 = pos_0 + source_dist;
+
+                let (c1, p1, s1) = match self.chain.lift(&chrom, pos_0) {
+                    Ok(r) => r,
+                    Err(LiftoverError::Unmapped) => {
+                        summary.liftover_unmapped += 1;
+                        continue;
+                    }
+                    Err(LiftoverError::Ambiguous) => {
+                        summary.liftover_ambiguous += 1;
+                        continue;
+                    }
+                    Err(_) => {
+                        summary.liftover_unmapped += 1;
+                        continue;
+                    }
+                };
+
+                let (c2, p2, s2) = match self.chain.lift(&chrom, end_pos_0) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        summary.liftover_straddled += 1;
+                        continue;
+                    }
+                };
+
+                if c1 != c2 || s1 != s2 {
+                    summary.liftover_straddled += 1;
                     continue;
                 }
-                Err(LiftoverError::Ambiguous) => {
-                    summary.liftover_ambiguous += 1;
-                    tracing::debug!(
-                        chrom = %chrom,
-                        pos = pos,
-                        "Rejecting variant with ambiguous multi-mapping"
-                    );
+
+                let target_dist = if s1 == Strand::Forward {
+                    p2.saturating_sub(p1)
+                } else {
+                    p1.saturating_sub(p2)
+                };
+
+                if target_dist != source_dist {
+                    summary.liftover_straddled += 1;
                     continue;
                 }
-                Err(_) => {
-                    summary.liftover_unmapped += 1;
-                    continue;
-                }
+
+                // Ensure VCF POS in target is leftmost (forward coordinate).
+                let new_start = if s1 == Strand::Forward { p1 } else { p2 };
+                (c1, new_start, s1)
+            } else {
+                summary.liftover_straddled += 1;
+                tracing::debug!(
+                    chrom = %chrom,
+                    pos = pos,
+                    "Rejecting unsupported non-SNP variant (symbolic/SV or complex indel)"
+                );
+                continue;
             };
 
             // Canonicalize contig name using target reference
