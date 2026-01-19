@@ -454,6 +454,7 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
 
             // Original coords
             let chrom = record.reference_sequence_name().to_string();
+            let chrom_str = chrom.as_str();
             let pos: usize = record.variant_start().map(|p| p.into()).unwrap_or(0);
 
             // VCF coordinates are 1-based. ChainMap::lift operates on 0-based coordinates.
@@ -468,7 +469,7 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
             // only match the source reference base after complementation.
             if record.reference_bases().eq_ignore_ascii_case("N") {
                 if let Some(ref src_ref) = self.source_reference {
-                    if let Ok(src_base) = src_ref.base(&chrom, pos as u64) {
+                    if let Ok(src_base) = src_ref.base(chrom_str, pos as u64) {
                         let src_base = src_base.to_ascii_uppercase();
                         if matches!(src_base, 'A' | 'C' | 'G' | 'T') {
                             let src_base_str = src_base.to_string();
@@ -533,13 +534,13 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
             // Inputs are typically sorted by chromosome, so this is a hot-path win.
             let intervals = if let (Some(k), Some(ref intervals)) =
                 (self.last_chrom_key.as_deref(), self.last_intervals.as_ref())
-                && k == chrom
+                && k == chrom_str
             {
                 Arc::clone(intervals)
             } else {
-                let trimmed = chrom.trim_start_matches("chr");
-                let (key_used, intervals) = match self.chain.map.get(chrom) {
-                    Some(v) => (chrom, Arc::clone(v)),
+                let trimmed = chrom_str.trim_start_matches("chr");
+                let (key_used, intervals) = match self.chain.map.get(chrom_str) {
+                    Some(v) => (chrom_str, Arc::clone(v)),
                     None => match self.chain.map.get(trimmed) {
                         Some(v) => (trimmed, Arc::clone(v)),
                         None => {
@@ -1038,6 +1039,8 @@ mod tests {
             chain: Arc::new(chain_map),
             target_reference: target_ref,
             source_reference: None,
+            last_chrom_key: None,
+            last_intervals: None,
         };
 
         let mut summary = crate::ConversionSummary::default();
