@@ -361,6 +361,13 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
             let chrom = record.reference_sequence_name().to_string();
             let pos: usize = record.variant_start().map(|p| p.into()).unwrap_or(0);
 
+            // VCF coordinates are 1-based. ChainMap::lift operates on 0-based coordinates.
+            // If position is missing/invalid, fail-closed by skipping the record.
+            if pos == 0 {
+                summary.parse_errors += 1;
+                continue;
+            }
+
             // Check for indels/SVs - reject them (not supported yet)
             // Check for indels/SVs - reject them (not supported yet)
             // Clone to avoid borrow conflicts later
@@ -387,8 +394,8 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                 continue;
             }
 
-            // 0-based for liftover
-            let pos_0 = (pos as u64).saturating_sub(1);
+            // Convert to 0-based for liftover (safe because pos > 0).
+            let pos_0 = (pos as u64) - 1;
 
             // Attempt lift with explicit error handling
             let lift_result = self.chain.lift(&chrom, pos_0);
