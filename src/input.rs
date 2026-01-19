@@ -88,7 +88,7 @@ impl<T: VariantSource + ?Sized> VariantSource for Box<T> {
 /// Buffers and sorts raw records to ensure cache locality and minimize memory usage.
 pub struct DtcSource {
     records: std::vec::IntoIter<DtcRecord>,
-    reference: ReferenceGenome,
+    reference: Option<ReferenceGenome>,
     config: ConversionConfig,
     header_keys: Keys,
     initial_parse_errors: usize,
@@ -98,7 +98,7 @@ pub struct DtcSource {
 impl DtcSource {
     pub fn new<R: std::io::BufRead>(
         reader: dtc::Reader<R>,
-        reference: ReferenceGenome,
+        reference: Option<ReferenceGenome>,
         config: ConversionConfig,
     ) -> Self {
         let keys: Keys = vec![String::from("GT")].into_iter().collect();
@@ -131,10 +131,18 @@ impl DtcSource {
         }
 
         // Sort by chromosome index and position to optimize ReferenceGenome cache usage
-        raw_records.sort_by_cached_key(|r| {
-            let idx = reference.contig_index(&r.chromosome).unwrap_or(usize::MAX);
-            (idx, r.position)
-        });
+        // If no reference, sort by natural order of chromosome name
+        if let Some(ref r) = reference {
+            raw_records.sort_by_cached_key(|rec| {
+                let idx = r.contig_index(&rec.chromosome).unwrap_or(usize::MAX);
+                (idx, rec.position)
+            });
+        } else {
+             raw_records.sort_by_cached_key(|rec| {
+                let (idx, _) = natural_contig_order(&rec.chromosome);
+                (idx, rec.position)
+            });
+        }
 
         Self {
             records: raw_records.into_iter(),
@@ -153,31 +161,40 @@ impl DtcSource {
     ) -> io::Result<Option<RecordBuf>> {
         // Validation and normalization logic moved from conversion.rs
 
-        let canonical_name =
-            if let Some(name) = self.reference.resolve_contig_name(&record.chromosome) {
+        let canonical_name = if let Some(ref r) = self.reference {
+            if let Some(name) = r.resolve_contig_name(&record.chromosome) {
                 name.to_string()
             } else {
                 // Skipping unknown chromosome
                 summary.unknown_chromosomes += 1;
                 return Ok(None);
-            };
+            }
+        } else {
+            // No reference: pass through chromosome name (normalized slightly)
+            record.chromosome.clone()
+        };
 
         // Validate position
         let position = record.position;
 
         // Use reference.base instead of get_context
-        let reference_base = match self.reference.base(&canonical_name, position) {
-            Ok(base) => base,
-            Err(e) => {
-                summary.reference_failures += 1;
-                tracing::warn!(
-                    "reference lookup failed for {}:{}: {}",
-                    canonical_name,
-                    position,
-                    e
-                );
-                return Ok(None);
+        let reference_base = if let Some(ref r) = self.reference {
+            match r.base(&canonical_name, position) {
+                Ok(base) => base,
+                Err(e) => {
+                    summary.reference_failures += 1;
+                    tracing::warn!(
+                        "reference lookup failed for {}:{}: {}",
+                        canonical_name,
+                        position,
+                        e
+                    );
+                    return Ok(None);
+                }
             }
+        } else {
+            // No reference: use placeholder 'N'
+            'N'
         };
 
         // Parse alleles
