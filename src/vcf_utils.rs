@@ -53,6 +53,43 @@ pub fn remap_sample_genotypes(samples: &Samples, mapping: &HashMap<usize, usize>
 /// Remap genotype indices in a GT string (e.g., "0/1" -> "1/0")
 /// Handles standard separators (/, |) and ignores '.'
 pub fn remap_gt_string(gt: &str, mapping: &HashMap<usize, usize>) -> String {
+    // Fast path: if all allele indices are single ASCII digits (0-9), remap byte-by-byte.
+    // This covers the overwhelmingly common cases like 0/0, 0/1, 1|0, ./., ./0, etc.
+    // If we detect any multi-digit index, fall back to the general parser below.
+    if gt.as_bytes().iter().all(|&b| {
+        matches!(b, b'0'..=b'9' | b'.' | b'/' | b'|')
+    }) {
+        // Detect multi-digit indices by checking for adjacent digits.
+        let bytes = gt.as_bytes();
+        let mut has_multi_digit = false;
+        for w in bytes.windows(2) {
+            if w[0].is_ascii_digit() && w[1].is_ascii_digit() {
+                has_multi_digit = true;
+                break;
+            }
+        }
+
+        if !has_multi_digit {
+            let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+            for &b in bytes {
+                if b.is_ascii_digit() {
+                    let idx = (b - b'0') as usize;
+                    if let Some(&new_idx) = mapping.get(&idx)
+                        && new_idx < 10
+                    {
+                        out.push((new_idx as u8) + b'0');
+                    } else {
+                        // Keep original if not in mapping or not representable as single digit.
+                        out.push(b);
+                    }
+                } else {
+                    out.push(b);
+                }
+            }
+            return String::from_utf8(out).unwrap_or_else(|_| gt.to_string());
+        }
+    }
+
     let mut result = String::with_capacity(gt.len());
     let mut current_num = String::new();
 
