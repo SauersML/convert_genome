@@ -273,15 +273,15 @@ impl ChainRegistry {
     pub fn get_chain(&self, source: &str, target: &str) -> Result<ChainMap> {
         let (filename, url) = match (source, target) {
             ("GRCh37", "GRCh38") | ("hg19", "hg38") => (
-                "hg19ToHg38.over.chain.gz",
+                "hg19ToHg38.over.chain",
                 "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz",
             ),
             ("GRCh38", "GRCh37") | ("hg38", "hg19") => (
-                "hg38ToHg19.over.chain.gz",
+                "hg38ToHg19.over.chain",
                 "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/liftOver/hg38ToHg19.over.chain.gz",
             ),
             ("NCBI36", "GRCh38") | ("hg18", "hg38") => (
-                "hg18ToHg38.over.chain.gz",
+                "hg18ToHg38.over.chain",
                 "https://hgdownload.soe.ucsc.edu/goldenPath/hg18/liftOver/hg18ToHg38.over.chain.gz",
             ),
             _ => bail!("Unsupported liftover pair: {} -> {}", source, target),
@@ -523,25 +523,50 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                 *record.alternate_bases_mut() = new_alts.into();
                 *record.samples_mut() = remap_sample_genotypes(record.samples(), &allele_mapping);
             } else {
-                // VCF mode: REF should match target, or we reject
-                // (Reference swap is complex and error-prone - fail closed)
+                // VCF mode: REF should match target, or we check for swap
                 if !rec_ref.eq_ignore_ascii_case(&target_base_str) {
                     // Check if target is in ALTs for possible ref swap
-                    if rec_alts
+                    if let Some(target_idx) = rec_alts
                         .iter()
-                        .any(|a| a.eq_ignore_ascii_case(&target_base_str))
+                        .position(|a| a.eq_ignore_ascii_case(&target_base_str))
                     {
-                        // Could do ref swap, but that's complex and risky
-                        // For fail-closed, we reject
-                        summary.liftover_incompatible += 1;
+                        // Ref swap logic
+                        // 1. New REF = Target Base
+                        // 2. Old REF becomes an ALT
+                        // 3. New ALTs = [Old REF, Other ALTs...]
+                        
+                        let mut new_alts = Vec::new();
+                        let mut allele_mapping = HashMap::new();
+                        
+                        // Map Old REF (0) -> New position in ALTs (1-based index)
+                        // By convention, we'll put the old REF as the first ALT
+                        new_alts.push(rec_ref.clone());
+                        allele_mapping.insert(0, 1);
+                        
+                        // Map the Old ALT that matches Target -> New REF (0)
+                        // target_idx is 0-based index into rec_alts. So VCF index is target_idx + 1.
+                        allele_mapping.insert(target_idx + 1, 0);
+                        
+                        // Handle other ALTs
+                        for (i, alt) in rec_alts.iter().enumerate() {
+                            if i == target_idx { continue; } // Already handled (became REF)
+                            new_alts.push(alt.clone());
+                            // Mapped to new position: existing length of new_alts (1-based)
+                            allele_mapping.insert(i + 1, new_alts.len()); 
+                        }
+                        
+                        // Apply changes
+                        *record.reference_bases_mut() = target_base_str.clone();
+                         *record.alternate_bases_mut() = new_alts.into();
+                        *record.samples_mut() = remap_sample_genotypes(record.samples(), &allele_mapping);
+                        
                         tracing::debug!(
                             chrom = %chrom,
                             pos = pos,
-                            rec_ref = %rec_ref,
-                            target_base = %target_base,
-                            "Rejecting: REF mismatch (ref swap not implemented)"
+                            "Performed Reference Swap: OldREF({}) became ALT, OldALT({}) became REF",
+                            rec_ref, target_base_str
                         );
-                        continue;
+                        
                     } else {
                         // Neither REF nor ALTs match target - definitely incompatible
                         summary.liftover_incompatible += 1;
@@ -703,5 +728,82 @@ mod tests {
         // Position 150 maps to both chains - should be ambiguous
         let result = chain_map.lift("chr1", 150);
         assert_eq!(result, Err(LiftoverError::Ambiguous));
+    }
+
+    #[test]
+    fn test_ref_swap_logic() {
+        use noodles::vcf;
+        use noodles::core::Position;
+        use noodles::vcf::variant::record_buf::Samples;
+        use std::io::Write;
+        use crate::input::VariantSource; 
+
+        // 1. Create Target Reference (chr2) with 'G' at position 100
+        let dir = TempDir::new().unwrap();
+        let fasta_path = dir.child("target.fa");
+        {
+            let mut f = std::fs::File::create(&fasta_path).unwrap();
+            writeln!(f, ">chr2").unwrap();
+            let mut seq = vec!['N'; 200];
+            seq[100] = 'G'; 
+            let s: String = seq.into_iter().collect();
+            writeln!(f, "{}", s).unwrap();
+        }
+        let target_ref = ReferenceGenome::open(fasta_path.path(), None).unwrap();
+
+        // 2. Chain Map (chr1:100 -> chr2:100)
+        // ChainMap maps FROM tName/tStart TO qName/qStart.
+        // So we need tName=chr1.
+        let chain_content = "chain 1000 chr1 200 + 100 101 chr2 200 + 100 101 1\n1 0 0\n";
+        let chain_path = create_dummy_chain(&dir, "swap.chain", chain_content);
+        let chain_map = ChainMap::load(chain_path).unwrap();
+
+        // 3. Mock Source
+        struct MockSource {
+            record: Option<vcf::variant::RecordBuf>,
+        }
+        impl VariantSource for MockSource {
+            fn next_variant(&mut self, summary: &mut crate::ConversionSummary) -> Option<std::io::Result<vcf::variant::RecordBuf>> {
+                // Silence unused warning by accessing it
+                summary.parse_errors += 0; 
+                self.record.take().map(Ok)
+            }
+        }
+
+        let input_record = vcf::variant::RecordBuf::builder()
+            .set_reference_sequence_name("chr1")
+            .set_variant_start(Position::new(101).unwrap())
+            .set_reference_bases("A")
+            .set_alternate_bases(vec![String::from("G")].into())
+            .set_samples(Samples::new(
+                 vec![String::from("GT")].into_iter().collect(),
+                 vec![vec![Some(vcf::variant::record_buf::samples::sample::Value::String("0/1".into()))]]
+            ))
+            .build();
+
+        let source = MockSource { record: Some(input_record) };
+
+        let mut adapter = LiftoverAdapter {
+            source: Box::new(source),
+            chain: Arc::new(chain_map),
+            target_reference: target_ref,
+        };
+
+        let mut summary = crate::ConversionSummary::default();
+        let result = adapter.next_variant(&mut summary).unwrap().unwrap();
+
+        // 4. Verify Swap
+        assert_eq!(result.reference_bases().to_string(), "G");
+        assert_eq!(result.alternate_bases().as_ref()[0], "A");
+        
+        let samples = result.samples();
+        let sample = samples.values().next().unwrap();
+        let genotype = sample.values().iter().next().unwrap().as_ref().unwrap();
+        
+        if let vcf::variant::record_buf::samples::sample::Value::String(gt) = genotype {
+            assert!(gt == "1/0" || gt == "1|0", "Genotype should be swapped to 1/0, got {}", gt);
+        } else {
+            panic!("Unexpected genotype format");
+        }
     }
 }

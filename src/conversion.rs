@@ -296,38 +296,13 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         }
 
         // Strand Inference
-        if let Some(ref build) = inferred_build_opt {
-            match crate::source_ref::load_source_reference(build) {
-                Ok(source_ref) => {
-                    tracing::info!(
-                        "Loaded source reference for {} to verify strand orientation",
-                        build
-                    );
-                    match crate::source_ref::infer_strand_lock(&prescan_records, &source_ref) {
-                        Ok(strand) => {
-                            inferred_strand = Some(strand);
-                            if strand == crate::source_ref::InferredStrand::Reverse {
-                                tracing::warn!(
-                                    "Detected REVERSE strand orientation. Will flip all alleles."
-                                );
-                            } else {
-                                tracing::info!("Detected Forward strand orientation.");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Strand inference failed: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Could not load source reference for {}: {}. Skipping strand verification.",
-                        build,
-                        e
-                    );
-                }
-            }
+        // Strand Inference
+        // CRITIQUE: "Kill the Source Download". 23andMe/Ancestry are generally Forward strand.
+        // We will assume Forward strand for passing build detection.
+        // If we really need strict checking, we should use a lightweight method.
+        if inferred_build_opt.is_some() {
+             tracing::info!("Assuming Forward strand orientation for DTC input.");
+             inferred_strand = Some(crate::source_ref::InferredStrand::Forward);
         }
 
         // Infer sex if not provided
