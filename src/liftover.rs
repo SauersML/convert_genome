@@ -288,6 +288,14 @@ impl ChainMap {
             .or_else(|| self.map.get(chrom.trim_start_matches("chr")))
             .ok_or(LiftoverError::Unmapped)?;
 
+        self.lift_with_intervals(intervals, pos)
+    }
+
+    fn lift_with_intervals(
+        &self,
+        intervals: &Lapper<u64, ChainMapping>,
+        pos: u64,
+    ) -> Result<(String, u64, Strand), LiftoverError> {
         // Resolve overlaps by selecting the highest-score chain.
         // If there is a score tie across different chain IDs, fail-closed as ambiguous.
         let mut iter = intervals.find(pos, pos + 1);
@@ -410,6 +418,8 @@ pub struct LiftoverAdapter<S> {
     chain: Arc<ChainMap>,
     target_reference: ReferenceGenome,
     source_reference: Option<ReferenceGenome>,
+    last_chrom_key: Option<String>,
+    last_intervals: Option<Arc<Lapper<u64, ChainMapping>>>,
 }
 
 impl<S> LiftoverAdapter<S> {
@@ -424,6 +434,8 @@ impl<S> LiftoverAdapter<S> {
             chain,
             target_reference,
             source_reference,
+            last_chrom_key: None,
+            last_intervals: None,
         }
     }
 }
@@ -517,9 +529,33 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
             // Convert to 0-based for liftover (safe because pos > 0).
             let pos_0 = (pos as u64) - 1;
 
+            // Cache chain interval structure per chromosome to avoid repeated HashMap hashing.
+            // Inputs are typically sorted by chromosome, so this is a hot-path win.
+            let intervals = if let (Some(k), Some(ref intervals)) =
+                (self.last_chrom_key.as_deref(), self.last_intervals.as_ref())
+                && k == chrom
+            {
+                Arc::clone(intervals)
+            } else {
+                let trimmed = chrom.trim_start_matches("chr");
+                let (key_used, intervals) = match self.chain.map.get(chrom) {
+                    Some(v) => (chrom, Arc::clone(v)),
+                    None => match self.chain.map.get(trimmed) {
+                        Some(v) => (trimmed, Arc::clone(v)),
+                        None => {
+                            summary.liftover_unmapped += 1;
+                            continue;
+                        }
+                    },
+                };
+                self.last_chrom_key = Some(key_used.to_string());
+                self.last_intervals = Some(Arc::clone(&intervals));
+                intervals
+            };
+
             let (new_chrom, new_pos_0, strand) = if is_snp {
                 // Attempt lift with explicit error handling
-                let lift_result = self.chain.lift(&chrom, pos_0);
+                let lift_result = self.chain.lift_with_intervals(&intervals, pos_0);
                 match lift_result {
                     Ok(result) => result,
                     Err(LiftoverError::Unmapped) => {
@@ -546,7 +582,7 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                 let source_dist = ref_len.saturating_sub(1);
                 let end_pos_0 = pos_0 + source_dist;
 
-                let (c1, p1, s1) = match self.chain.lift(&chrom, pos_0) {
+                let (c1, p1, s1) = match self.chain.lift_with_intervals(&intervals, pos_0) {
                     Ok(r) => r,
                     Err(LiftoverError::Unmapped) => {
                         summary.liftover_unmapped += 1;
@@ -562,7 +598,7 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                     }
                 };
 
-                let (c2, p2, s2) = match self.chain.lift(&chrom, end_pos_0) {
+                let (c2, p2, s2) = match self.chain.lift_with_intervals(&intervals, end_pos_0) {
                     Ok(r) => r,
                     Err(_) => {
                         summary.liftover_straddled += 1;
