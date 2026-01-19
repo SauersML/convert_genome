@@ -201,7 +201,7 @@ impl ChainMap {
         let intervals = self
             .map
             .get(chrom)
-            .or_else(|| self.map.get(&chrom.trim_start_matches("chr").to_string()))
+            .or_else(|| self.map.get(chrom.trim_start_matches("chr")))
             .or_else(|| self.map.get(&format!("chr{}", chrom)))?;
 
         // Find intersecting interval
