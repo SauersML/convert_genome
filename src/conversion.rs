@@ -290,14 +290,15 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             }
         }
 
-        // Strand Inference
-        // Strand Inference
-        // CRITIQUE: "Kill the Source Download". 23andMe/Ancestry are generally Forward strand.
-        // We will assume Forward strand for passing build detection.
-        // If we really need strict checking, we should use a lightweight method.
-        if inferred_build_opt.is_some() {
-             tracing::info!("Assuming Forward strand orientation for DTC input.");
-             inferred_strand = Some(crate::source_ref::InferredStrand::Forward);
+        // Strand Inference (fail-closed)
+        // Use the detected source build and source reference to infer file-wide orientation.
+        if let Some(ref detected_build) = inferred_build_opt {
+            tracing::info!(build = %detected_build, "Inferring strand orientation for DTC input");
+            let source_ref = crate::source_ref::load_source_reference(detected_build)
+                .with_context(|| "failed to load source reference for strand inference")?;
+            let strand = crate::source_ref::infer_strand_lock(&prescan_records, &source_ref)
+                .with_context(|| "strand inference failed")?;
+            inferred_strand = Some(strand);
         }
 
         // Infer sex if not provided
