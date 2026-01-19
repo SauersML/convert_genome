@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use noodles::vcf::variant::record_buf::RecordBuf;
 use rust_lapper::{Interval, Lapper};
 use url::Url;
@@ -33,8 +33,8 @@ impl Strand {
 /// A mapped segment in the destination genome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChainMapping {
-    /// Destination chromosome (qName in chain)
-    dest_chrom: String,
+    /// Destination chromosome ID (internal)
+    dest_chrom_id: u32,
     /// Destination start (qStart)
     dest_start: u64,
     /// Destination end (qEnd)
@@ -55,6 +55,8 @@ struct ChainMapping {
 pub struct ChainMap {
     /// Map from Source Chromosome -> IntervalTree of Mappings
     map: HashMap<String, Lapper<u64, ChainMapping>>,
+    /// Intern table for target chromosomes
+    target_chroms: Vec<String>,
 }
 
 impl ChainMap {
@@ -68,6 +70,8 @@ impl ChainMap {
     /// Parse chain file content.
     pub fn from_reader<R: BufRead>(mut reader: R) -> Result<Self> {
         let mut map: HashMap<String, Vec<Interval<u64, ChainMapping>>> = HashMap::new();
+        let mut target_chroms: Vec<String> = Vec::new();
+        let mut target_chrom_indices: HashMap<String, u32> = HashMap::new();
         let mut line = String::new();
 
         // Current header info
@@ -76,7 +80,7 @@ impl ChainMap {
             // t_size: u64,
             // t_strand: char,
             t_start: u64,
-            t_end: u64,
+            // t_end: u64, // Unused
             q_name: String,
             q_size: u64,
             q_strand: Strand,
@@ -105,7 +109,7 @@ impl ChainMap {
                 }
                 let t_name = parts[2].to_string();
                 let t_start: u64 = parts[5].parse()?;
-                let t_end: u64 = parts[6].parse()?;
+                // let t_end: u64 = parts[6].parse()?; // Unused
 
                 let q_name = parts[7].to_string();
                 let q_size: u64 = parts[8].parse()?;
@@ -115,7 +119,7 @@ impl ChainMap {
                 current_header = Some(Header {
                     t_name,
                     t_start,
-                    t_end,
+                    // t_end,
                     q_name,
                     q_size,
                     q_strand,
@@ -136,8 +140,15 @@ impl ChainMap {
                     let q_block_start = header.q_start;
                     let q_block_end = q_block_start + size;
 
+                    // Intern target chromosome
+                    let dest_chrom_id = *target_chrom_indices.entry(header.q_name.clone()).or_insert_with(|| {
+                        let id = target_chroms.len() as u32;
+                        target_chroms.push(header.q_name.clone());
+                        id
+                    });
+
                     let mapping = ChainMapping {
-                        dest_chrom: header.q_name.clone(),
+                        dest_chrom_id,
                         dest_start: q_block_start,
                         dest_end: q_block_end,
                         dest_strand: header.q_strand,
@@ -174,7 +185,10 @@ impl ChainMap {
             final_map.insert(chrom, Lapper::new(intervals));
         }
 
-        Ok(Self { map: final_map })
+        Ok(Self {
+            map: final_map,
+            target_chroms,
+        })
     }
 
     /// Lift a single coordinate (0-based) from source to destination.
@@ -189,10 +203,6 @@ impl ChainMap {
         // We only care about the point, so interval is [pos, pos+1)
         let matches: Vec<&Interval<u64, ChainMapping>> = intervals.find(pos, pos + 1).collect();
 
-        // If multiple matches, usually means overlapping chains (rare for same locus but possible).
-        // Pick the best one? Lapper returns all. We take first for now.
-        // Ideally we pick the longest or highest score, but we discarded score.
-        // For liftover, usually non-overlapping.
         let m = matches.first()?;
 
         let mapping = &m.val;
@@ -202,28 +212,13 @@ impl ChainMap {
             mapping.dest_start + offset
         } else {
             // Reverse strand logic
-            // qStart in chain is already in reverse coordinates?
-            // UCSC spec: "If strand is -, coordinates are in reverse strand's coordinate system"
-            // i.e., 0 is end of sequence.
-            // So to get + strand coordinate:
-            // pos_plus = size - 1 - pos_rev
-            // Wait, let's verified.
-            // If chain says qStart=100, qEnd=200, qStrand=-, qSize=1000.
-            // This block corresponds to reverse-strand coordinates 100..200.
-            // That means on the physical + strand, it is:
-            // start_plus = 1000 - 200 = 800
-            // end_plus = 1000 - 100 = 900.
-            // The mapping is inverted.
-            // As we move +1 in Source (t), we move +1 in Reverse Query (q_rev).
-            // So q_rev_pos = mapping.dest_start + offset.
-            // Then convert to forward:
-            // final_pos = dest_size - 1 - q_rev_pos.
-
             let q_rev_pos = mapping.dest_start + offset;
             mapping.dest_size.checked_sub(1 + q_rev_pos)?
         };
 
-        Some((mapping.dest_chrom.clone(), new_pos, mapping.dest_strand))
+        let dest_chrom = self.target_chroms.get(mapping.dest_chrom_id as usize)?.clone();
+
+        Some((dest_chrom, new_pos, mapping.dest_strand))
     }
 }
 
@@ -403,8 +398,7 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+
     use assert_fs::prelude::*;
     use assert_fs::TempDir;
 
@@ -425,6 +419,8 @@ mod tests {
         assert!(chain_map.map.contains_key("chr1"));
         let lapper = chain_map.map.get("chr1").unwrap();
         assert_eq!(lapper.len(), 1);
+        assert_eq!(chain_map.target_chroms.len(), 1);
+        assert_eq!(chain_map.target_chroms[0], "chr1");
     }
 
     #[test]
@@ -452,21 +448,7 @@ mod tests {
         // chr1:100-200 maps to chr1:200-300 on - strand
         // qStart=200, qEnd=300, qSize=1000.
         // If qStrand is -, coords in chain are reversed.
-        // Wait, UCSC chain format spec says:
-        // "qStart and qEnd describe the interval in the query sequence...
-        // If the strand is -, the coordinates are in the reverse strand coordinate system."
-        // Meaning 0 is the end of the sequence.
 
-        // Let's assume we mapped to a region that is INVERTED.
-        // Source: 100..200.
-        // Dest: Inverted region corresponding to physical 800..900 on + strand.
-        // On reverse strand (len 1000), physical 800..900 is:
-        // start_rev = 1000 - 900 = 100.
-        // end_rev = 1000 - 800 = 200.
-        // So chain should say: qStart=100, qEnd=200, qStrand=-.
-
-        // Let's test this logic.
-        // Chain: Source 100..200 maps to Dest 100..200 (Reverse Frame).
         let chain_content = "chain 100 chr1 1000 + 100 200 chr1 1000 - 100 200 1\n100 0 0\n";
         let chain_path = create_dummy_chain(&dir, "rev.chain", chain_content);
         let chain_map = ChainMap::load(chain_path).unwrap();
@@ -508,11 +490,10 @@ mod tests {
         // Should lift to 250.
         // Then lift back to 150.
 
-        // Mocking is hard without full stack. We can test ChainMap directly.
         let (c2, p2, _) = map_ab.lift("chr1", 150).unwrap();
         assert_eq!(p2, 250);
 
-        let (c3, p3, _) = map_ba.lift(&c2, p2).unwrap();
+        let (_, p3, _) = map_ba.lift(&c2, p2).unwrap();
         assert_eq!(p3, 150);
     }
 }

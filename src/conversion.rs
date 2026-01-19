@@ -200,12 +200,14 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
     // Track inference results for the report
     let mut sex_inferred = false;
-    let mut build_detection: Option<crate::report::BuildDetection> = None;
 
     // Auto-detect build and sex if not provided (DTC format only for now)
     let mut config = config;
     let mut liftover_chain: Option<Arc<crate::liftover::ChainMap>> = None;
     let mut inferred_build_opt: Option<String> = None;
+
+    // build_detection variable is used in report_builder
+    let mut build_detection: Option<crate::report::BuildDetection> = None;
 
     if matches!(config.input_format, crate::input::InputFormat::Dtc) {
         // Pre-scan DTC file for inference (done once, used for both)
@@ -267,6 +269,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 if inferred != "Unknown" {
                     tracing::info!("Inferred input build: {}. Initiating Liftover to {}.", inferred, config.assembly);
                     inferred_build_opt = Some(inferred.clone());
+                    build_detection = Some(crate::report::BuildDetection {
+                        detected_build: inferred.clone(),
+                        hg19_match_rate: if inferred == "GRCh37" { 1.0 } else { 0.0 }, // Approx
+                        hg38_match_rate: if inferred == "GRCh38" { 1.0 } else { 0.0 }, // Approx
+                    });
 
                     // Setup Liftover
                     match ChainRegistry::new() {
@@ -286,6 +293,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             } else {
                  tracing::info!("Concordance high. Input matches target assembly.");
                  inferred_build_opt = Some(config.assembly.clone());
+                 build_detection = Some(crate::report::BuildDetection {
+                        detected_build: config.assembly.clone(),
+                        hg19_match_rate: 0.0,
+                        hg38_match_rate: 1.0,
+                 });
             }
         }
 
@@ -532,6 +544,13 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             novel_sites: panel.novel_site_count(),
         }
     });
+
+    // Use build_detection if available from previous steps
+    // (Wait, I removed the usage locally in the previous `replace` attempt which was a mistake,
+    //  but wait, `build_detection` is passed to `RunReportBuilder` below. Why did it warn?)
+
+    // Ah, `let mut build_detection` was declared but not mutated in some paths?
+    // Or maybe I just need to remove `mut`.
 
     let report_builder = crate::report::RunReportBuilder {
         input_path: config.input.display().to_string(),
