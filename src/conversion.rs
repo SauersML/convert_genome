@@ -205,6 +205,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     let mut config = config;
     let mut liftover_chain: Option<Arc<crate::liftover::ChainMap>> = None;
     let mut inferred_build_opt: Option<String> = None;
+    let mut inferred_strand: Option<crate::source_ref::InferredStrand> = None;
 
     // build_detection variable is used in report_builder
     let mut build_detection: Option<crate::report::BuildDetection> = None;
@@ -244,16 +245,8 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
                         build_detection = Some(crate::report::BuildDetection {
                             detected_build: detected_build.clone(),
-                            hg19_match_rate: if detected_build == "GRCh37" {
-                                1.0
-                            } else {
-                                0.0
-                            },
-                            hg38_match_rate: if detected_build == "GRCh38" {
-                                1.0
-                            } else {
-                                0.0
-                            },
+                            hg19_match_rate: if detected_build == "GRCh37" { 1.0 } else { 0.0 },
+                            hg38_match_rate: if detected_build == "GRCh38" { 1.0 } else { 0.0 },
                         });
 
                         // Setup Liftover
@@ -298,6 +291,41 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                         hg19_match_rate: 0.0,
                         hg38_match_rate: 1.0,
                     });
+                }
+            }
+        }
+
+        // Strand Inference
+        if let Some(ref build) = inferred_build_opt {
+            match crate::source_ref::load_source_reference(build) {
+                Ok(source_ref) => {
+                    tracing::info!(
+                        "Loaded source reference for {} to verify strand orientation",
+                        build
+                    );
+                    match crate::source_ref::infer_strand_lock(&prescan_records, &source_ref) {
+                        Ok(strand) => {
+                            inferred_strand = Some(strand);
+                            if strand == crate::source_ref::InferredStrand::Reverse {
+                                tracing::warn!(
+                                    "Detected REVERSE strand orientation. Will flip all alleles."
+                                );
+                            } else {
+                                tracing::info!("Detected Forward strand orientation.");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Strand inference failed: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Could not load source reference for {}: {}. Skipping strand verification.",
+                        build,
+                        e
+                    );
                 }
             }
         }
@@ -364,7 +392,12 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 source_config.par_boundaries = None;
             }
 
-            let source = crate::input::DtcSource::new(dtc_reader, dtc_reference, source_config);
+            let source = crate::input::DtcSource::new(
+                dtc_reader,
+                dtc_reference,
+                source_config,
+                inferred_strand,
+            );
             Box::new(source)
         }
         crate::input::InputFormat::Vcf => {
@@ -415,8 +448,12 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                         source_config.par_boundaries = None;
                     }
 
-                    let source =
-                        crate::input::DtcSource::new(dtc_reader, dtc_reference, source_config);
+                    let source = crate::input::DtcSource::new(
+                        dtc_reader,
+                        dtc_reference,
+                        source_config,
+                        inferred_strand,
+                    );
                     Box::new(source)
                 }
                 crate::input::InputFormat::Vcf => {

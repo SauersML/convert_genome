@@ -353,11 +353,17 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
             let pos: usize = record.variant_start().map(|p| p.into()).unwrap_or(0);
 
             // Check for indels/SVs - reject them (not supported yet)
-            let ref_bases = record.reference_bases();
-            let alt_bases = record.alternate_bases();
+            // Check for indels/SVs - reject them (not supported yet)
+            // Clone to avoid borrow conflicts later
+            let ref_bases = record.reference_bases().to_string();
+            let alt_bases: Vec<String> = record
+                .alternate_bases()
+                .as_ref()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
             let is_snp = ref_bases.len() == 1
                 && alt_bases
-                    .as_ref()
                     .iter()
                     .all(|a| a.len() == 1 && !a.starts_with('<'));
 
@@ -433,11 +439,10 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
 
             // Handle Strand - reverse complement if needed
             if strand == Strand::Reverse {
-                let new_ref = reverse_complement_string(ref_bases);
+                let new_ref = reverse_complement_string(&ref_bases);
                 *record.reference_bases_mut() = new_ref;
 
                 let new_alts: Vec<String> = alt_bases
-                    .as_ref()
                     .iter()
                     .map(|a| {
                         if a.starts_with('<') {
@@ -480,7 +485,10 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
             if rec_ref == "N" {
                 // DTC N-ref mode: target base must be in the alt alleles
                 // We'll set REF = target and remove it from ALTs
-                if !rec_alts.iter().any(|a| a.eq_ignore_ascii_case(&target_base_str)) {
+                if !rec_alts
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(&target_base_str))
+                {
                     // Target base not in alleles - incompatible
                     summary.liftover_incompatible += 1;
                     tracing::debug!(
@@ -513,14 +521,16 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                 }
 
                 *record.alternate_bases_mut() = new_alts.into();
-                *record.samples_mut() =
-                    remap_sample_genotypes(record.samples(), &allele_mapping);
+                *record.samples_mut() = remap_sample_genotypes(record.samples(), &allele_mapping);
             } else {
                 // VCF mode: REF should match target, or we reject
                 // (Reference swap is complex and error-prone - fail closed)
                 if !rec_ref.eq_ignore_ascii_case(&target_base_str) {
                     // Check if target is in ALTs for possible ref swap
-                    if rec_alts.iter().any(|a| a.eq_ignore_ascii_case(&target_base_str)) {
+                    if rec_alts
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(&target_base_str))
+                    {
                         // Could do ref swap, but that's complex and risky
                         // For fail-closed, we reject
                         summary.liftover_incompatible += 1;

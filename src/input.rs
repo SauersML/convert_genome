@@ -93,6 +93,7 @@ pub struct DtcSource {
     header_keys: Keys,
     initial_parse_errors: usize,
     initial_stats_synced: bool,
+    inferred_strand: crate::source_ref::InferredStrand,
 }
 
 impl DtcSource {
@@ -100,6 +101,7 @@ impl DtcSource {
         reader: dtc::Reader<R>,
         reference: Option<ReferenceGenome>,
         config: ConversionConfig,
+        inferred_strand: Option<crate::source_ref::InferredStrand>,
     ) -> Self {
         let keys: Keys = vec![String::from("GT")].into_iter().collect();
 
@@ -151,6 +153,7 @@ impl DtcSource {
             header_keys: keys,
             initial_parse_errors: parse_errors,
             initial_stats_synced: false,
+            inferred_strand: inferred_strand.unwrap_or(crate::source_ref::InferredStrand::Forward),
         }
     }
 
@@ -198,7 +201,7 @@ impl DtcSource {
         };
 
         // Parse alleles
-        let allele_states = match record.parse_alleles() {
+        let mut allele_states = match record.parse_alleles() {
             Ok(states) => states,
             Err(e) => {
                 summary.invalid_genotypes += 1;
@@ -206,6 +209,15 @@ impl DtcSource {
                 return Ok(None);
             }
         };
+
+        // Apply Strand Lock
+        if self.inferred_strand == crate::source_ref::InferredStrand::Reverse {
+            for allele in &mut allele_states {
+                if let DtcAllele::Base(s) = allele {
+                    *s = reverse_complement(s);
+                }
+            }
+        }
 
         // Biological Ploidy
         let ploidy = determine_ploidy(
@@ -666,4 +678,23 @@ pub fn natural_contig_order(name: &str) -> (u32, String) {
         "M" | "MT" => (25, String::new()),
         other => (1000, other.to_string()), // Other contigs sorted alphabetically after standard ones
     }
+}
+
+fn reverse_complement(s: &str) -> String {
+    s.chars()
+        .rev()
+        .map(|c| match c {
+            'A' => 'T',
+            'T' => 'A',
+            'C' => 'G',
+            'G' => 'C',
+            'a' => 't',
+            't' => 'a',
+            'c' => 'g',
+            'g' => 'c',
+            'N' => 'N',
+            'n' => 'n',
+            _ => c,
+        })
+        .collect()
 }
