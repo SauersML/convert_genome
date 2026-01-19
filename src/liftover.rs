@@ -448,7 +448,8 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                     *record.alternate_bases_mut() = new_alts.into();
 
                     if needs_genotype_remapping {
-                        *record.samples_mut() = remap_sample_genotypes(record.samples(), &allele_mapping);
+                        *record.samples_mut() =
+                            remap_sample_genotypes(record.samples(), &allele_mapping);
                     }
 
                     // Final Check: If input was NOT 'N' (e.g. VCF), and we didn't find the target base in ALTs or Ref,
@@ -461,7 +462,6 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                     // BUT: LiftoverAdapter is primarily for DTC (N-ref).
                     // VCF input usually comes with Ref. If Ref mismatches Target, we should probably Drop or Swap.
                     // This implementation focuses on the DTC N-ref case correctness.
-
                 } else {
                     // Target position not in reference?
                     summary.reference_failures += 1;

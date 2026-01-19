@@ -25,8 +25,7 @@ use noodles::vcf::{
         },
     },
     variant::{
-        io::Write as VariantRecordWrite,
-        record::samples::keys::key as format_key,
+        io::Write as VariantRecordWrite, record::samples::keys::key as format_key,
         record_buf::RecordBuf,
     },
 };
@@ -36,12 +35,12 @@ use thiserror::Error;
 use time::{OffsetDateTime, macros::format_description};
 
 use crate::{
-    vcf_utils::remap_sample_genotypes,
     ConversionSummary,
     dtc::{self, Allele as DtcAllele, parse_genotype},
     liftover::{ChainRegistry, LiftoverAdapter},
     plink::PlinkWriter,
     reference::{ReferenceError, ReferenceGenome},
+    vcf_utils::remap_sample_genotypes,
 };
 use std::sync::Arc;
 
@@ -983,7 +982,6 @@ pub fn standardize_record(
 
     Ok(Some(builder.build()))
 }
-
 
 #[doc(hidden)]
 pub fn format_genotype_for_tests(

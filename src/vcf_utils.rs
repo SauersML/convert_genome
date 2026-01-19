@@ -1,5 +1,5 @@
-use noodles::vcf::variant::record_buf::{Samples, samples::sample::Value};
 use noodles::vcf::variant::record::samples::keys::key as format_key;
+use noodles::vcf::variant::record_buf::{Samples, samples::sample::Value};
 use std::collections::HashMap;
 use tracing;
 
@@ -7,10 +7,7 @@ use tracing;
 ///
 /// `mapping` maps Old Index -> New Index.
 /// Index 0 is REF. Indices 1+ are ALTs.
-pub fn remap_sample_genotypes(
-    samples: &Samples,
-    mapping: &HashMap<usize, usize>,
-) -> Samples {
+pub fn remap_sample_genotypes(samples: &Samples, mapping: &HashMap<usize, usize>) -> Samples {
     let keys = samples.keys();
     let mut new_keys_vec = Vec::new();
     // Filter keys: keep GT and safe fields (GQ, DP, MIN_DP), drop allele-dependent fields (PL, AD, GP)
