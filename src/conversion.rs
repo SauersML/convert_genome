@@ -502,15 +502,18 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             writer
                 .write_header(&header)
                 .with_context(|| "failed to write VCF header")?;
+            let ctx = ProcessingContext {
+                reference: reference.as_ref(),
+                header: &header,
+                config: &config,
+                panel: padded_panel.as_ref(),
+                needs_sort,
+            };
             process_records(
                 source,
-                reference.as_ref(),
                 &mut writer,
-                &header,
-                &config,
                 &mut summary,
-                padded_panel.as_ref(),
-                needs_sort,
+                ctx,
             )?;
         }
         OutputFormat::Bcf => {
@@ -520,15 +523,18 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             writer
                 .write_header(&header)
                 .with_context(|| "failed to write BCF header")?;
+            let ctx = ProcessingContext {
+                reference: reference.as_ref(),
+                header: &header,
+                config: &config,
+                panel: padded_panel.as_ref(),
+                needs_sort,
+            };
             process_records(
                 source,
-                reference.as_ref(),
                 &mut writer,
-                &header,
-                &config,
                 &mut summary,
-                padded_panel.as_ref(),
-                needs_sort,
+                ctx,
             )?;
         }
         OutputFormat::Plink => {
@@ -539,15 +545,18 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 .write_fam(&config.sample_id, config.sex.expect("sex should be set"))
                 .context("failed to write FAM file")?;
 
+            let ctx = ProcessingContext {
+                reference: reference.as_ref(),
+                header: &header,
+                config: &config,
+                panel: padded_panel.as_ref(),
+                needs_sort,
+            };
             process_records(
                 source,
-                reference.as_ref(),
                 &mut writer,
-                &header,
-                &config,
                 &mut summary,
-                padded_panel.as_ref(),
-                needs_sort,
+                ctx,
             )?;
         }
     }
@@ -623,15 +632,19 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     Ok(summary)
 }
 
+struct ProcessingContext<'a> {
+    reference: Option<&'a ReferenceGenome>,
+    header: &'a vcf::Header,
+    config: &'a ConversionConfig,
+    panel: Option<&'a std::cell::RefCell<crate::panel::PaddedPanel>>,
+    needs_sort: bool,
+}
+
 fn process_records<S, W>(
     mut source: S,
-    reference: Option<&ReferenceGenome>,
     writer: &mut W,
-    header: &vcf::Header,
-    config: &ConversionConfig,
     summary: &mut crate::ConversionSummary,
-    panel: Option<&std::cell::RefCell<crate::panel::PaddedPanel>>,
-    needs_sort: bool,
+    ctx: ProcessingContext,
 ) -> Result<()>
 where
     S: crate::input::VariantSource,
@@ -644,11 +657,11 @@ where
         match result {
             Ok(record) => {
                 // Apply standardization if requested
-                let final_record = if config.standardize {
+                let final_record = if ctx.config.standardize {
                     match standardize_record(
                         &record,
-                        reference.expect("reference required for standardize"),
-                        config,
+                        ctx.reference.expect("reference required for standardize"),
+                        ctx.config,
                     ) {
                         Ok(Some(standardized)) => standardized,
                         Ok(None) => continue, // Filtered out
@@ -663,7 +676,7 @@ where
                 };
 
                 // Apply panel harmonization if panel is provided
-                if let Some(panel_cell) = panel {
+                if let Some(panel_cell) = ctx.panel {
                     let chrom = final_record.reference_sequence_name().to_string();
                     let pos = final_record.variant_start().map(usize::from).unwrap_or(0) as u64;
                     let ref_base = final_record.reference_bases().to_string();
@@ -696,25 +709,22 @@ where
 
                 summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
 
-                if needs_sort {
+                if ctx.needs_sort {
                     let chrom_name = final_record.reference_sequence_name();
-                    let contig_key = if let Some(r) = reference {
+                    let contig_key = if let Some(r) = ctx.reference {
                         r.contig_index(chrom_name).unwrap_or(usize::MAX)
                     } else {
                         let (idx, _) = crate::input::natural_contig_order(chrom_name);
                         idx as usize
                     };
 
-                    let pos_key = final_record
-                        .variant_start()
-                        .map(usize::from)
-                        .unwrap_or(0);
+                    let pos_key = final_record.variant_start().map(usize::from).unwrap_or(0);
 
                     buffered_records.push((contig_key, pos_key, ordinal, final_record));
                     ordinal = ordinal.saturating_add(1);
                 } else {
                     writer
-                        .write_variant(header, &final_record)
+                        .write_variant(ctx.header, &final_record)
                         .context("failed to write variant record")?;
                 }
             }
@@ -728,14 +738,14 @@ where
         }
     }
 
-    if needs_sort {
+    if ctx.needs_sort {
         buffered_records.sort_by(|(a_contig, a_pos, a_ord, _), (b_contig, b_pos, b_ord, _)| {
             (a_contig, a_pos, a_ord).cmp(&(b_contig, b_pos, b_ord))
         });
 
         for (_, _, _, record) in buffered_records {
             writer
-                .write_variant(header, &record)
+                .write_variant(ctx.header, &record)
                 .context("failed to write variant record")?;
         }
     }

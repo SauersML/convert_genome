@@ -538,12 +538,8 @@ impl DropUsageCollector {
             error_msg.push_str(&format!("   {violation}\n"));
         }
 
-        error_msg.push_str(
-            "\n⚠️ Explicit drop(...) calls are forbidden in this project.\n",
-        );
-        error_msg.push_str(
-            "   Restructure the code to let values go out of scope naturally.\n",
-        );
+        error_msg.push_str("\n⚠️ Explicit drop(...) calls are forbidden in this project.\n");
+        error_msg.push_str("   Restructure the code to let values go out of scope naturally.\n");
 
         Some(error_msg)
     }
@@ -573,9 +569,7 @@ impl EmptyBlockCollector {
             error_msg.push_str(&format!("   {violation}\n"));
         }
 
-        error_msg.push_str(
-            "\n⚠️ Empty control-flow blocks are forbidden in this project.\n",
-        );
+        error_msg.push_str("\n⚠️ Empty control-flow blocks are forbidden in this project.\n");
         error_msg.push_str("   Remove the block or add meaningful logic.\n");
 
         Some(error_msg)
@@ -672,7 +666,8 @@ impl MeaninglessConditionalCollector {
         error_msg.push_str(
             "\n⚠️ Meaningless conditionals (identical if/else branches) are STRICTLY FORBIDDEN.\n",
         );
-        error_msg.push_str("   Either remove the conditional entirely or ensure branches differ.\n");
+        error_msg
+            .push_str("   Either remove the conditional entirely or ensure branches differ.\n");
         error_msg.push_str(
             "   If-else with same result is an anti-pattern to make unused variables appear used.\n",
         );
@@ -705,18 +700,15 @@ impl NoEffectCollector {
             error_msg.push_str(&format!("   {violation}\n"));
         }
 
-        error_msg.push_str(
-            "\n⚠️ #[allow(clippy::no_effect)] IS STRICTLY FORBIDDEN IN THIS PROJECT!\n",
-        );
+        error_msg
+            .push_str("\n⚠️ #[allow(clippy::no_effect)] IS STRICTLY FORBIDDEN IN THIS PROJECT!\n");
         error_msg.push_str(
             "   This is used to suppress warnings about no-op variable access like { variable_name; }\n",
         );
         error_msg.push_str(
             "   If a parameter is truly unused, delete it and refactor the function signature.\n",
         );
-        error_msg.push_str(
-            "   Do NOT use no-op statements to pretend variables are being used.\n",
-        );
+        error_msg.push_str("   Do NOT use no-op statements to pretend variables are being used.\n");
 
         Some(error_msg)
     }
@@ -749,12 +741,9 @@ impl OmittedForBrevityCollector {
         error_msg.push_str(
             "\n⚠️ \"OMITTED FOR BREVITY\" COMMENTS ARE STRICTLY FORBIDDEN IN THIS PROJECT!\n",
         );
-        error_msg.push_str(
-            "   These comments hide incomplete implementations or deleted code.\n",
-        );
-        error_msg.push_str(
-            "   DO NOT omit anything. Include all code, tests, and implementations.\n",
-        );
+        error_msg.push_str("   These comments hide incomplete implementations or deleted code.\n");
+        error_msg
+            .push_str("   DO NOT omit anything. Include all code, tests, and implementations.\n");
 
         Some(error_msg)
     }
@@ -784,12 +773,9 @@ impl DeprecatedCollector {
             error_msg.push_str(&format!("   {violation}\n"));
         }
 
-        error_msg.push_str(
-            "\n⚠️ #[deprecated] ATTRIBUTES ARE STRICTLY FORBIDDEN IN THIS PROJECT!\n",
-        );
-        error_msg.push_str(
-            "   Deprecated code keeps dead API surface area alive unnecessarily.\n",
-        );
+        error_msg
+            .push_str("\n⚠️ #[deprecated] ATTRIBUTES ARE STRICTLY FORBIDDEN IN THIS PROJECT!\n");
+        error_msg.push_str("   Deprecated code keeps dead API surface area alive unnecessarily.\n");
         error_msg.push_str(
             "   If code is no longer needed, DELETE it completely. Do not deprecate it.\n",
         );
@@ -823,18 +809,15 @@ impl PlaceholderStubCollector {
             error_msg.push_str(&format!("   {violation}\n"));
         }
 
-        error_msg.push_str(
-            "\n⚠️ PLACEHOLDER STUB FUNCTIONS ARE STRICTLY FORBIDDEN IN THIS PROJECT!\n",
-        );
+        error_msg
+            .push_str("\n⚠️ PLACEHOLDER STUB FUNCTIONS ARE STRICTLY FORBIDDEN IN THIS PROJECT!\n");
         error_msg.push_str(
             "   Functions that return Ok(Self { ... }) with all empty vectors/hashmaps are placeholders.\n",
         );
-        error_msg.push_str(
-            "   These exist solely to satisfy the compiler without doing actual work.\n",
-        );
-        error_msg.push_str(
-            "   Implement the function properly instead of using empty placeholders.\n",
-        );
+        error_msg
+            .push_str("   These exist solely to satisfy the compiler without doing actual work.\n");
+        error_msg
+            .push_str("   Implement the function properly instead of using empty placeholders.\n");
 
         Some(error_msg)
     }
@@ -1950,16 +1933,13 @@ fn locate_build_dependency(deps_dir: &Path, crate_name: &str) -> Option<PathBuf>
                 None => continue,
             };
 
-            if file_name.starts_with(&prefix) {
-                if let Ok(metadata) = std::fs::metadata(&path) {
-                    if let Ok(mtime) = metadata.modified() {
-                        if candidate.is_none() || mtime > candidate_mtime {
+            if file_name.starts_with(&prefix)
+                && let Ok(metadata) = std::fs::metadata(&path)
+                    && let Ok(mtime) = metadata.modified()
+                        && (candidate.is_none() || mtime > candidate_mtime) {
                             candidate = Some(path);
                             candidate_mtime = mtime;
                         }
-                    }
-                }
-            }
         }
     }
 
@@ -2462,7 +2442,9 @@ fn scan_for_drop_in_build_scripts() -> Vec<String> {
                 .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
                 .filter(|e: &walkdir::DirEntry| !is_in_ignored_directory(e.path()))
                 .filter(|e: &walkdir::DirEntry| {
-                    e.path().file_name().is_some_and(|name| name == OsStr::new("build.rs"))
+                    e.path()
+                        .file_name()
+                        .is_some_and(|name| name == OsStr::new("build.rs"))
                 })
             {
                 let path = entry.path();
@@ -2531,10 +2513,7 @@ fn scan_for_drop_usage() -> Vec<String> {
             }
         }
         Err(e) => {
-            all_violations.push(format!(
-                "Error creating drop usage regex matcher: {}",
-                e
-            ));
+            all_violations.push(format!("Error creating drop usage regex matcher: {}", e));
         }
     }
 
@@ -2603,10 +2582,7 @@ fn scan_for_debug_assert_usage() -> Vec<String> {
             }
         }
         Err(e) => {
-            all_violations.push(format!(
-                "Error creating debug_assert regex matcher: {}",
-                e
-            ));
+            all_violations.push(format!("Error creating debug_assert regex matcher: {}", e));
         }
     }
 
@@ -3392,7 +3368,8 @@ fn is_in_ignored_directory(path: impl AsRef<Path>) -> bool {
 
 fn scan_for_fake_usage() -> Vec<String> {
     // Check for "if var.len() ... { return; }" pattern where var is otherwise unused
-    let pattern = r"if\s+(!?\s*[a-zA-Z_]\w*)\.(?:len|is_empty)\(\)\s*(?:[!=<>]+[^\{]+)?\{\s*return\s*;?\s*\}";
+    let pattern =
+        r"if\s+(!?\s*[a-zA-Z_]\w*)\.(?:len|is_empty)\(\)\s*(?:[!=<>]+[^\{]+)?\{\s*return\s*;?\s*\}";
     let matcher = match RegexMatcher::new_line_matcher(pattern) {
         Ok(m) => m,
         Err(e) => return vec![format!("Error creating fake usage regex: {}", e)],
@@ -3418,11 +3395,7 @@ fn scan_for_fake_usage() -> Vec<String> {
 
         let mut collector = FakeUsageCandidateCollector::new();
         if Searcher::new()
-            .search_reader(
-                &matcher,
-                Cursor::new(&sanitized_bytes),
-                &mut collector,
-            )
+            .search_reader(&matcher, Cursor::new(&sanitized_bytes), &mut collector)
             .is_err()
         {
             continue;
@@ -3513,15 +3486,13 @@ fn is_word_boundary(text: &str, idx: usize, len: usize) -> bool {
 
     let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
 
-    if let Some(c) = before {
-        if is_word_char(c) {
+    if let Some(c) = before
+        && is_word_char(c) {
             return false;
         }
-    }
-    if let Some(c) = after {
-        if is_word_char(c) {
+    if let Some(c) = after
+        && is_word_char(c) {
             return false;
         }
-    }
     true
 }

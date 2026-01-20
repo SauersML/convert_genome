@@ -298,10 +298,10 @@ impl ChainMap {
     ) -> Result<(String, u64, Strand), LiftoverError> {
         // Resolve overlaps by selecting the highest-score chain.
         // If there is a score tie across different chain IDs, fail-closed as ambiguous.
-        let mut iter = intervals.find(pos, pos + 1);
+        let iter = intervals.find(pos, pos + 1);
         let mut best: Option<&Interval<u64, ChainMapping>> = None;
         let mut tied = false;
-        while let Some(hit) = iter.next() {
+        for hit in iter {
             match best {
                 None => {
                     best = Some(hit);
@@ -467,9 +467,9 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
             // If the record is a DTC placeholder (REF=N) and we have a source reference,
             // pre-fill REF from the source build and optionally complement alleles if they
             // only match the source reference base after complementation.
-            if record.reference_bases().eq_ignore_ascii_case("N") {
-                if let Some(ref src_ref) = self.source_reference {
-                    if let Ok(src_base) = src_ref.base(chrom_str, pos as u64) {
+            if record.reference_bases().eq_ignore_ascii_case("N")
+                && let Some(ref src_ref) = self.source_reference
+                    && let Ok(src_base) = src_ref.base(chrom_str, pos as u64) {
                         let src_base = src_base.to_ascii_uppercase();
                         if matches!(src_base, 'A' | 'C' | 'G' | 'T') {
                             let src_base_str = src_base.to_string();
@@ -493,10 +493,8 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
 
                                 if !has_src && has_comp_src {
                                     // Complement all alleles in-place so source ref base appears.
-                                    let new_alts: Vec<String> = alts
-                                        .iter()
-                                        .map(|a| reverse_complement_string(a))
-                                        .collect();
+                                    let new_alts: Vec<String> =
+                                        alts.iter().map(|a| reverse_complement_string(a)).collect();
                                     *record.alternate_bases_mut() = new_alts.into();
                                 }
                             }
@@ -505,8 +503,6 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                             *record.reference_bases_mut() = src_base_str;
                         }
                     }
-                }
-            }
 
             // Check for indels/SVs - reject them (not supported yet)
             // Check for indels/SVs - reject them (not supported yet)
@@ -519,12 +515,13 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                 .map(|s| s.to_string())
                 .collect();
             let is_symbolic = alt_bases.iter().any(|a| a.starts_with('<'));
-            let is_snp = ref_bases.len() == 1 && alt_bases.iter().all(|a| a.len() == 1) && !is_symbolic;
+            let is_snp =
+                ref_bases.len() == 1 && alt_bases.iter().all(|a| a.len() == 1) && !is_symbolic;
 
             // Basic indel endpoint liftover (non-symbolic only). SV/symbolic remain unsupported.
             let is_simple_indel = !is_snp
                 && !is_symbolic
-                && ref_bases.len() >= 1
+                && !ref_bases.is_empty()
                 && alt_bases.iter().all(|a| !a.is_empty());
 
             // Convert to 0-based for liftover (safe because pos > 0).
@@ -532,7 +529,7 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
 
             // Cache chain interval structure per chromosome to avoid repeated HashMap hashing.
             // Inputs are typically sorted by chromosome, so this is a hot-path win.
-            let intervals = if let (Some(k), Some(ref intervals)) =
+            let intervals = if let (Some(k), Some(intervals)) =
                 (self.last_chrom_key.as_deref(), self.last_intervals.as_ref())
                 && k == chrom_str
             {
@@ -764,39 +761,41 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
                         // 1. New REF = Target Base
                         // 2. Old REF becomes an ALT
                         // 3. New ALTs = [Old REF, Other ALTs...]
-                        
+
                         let mut new_alts = Vec::new();
                         let mut allele_mapping = HashMap::new();
-                        
+
                         // Map Old REF (0) -> New position in ALTs (1-based index)
                         // By convention, we'll put the old REF as the first ALT
                         new_alts.push(rec_ref.clone());
                         allele_mapping.insert(0, 1);
-                        
+
                         // Map the Old ALT that matches Target -> New REF (0)
                         // target_idx is 0-based index into rec_alts. So VCF index is target_idx + 1.
                         allele_mapping.insert(target_idx + 1, 0);
-                        
+
                         // Handle other ALTs
                         for (i, alt) in rec_alts.iter().enumerate() {
-                            if i == target_idx { continue; } // Already handled (became REF)
+                            if i == target_idx {
+                                continue;
+                            } // Already handled (became REF)
                             new_alts.push(alt.clone());
                             // Mapped to new position: existing length of new_alts (1-based)
-                            allele_mapping.insert(i + 1, new_alts.len()); 
+                            allele_mapping.insert(i + 1, new_alts.len());
                         }
-                        
+
                         // Apply changes
                         *record.reference_bases_mut() = target_base_str.clone();
-                         *record.alternate_bases_mut() = new_alts.into();
-                        *record.samples_mut() = remap_sample_genotypes(record.samples(), &allele_mapping);
-                        
+                        *record.alternate_bases_mut() = new_alts.into();
+                        *record.samples_mut() =
+                            remap_sample_genotypes(record.samples(), &allele_mapping);
+
                         tracing::debug!(
                             chrom = %chrom,
                             pos = pos,
                             "Performed Reference Swap: OldREF({}) became ALT, OldALT({}) became REF",
                             rec_ref, target_base_str
                         );
-                        
                     } else {
                         // Neither REF nor ALTs match target - definitely incompatible
                         summary.liftover_incompatible += 1;
@@ -983,11 +982,11 @@ mod tests {
 
     #[test]
     fn test_ref_swap_logic() {
-        use noodles::vcf;
+        use crate::input::VariantSource;
         use noodles::core::Position;
+        use noodles::vcf;
         use noodles::vcf::variant::record_buf::Samples;
         use std::io::Write;
-        use crate::input::VariantSource; 
 
         // 1. Create Target Reference (chr2) with 'G' at position 100
         let dir = TempDir::new().unwrap();
@@ -996,7 +995,7 @@ mod tests {
             let mut f = std::fs::File::create(&fasta_path).unwrap();
             writeln!(f, ">chr2").unwrap();
             let mut seq = vec!['N'; 200];
-            seq[100] = 'G'; 
+            seq[100] = 'G';
             let s: String = seq.into_iter().collect();
             writeln!(f, "{}", s).unwrap();
         }
@@ -1014,9 +1013,12 @@ mod tests {
             record: Option<vcf::variant::RecordBuf>,
         }
         impl VariantSource for MockSource {
-            fn next_variant(&mut self, summary: &mut crate::ConversionSummary) -> Option<std::io::Result<vcf::variant::RecordBuf>> {
+            fn next_variant(
+                &mut self,
+                summary: &mut crate::ConversionSummary,
+            ) -> Option<std::io::Result<vcf::variant::RecordBuf>> {
                 // Silence unused warning by accessing it
-                summary.parse_errors += 0; 
+                summary.parse_errors += 0;
                 self.record.take().map(Ok)
             }
         }
@@ -1027,12 +1029,16 @@ mod tests {
             .set_reference_bases("A")
             .set_alternate_bases(vec![String::from("G")].into())
             .set_samples(Samples::new(
-                 vec![String::from("GT")].into_iter().collect(),
-                 vec![vec![Some(vcf::variant::record_buf::samples::sample::Value::String("0/1".into()))]]
+                vec![String::from("GT")].into_iter().collect(),
+                vec![vec![Some(
+                    vcf::variant::record_buf::samples::sample::Value::String("0/1".into()),
+                )]],
             ))
             .build();
 
-        let source = MockSource { record: Some(input_record) };
+        let source = MockSource {
+            record: Some(input_record),
+        };
 
         let mut adapter = LiftoverAdapter {
             source: Box::new(source),
@@ -1049,13 +1055,17 @@ mod tests {
         // 4. Verify Swap
         assert_eq!(result.reference_bases().to_string(), "G");
         assert_eq!(result.alternate_bases().as_ref()[0], "A");
-        
+
         let samples = result.samples();
         let sample = samples.values().next().unwrap();
         let genotype = sample.values().iter().next().unwrap().as_ref().unwrap();
-        
+
         if let vcf::variant::record_buf::samples::sample::Value::String(gt) = genotype {
-            assert!(gt == "1/0" || gt == "1|0", "Genotype should be swapped to 1/0, got {}", gt);
+            assert!(
+                gt == "1/0" || gt == "1|0",
+                "Genotype should be swapped to 1/0, got {}",
+                gt
+            );
         } else {
             panic!("Unexpected genotype format");
         }

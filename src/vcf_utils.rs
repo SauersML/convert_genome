@@ -56,9 +56,11 @@ pub fn remap_gt_string(gt: &str, mapping: &HashMap<usize, usize>) -> String {
     // Fast path: if all allele indices are single ASCII digits (0-9), remap byte-by-byte.
     // This covers the overwhelmingly common cases like 0/0, 0/1, 1|0, ./., ./0, etc.
     // If we detect any multi-digit index, fall back to the general parser below.
-    if gt.as_bytes().iter().all(|&b| {
-        matches!(b, b'0'..=b'9' | b'.' | b'/' | b'|')
-    }) {
+    if gt
+        .as_bytes()
+        .iter()
+        .all(|&b| matches!(b, b'0'..=b'9' | b'.' | b'/' | b'|'))
+    {
         // Detect multi-digit indices by checking for adjacent digits.
         let bytes = gt.as_bytes();
         let mut has_multi_digit = false;

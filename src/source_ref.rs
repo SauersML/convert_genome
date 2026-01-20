@@ -64,17 +64,30 @@ fn decompress_gzip_to_path(gz_path: &Path, out_path: &Path) -> Result<()> {
         .with_context(|| format!("failed to open gz reference {}", gz_path.display()))?;
     let mut decoder = GzDecoder::new(input);
 
-    if let Some(parent) = out_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let parent = out_path.parent().ok_or_else(|| anyhow!("Invalid output path"))?;
+    fs::create_dir_all(parent)?;
 
-    let tmp_path = out_path.with_extension("fa.tmp");
+    // Create a unique temporary file in the same directory to avoid race conditions
+    // and ensure atomic rename.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let suffix = format!(".tmp.{}.{}", std::process::id(), nanos);
+    
+    let file_name = out_path.file_name().ok_or_else(|| anyhow!("Invalid filename"))?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(suffix);
+    let tmp_path = parent.join(tmp_name);
+
     let output = fs::File::create(&tmp_path)
         .with_context(|| format!("failed to create output {}", tmp_path.display()))?;
     let mut writer = io::BufWriter::new(output);
     io::copy(&mut decoder, &mut writer)
         .with_context(|| format!("failed to decompress {}", gz_path.display()))?;
     writer.flush()?;
+    // Ensure data is on disk before rename
+    writer.get_ref().sync_all()?;
 
     fs::rename(&tmp_path, out_path)
         .with_context(|| format!("failed to finalize {}", out_path.display()))?;
@@ -135,8 +148,12 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
     let refs_dir = convert_genome_refs_dir()?;
     fs::create_dir_all(&refs_dir)?;
 
-    let uncompressed_name = build_to_uncompressed_name(build)
-        .ok_or_else(|| anyhow!("Unknown build '{}', cannot map to reference filename", build))?;
+    let uncompressed_name = build_to_uncompressed_name(build).ok_or_else(|| {
+        anyhow!(
+            "Unknown build '{}', cannot map to reference filename",
+            build
+        )
+    })?;
     let reference_path = refs_dir.join(uncompressed_name);
 
     // If we already expanded it, just use it.
@@ -171,7 +188,22 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
     // Fallback: download ourselves if check_build cache is missing.
     tracing::info!("Downloading source reference from {}", url);
     let resource = remote::fetch_remote_resource(&url)?;
-    fs::copy(resource.local_path(), &reference_path)?;
+    
+    // Copy to unique temp file then rename to avoid race conditions
+    let parent = reference_path.parent().unwrap(); // We know this exists from create_dir_all above
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let suffix = format!(".tmp.{}.{}", std::process::id(), nanos);
+    
+    let file_name = reference_path.file_name().ok_or_else(|| anyhow!("Invalid filename"))?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(suffix);
+    let tmp_path = parent.join(tmp_name);
+
+    fs::copy(resource.local_path(), &tmp_path)?;
+    fs::rename(&tmp_path, &reference_path)?;
 
     ReferenceGenome::open(&reference_path, None).with_context(|| {
         format!(
