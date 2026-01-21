@@ -142,13 +142,6 @@ impl SourceReferenceRegistry {
 
 /// Download and open a source reference genome.
 pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
-    let url = SourceReferenceRegistry::get_url(build).ok_or_else(|| {
-        anyhow!(
-            "Unknown build '{}', cannot download source reference",
-            build
-        )
-    })?;
-
     let refs_dir = convert_genome_refs_dir()?;
     fs::create_dir_all(&refs_dir)?;
 
@@ -190,6 +183,13 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
     }
 
     // Fallback: download ourselves if check_build cache is missing.
+    let url = SourceReferenceRegistry::get_url(build).ok_or_else(|| {
+        anyhow!(
+            "Unknown build '{}', cannot download source reference",
+            build
+        )
+    })?;
+
     tracing::info!("Downloading source reference from {}", url);
     let resource = remote::fetch_remote_resource(&url)?;
 

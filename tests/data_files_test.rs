@@ -170,13 +170,28 @@ fn test_liftover_fidelity_hg38() -> Result<()> {
                 // First field usually GT.
                 // iter(&header) returns Iterator<Item = io::Result<(&str, Option<Value>)>>
 
-                if let Some(Ok((
-                    _,
-                    Some(noodles::vcf::variant::record::samples::series::Value::String(s)),
-                ))) = sample_values.iter(&header).next()
-                    && (s == "0/0" || s == "0|0" || s == "0")
-                {
-                    matching_genotypes += 1;
+                if let Some(Ok((_, Some(value)))) = sample_values.iter(&header).next() {
+                    match value {
+                        noodles::vcf::variant::record::samples::series::Value::String(s) => {
+                            if s == "0/0" || s == "0|0" || s == "0" {
+                                matching_genotypes += 1;
+                            }
+                        }
+                        noodles::vcf::variant::record::samples::series::Value::Genotype(gt) => {
+                            // Check if all alleles are 0 (Ref) and we have at least one allele
+                            let is_hom_ref = gt.iter().count() > 0 && gt.iter().all(|res| {
+                                match res {
+                                    Ok(allele) => allele.0 == Some(0),
+                                    Err(_) => false,
+                                }
+                            });
+                            
+                            if is_hom_ref {
+                                matching_genotypes += 1;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
 

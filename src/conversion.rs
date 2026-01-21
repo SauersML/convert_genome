@@ -181,23 +181,6 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         || config.standardize
         || config.panel.is_some();
 
-    let reference: Option<ReferenceGenome> = if let Some(ref fasta_path) = config.reference_fasta {
-        Some(
-            ReferenceGenome::open(fasta_path, config.reference_fai.clone())
-                .with_context(|| "failed to open reference genome")?,
-        )
-    } else if requires_reference {
-        return Err(anyhow!(
-            "Reference FASTA is required for {} input or when using --standardize/--panel",
-            match config.input_format {
-                crate::input::InputFormat::Dtc => "DTC",
-                _ => "this",
-            }
-        ));
-    } else {
-        None
-    };
-
     // Track inference results for the report
     let mut sex_inferred = false;
 
@@ -206,7 +189,10 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     let mut liftover_chain: Option<Arc<crate::liftover::ChainMap>> = None;
     let mut inferred_build_opt: Option<String> = None;
     let mut inferred_strand: Option<crate::source_ref::InferredStrand> = None;
+
     let mut source_reference_for_liftover: Option<ReferenceGenome> = None;
+    // We will initialize 'reference' strictly as the TARGET reference after build detection.
+    let mut reference: Option<ReferenceGenome> = None;
 
     // build_detection variable is used in report_builder
     let mut build_detection: Option<crate::report::BuildDetection> = None;
@@ -217,77 +203,87 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
         // Build Detection using check_build library (position-only, not allele-based)
         // This avoids false liftover triggers on homozygous-alt sites
-        if let Some(ref r) = reference {
-            tracing::info!("Detecting genome build using check_build (position-only)...");
+        // Build Detection using check_build library (position-only, not allele-based)
+        // This avoids false liftover triggers on homozygous-alt sites
+        tracing::info!("Detecting genome build using check_build (position-only)...");
+        
+        // This uses check_build's internal caching and does NOT require us to provide a reference
+        match crate::inference::detect_build_from_dtc(&prescan_records) {
+            Ok(detected_build) => {
+                tracing::info!("Detected input build: {}", detected_build);
+                inferred_build_opt = Some(detected_build.clone());
 
-            match crate::inference::detect_build_from_dtc(&prescan_records, r) {
-                Ok(detected_build) => {
-                    tracing::info!("Detected input build: {}", detected_build);
-                    inferred_build_opt = Some(detected_build.clone());
+                // Normalize build names for comparison
+                let detected_normalized = detected_build.to_lowercase();
+                let target_normalized = config.assembly.to_lowercase();
 
-                    // Normalize build names for comparison
-                    let detected_normalized = detected_build.to_lowercase();
-                    let target_normalized = config.assembly.to_lowercase();
+                let builds_match = (detected_normalized.contains("37")
+                    || detected_normalized.contains("hg19"))
+                    && (target_normalized.contains("37") || target_normalized.contains("hg19"))
+                    || (detected_normalized.contains("38")
+                        || detected_normalized.contains("hg38"))
+                        && (target_normalized.contains("38")
+                            || target_normalized.contains("hg38"));
 
-                    let builds_match = (detected_normalized.contains("37")
-                        || detected_normalized.contains("hg19"))
-                        && (target_normalized.contains("37") || target_normalized.contains("hg19"))
-                        || (detected_normalized.contains("38")
-                            || detected_normalized.contains("hg38"))
-                            && (target_normalized.contains("38")
-                                || target_normalized.contains("hg38"));
+                if !builds_match {
+                    println!("DEBUG: Detected build {} != target {}. Initiating liftover...", detected_build, config.assembly);
+                    tracing::info!(
+                        "Detected build {} differs from target {}. Initiating liftover.",
+                        detected_build,
+                        config.assembly
+                    );
 
-                    if !builds_match {
-                        tracing::info!(
-                            "Detected build {} differs from target {}. Initiating liftover.",
-                            detected_build,
-                            config.assembly
-                        );
+                    build_detection = Some(crate::report::BuildDetection {
+                        detected_build: detected_build.clone(),
+                        hg19_match_rate: if detected_build == "GRCh37" { 1.0 } else { 0.0 },
+                        hg38_match_rate: if detected_build == "GRCh38" { 1.0 } else { 0.0 },
+                    });
 
-                        build_detection = Some(crate::report::BuildDetection {
-                            detected_build: detected_build.clone(),
-                            hg19_match_rate: if detected_build == "GRCh37" { 1.0 } else { 0.0 },
-                            hg38_match_rate: if detected_build == "GRCh38" { 1.0 } else { 0.0 },
-                        });
-
-                        // Setup Liftover
-                        match ChainRegistry::new() {
-                            Ok(registry) => {
-                                match registry.get_chain(&detected_build, &config.assembly) {
-                                    Ok(chain) => {
-                                        liftover_chain = Some(Arc::new(chain));
-                                        // Force standardization for liftover workflow
-                                        config.standardize = true;
-                                    }
-                                    Err(e) => tracing::error!("Failed to load chain file: {}", e),
+                    // Setup Liftover
+                    match ChainRegistry::new() {
+                        Ok(registry) => {
+                            match registry.get_chain(&detected_build, &config.assembly) {
+                                Ok(chain) => {
+                                    println!("DEBUG: Chain loaded successfully.");
+                                    let liftover_chain_local = Some(Arc::new(chain));
+                                    liftover_chain = liftover_chain_local;
+                                    // Force standardization for liftover workflow
+                                    config.standardize = true;
+                                }
+                                Err(e) => {
+                                    println!("DEBUG: Failed to load chain: {}", e);
+                                    tracing::error!("Failed to load chain file: {}", e);
                                 }
                             }
-                            Err(e) => tracing::error!("Failed to initialize ChainRegistry: {}", e),
                         }
-                    } else {
-                        tracing::info!("Build matches target assembly. No liftover needed.");
-                        build_detection = Some(crate::report::BuildDetection {
-                            detected_build: config.assembly.clone(),
-                            hg19_match_rate: if target_normalized.contains("37") {
-                                1.0
-                            } else {
-                                0.0
-                            },
-                            hg38_match_rate: if target_normalized.contains("38") {
-                                1.0
-                            } else {
-                                0.0
-                            },
-                        });
+                        Err(e) => {
+                            println!("DEBUG: ChainRegistry init failed: {}", e);
+                            tracing::error!("Failed to initialize ChainRegistry: {}", e);
+                        }
                     }
+                } else {
+                    tracing::info!("Build matches target assembly. No liftover needed.");
+                    build_detection = Some(crate::report::BuildDetection {
+                        detected_build: config.assembly.clone(),
+                        hg19_match_rate: if target_normalized.contains("37") {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                        hg38_match_rate: if target_normalized.contains("38") {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                    });
                 }
-                Err(e) => {
-                    return Err(anyhow!(
-                        "Build detection failed: {}. Refusing to assume input matches target ({})",
-                        e,
-                        config.assembly
-                    ));
-                }
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "Build detection failed: {}. Refusing to assume input matches target ({})",
+                    e,
+                    config.assembly
+                ));
             }
         }
 
@@ -314,6 +310,40 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                     inferred_strand = Some(crate::source_ref::InferredStrand::Forward);
                 }
             }
+        }
+
+        // Initialize 'reference' for input validation/standardization
+        if liftover_chain.is_some() {
+            // Liftover enabled: input validation must use the SOURCE genome.
+            // We reuse the valid source reference we loaded (or load it if for some reason it wasn't kept)
+            let src_build = inferred_build_opt.as_ref().unwrap();
+            if reference.is_none() {
+                 reference = Some(
+                    crate::source_ref::load_source_reference(src_build)
+                        .with_context(|| format!("failed to load source reference {}", src_build))?
+                );
+            }
+        } else {
+            // No liftover: input matches target. Use user-provided reference.
+             if reference.is_none() {
+                 if let Some(ref fasta_path) = config.reference_fasta {
+                     reference = Some(
+                        ReferenceGenome::open(fasta_path, config.reference_fai.clone())
+                            .with_context(|| "failed to open reference genome")?,
+                    );
+                 }
+             }
+        }
+
+        // Validate we have a reference if required (and not doing liftover, where we just loaded it)
+        if reference.is_none() && requires_reference && liftover_chain.is_none() {
+             return Err(anyhow!(
+                "Reference FASTA is required for {} input or when using --standardize/--panel",
+                match config.input_format {
+                    crate::input::InputFormat::Dtc => "DTC",
+                    _ => "this",
+                }
+            ));
         }
 
         // Infer sex if not provided
