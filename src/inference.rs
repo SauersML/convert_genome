@@ -173,8 +173,26 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<String> {
         tracing::warn!("Only {} variants for build detection", variants.len());
     }
 
-    let result = check_build::detect_build_from_positions(&variants)
-        .map_err(|e| anyhow::anyhow!("Build detection failed: {}", e))?;
+    // Ensure we have cached references (downloads if needed, uses cache otherwise)
+    let refs_dir = crate::source_ref::convert_genome_refs_dir()?;
+    let hg19_path = refs_dir.join("hg19.fa");
+    let hg38_path = refs_dir.join("hg38.fa");
+    
+    // Pre-cache both references if they don't exist
+    // This downloads once and reuses forever
+    if !hg19_path.exists() || !hg38_path.exists() {
+        tracing::info!("Caching reference genomes for build detection");
+        crate::source_ref::load_source_reference("GRCh37")?;
+        crate::source_ref::load_source_reference("GRCh38")?;
+    }
+
+    // Call check_build with our cached paths - no downloads, no MD5 checks
+    let result = check_build::detect_build_from_positions_with_refs(
+        &variants,
+        Some(hg19_path.to_string_lossy().as_ref()),
+        Some(hg38_path.to_string_lossy().as_ref()),
+    )
+    .map_err(|e| anyhow::anyhow!("Build detection failed: {}", e))?;
 
     println!(
         "DEBUG: output from detect_build_from_positions: hg19={:.1}%, hg38={:.1}%",
