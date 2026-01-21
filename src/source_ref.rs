@@ -153,10 +153,15 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
     })?;
     let reference_path = refs_dir.join(uncompressed_name);
 
+    println!("DEBUG: Checking for cached reference at: {}", reference_path.display());
+    println!("DEBUG: reference_path.exists() = {}", reference_path.exists());
+    
     // If we already have the .fa cached, use it (generate .fai if needed)
     let fai_path = reference_path.with_extension("fa.fai");
     if reference_path.exists() {
+        println!("DEBUG: Cache HIT! Using cached reference.");
         if fai_path.exists() {
+            println!("DEBUG: .fai index also exists, using directly");
             // Both exist, use directly
             return ReferenceGenome::open(&reference_path, Some(fai_path)).with_context(|| {
                 format!(
@@ -165,6 +170,7 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
                 )
             });
         } else {
+            println!("DEBUG: .fai missing, generating index");
             // .fa exists but .fai missing - generate it
             ReferenceGenome::open(&reference_path, None).with_context(|| {
                 format!(
@@ -181,6 +187,9 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
             });
         }
     }
+    
+    println!("DEBUG: Cache MISS. Will download reference.");
+
 
     // Try to reuse check_build's cached .fa.gz.
     if let Some(check_build_filename) = build_to_check_build_filename(build) {
