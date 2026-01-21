@@ -153,11 +153,12 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
     })?;
     let reference_path = refs_dir.join(uncompressed_name);
 
-    // If we already expanded it, just use it.
-    if reference_path.exists() {
-        return ReferenceGenome::open(&reference_path, None).with_context(|| {
+    // If we already expanded it AND have the index, just use it.
+    let fai_path = reference_path.with_extension("fa.fai");
+    if reference_path.exists() && fai_path.exists() {
+        return ReferenceGenome::open(&reference_path, Some(fai_path)).with_context(|| {
             format!(
-                "Failed to open source reference at {}",
+                "Failed to open cached source reference at {}",
                 reference_path.display()
             )
         });
@@ -173,7 +174,18 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
                 "expanding check_build cached reference"
             );
             decompress_gzip_to_path(&check_build_gz, &reference_path)?;
-            return ReferenceGenome::open(&reference_path, None).with_context(|| {
+            
+            // Open once to generate .fai index, which noodles will cache next to the .fa file
+            ReferenceGenome::open(&reference_path, None).with_context(|| {
+                format!(
+                    "Failed to open source reference at {} (index generation)",
+                    reference_path.display()
+                )
+            })?;
+            
+            // Now return with the cached index
+            let fai_path = reference_path.with_extension("fa.fai");
+            return ReferenceGenome::open(&reference_path, Some(fai_path)).with_context(|| {
                 format!(
                     "Failed to open source reference at {}",
                     reference_path.display()
@@ -211,7 +223,17 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
     fs::copy(resource.local_path(), &tmp_path)?;
     fs::rename(&tmp_path, &reference_path)?;
 
+    // Open once to generate .fai index, which noodles will cache next to the .fa file
     ReferenceGenome::open(&reference_path, None).with_context(|| {
+        format!(
+            "Failed to open source reference at {} (index generation)",
+            reference_path.display()
+        )
+    })?;
+    
+    // Now return with the cached index
+    let fai_path = reference_path.with_extension("fa.fai");
+    ReferenceGenome::open(&reference_path, Some(fai_path)).with_context(|| {
         format!(
             "Failed to open source reference at {}",
             reference_path.display()
