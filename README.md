@@ -4,276 +4,139 @@
 [![docs.rs](https://img.shields.io/docsrs/convert_genome)](https://docs.rs/convert_genome)
 [![CI](https://github.com/SauersML/convert_genome/actions/workflows/ci.yml/badge.svg)](https://github.com/SauersML/convert_genome/actions/workflows/ci.yml)
 
-`convert_genome` converts direct-to-consumer (DTC) genotype exports (23andMe, AncestryDNA, MyHeritage, etc.) into standard [VCF](https://samtools.github.io/hts-specs/VCFv4.5.pdf), [BCF](https://samtools.github.io/hts-specs/BCFv2_qref.pdf), or [PLINK](https://www.cog-genomics.org/plink/1.9/formats) binary formats. The converter supports remote references via HTTP(S) and handles compressed `.gz` and `.zip` archives.
-
-## Features
-
-- **Multiple output formats**: VCF text, BCF binary, and PLINK 1.9 binary (.bed/.bim/.fam).
-- **Flexible input parsing**: Supports 23andMe, AncestryDNA (5-column), MyHeritage (CSV), deCODEme (6-column with strand flipping), and standard VCF/BCF.
-- **Auto-detection**:
-  - **Genome Build**: Automatically detects `GRCh37` vs `GRCh38` vs `hg19`.
-  - **Biological Sex**: Infers sex from X/Y chromosome heterozygosity and density.
-- **Automatic Liftover**: Seamlessly converts data between genome builds (e.g., `hg19` to `GRCh38`) by automatically downloading UCSC chain files when a build mismatch is detected.
-- **Reference Panel Support**: Harmonize your data against a reference VCF (e.g., 1000 Genomes) to correct strand flips and align alleles.
-- **Structured Reporting**: Automatically generates a `<output>_report.json` file with full run metadata, stats, and inference results.
-- **Remote reference support**: Fetch `http://` and `https://` URLs with transparent decompression of `.gz` and `.zip` archives.
-- **Sex chromosome handling**: Correct ploidy enforcement for X, Y, and MT chromosomes with PAR region awareness.
-- **Allele polarization**: Optional `--standardize` mode to normalize alleles against the reference genome.
-- **Comprehensive CI/CD**: Formatting, linting, testing, and coverage across Linux (with macOS/Windows support).
-
-## Installation
-
-### Automatic Install (Recommended)
-Installs the latest binary for your platform (macOS/Linux/Windows):
-```bash
-# macOS / Linux / Windows (Git Bash)
-curl -fsSL https://raw.githubusercontent.com/SauersML/convert_genome/main/install.sh | bash
-```
-
-## Manual installation
-
-The project targets Rust **nightly** (see `rust-toolchain.toml`). Install the converter directly from the repository:
-
-```bash
-cargo install --path .
-```
-
-Alternatively, build the binary without installing:
-
-```bash
-cargo build --release
-```
-
-The resulting executable lives at `target/release/convert_genome`.
-
-## CLI Usage
-
-### Supported Inputs
-
-- **DTC genotype exports**
-  - **23andMe**
-  - **AncestryDNA** (5-column)
-  - **MyHeritage** (CSV)
-  - **FTDNA** (CSV / whitespace-delimited, depending on export)
-  - **deCODEme** (6-column with strand indicator)
-- **VCF / BCF** (for format conversion or downstream harmonization)
-
-Compressed inputs are supported directly:
-
-- **Gzip**: `.gz`
-- **Zip**: `.zip`
-
-### Workflow Examples
-
-#### Simple Format Conversion
-
-Convert a DTC genotype export to VCF without extra harmonization steps:
-
-```bash
-convert_genome \
-  --input data/genotypes.txt \
-  --reference GRCh38.fa \
-  --output genotypes.vcf
-```
-
-This will:
-
-1. Detect the genome build.
-2. Infer biological sex from the data.
-3. Convert to VCF.
-4. Produce `genotypes.vcf` and `genotypes_report.json`.
-
-#### Preparing for Imputation
-
-Imputation tools (Beagle, Shapeit, Eagle, Minimac, etc.) tend to be strict about:
-
-- reference/alternate allele consistency
-- strand/polarity
-- expected ploidy on sex chromosomes
-- compactness and indexing (BCF is usually preferred)
-
-An “imputation-ready” run typically includes `--standardize` plus `--panel`:
-
-```bash
-convert_genome \
-  --input sample.txt \
-  --reference hg38.fa \
-  --standardize \
-  --panel panel.vcf \
-  --output sample.bcf \
-  --format bcf
-```
-
-#### Handling Ancient/Old Data
-
-`--assembly` defines the **target** output build label and drives liftover decisions.
-
-If your input is detected as `hg19` / `GRCh37`, but you request `GRCh38` output, the tool will automatically trigger liftover:
-
-```bash
-convert_genome \
-  --input ancient.txt \
-  --reference GRCh38.fa \
-  --assembly GRCh38 \
-  --output ancient.vcf
-```
-
-Bi-directional liftover is supported (up-lift to `GRCh38` or down-lift to `GRCh37`/`hg19`), and the chain registry includes older conversions (e.g., `NCBI36`).
-
-### PLINK output
-
-```bash
-convert_genome \
-  --input input.txt \
-  --reference reference.fa \
-  --output output \
-  --format plink \
-  --sex male \          # Override auto-detection
-  --variants-only       # Drop reference-matching sites
-```
-
-### Command-line options
-
-| Option | Description |
-|--------|-------------|
-| `--input <PATH>` | **Required.** Input genotype file (DTC, VCF, or BCF) |
-| `--reference <PATH>` | **Required.** Reference genome FASTA (local or URL) |
-| `--output <PATH>` | **Required.** Output file path (or prefix for PLINK) |
-| `--format <vcf\|bcf\|plink>` | Output format (default: vcf) |
-| `--sex <male\|female>` | Explicitly set sex (disables auto-inference) |
-| `--sample <NAME>` | Sample identifier for VCF header |
-| `--assembly <NAME>` | Assembly label for metadata (default: GRCh38) |
-| `--panel <PATH>` | VCF panel for harmonization (e.g., 1000G sites) |
-| `--standardize` | Standardize alleles to reference forward strand |
-| `--variants-only` | Omit reference-only sites from output |
-| `--input-format <dtc\|vcf\|bcf\|auto>` | Input format (default: auto-detect) |
-| `--reference-fai <PATH>` | Explicit FASTA index path |
-| `--log-level <LEVEL>` | Logging verbosity (default: info) |
-
-### Flag Deep Dives
-
-#### `--standardize`
-
-Enforces reference-matching alleles against the provided reference FASTA.
-
-- For SNPs, this can include allele polarization (swapping `REF/ALT` and remapping `GT`) when the reference base is found among the alleles.
-- Applies ploidy rules for sex chromosomes (with PAR region awareness) when sex is known or inferred.
-
-#### `--panel`
-
-Harmonizes alleles against a reference VCF panel (e.g., 1000 Genomes sites).
-
-- This is especially important for strand-ambiguous SNPs (A/T and C/G), where naive complement checks cannot uniquely determine orientation.
-- The panel provides an additional anchor for allele alignment and padding.
-
-#### `--sex`
-
-If omitted, `convert_genome` infers sex using X/Y heterozygosity and variant density.
-
-You can override inference with:
-
-- `--sex male`
-- `--sex female`
-
-This influences X/Y ploidy enforcement (e.g., male non-PAR X/Y is treated as haploid).
-
-#### `--assembly`
-
-Defines the **target** output build label (default: `GRCh38`).
-
-If the input build is detected as `GRCh37`/`hg19` but you specify `--assembly GRCh38`, the tool will automatically trigger the liftover engine.
-
-## Using as a Rust Library
-
-### Add the Dependency
-
-```
-cargo add convert_genome
-```
-
-## Genome Build Detection & Liftover
-
-### How does it know?
-
-The tool samples variants from your input and checks concordance against expected reference alleles to distinguish common builds (e.g., `GRCh37`/`hg19` vs `GRCh38`). This prevents accidentally emitting a file labeled as one build while containing coordinates from another.
-
-### Liftover Details
-
-- **Trigger:** `--assembly` defines the **target** build.
-  If the input is detected as `hg19`/`GRCh37` but you request `GRCh38`, liftover is automatically enabled.
-- **Automatic downloads:** required UCSC chain files (e.g., `hg19ToHg38.over.chain.gz`) are fetched on demand and cached locally. The first run may require an internet connection.
-- **Fail-safe behavior:** variants that cannot be mapped (deleted regions, gaps, ambiguous mappings) are safely filtered and counted in the output report.
-
-## How It Works (Data Processing Logic)
-
-### Strand Flipping Logic
-
-At a trusted SNP site, one allele should match the reference base for the assumed build.
-
-- If alleles do not match the reference, the tool checks the complement.
-- If the complement matches, the allele representation is flipped.
-- Strand-ambiguous SNPs (A/T and C/G) require additional context and are best handled with `--panel`.
-
-### Ploidy Enforcement
-
-The converter enforces expected ploidy on sex chromosomes:
-
-- Male non-PAR X/Y: haploid
-- Female X: diploid
-- Female Y: dropped
-
-PAR boundaries are assembly-specific.
-
-### Build Detection
-
-Build detection samples input sites and estimates concordance against expected reference alleles to infer `GRCh37`/`hg19` vs `GRCh38`.
-
-## Output Report
-
-### Why the report matters
-
-Every run produces a JSON report alongside the output file (e.g., `sample_report.json`). Treat this as an audit trail:
-
-- what the tool inferred (sex, build)
-- whether liftover was applied
-- how many sites were standardized or harmonized
-- how many variants were filtered or failed verification
-
-Every run produces a JSON report alongside the output file (e.g., `sample_report.json`) containing:
-
-```json
-{
-  "version": "0.1.0",
-  "timestamp": "2025-12-16T22:44:00Z",
-  "input": { "format": "dtc", ... },
-  "output": { "format": "vcf", ... },
-  "sample": { "id": "SAMPLE", "sex": "male", "sex_inferred": true },
-  "build_detection": { "detected_build": "GRCh38" },
-  "standardize": true,
-  "panel": {
-    "total_sites": 120000,
-    "modified_sites": 150,  // Sites flipped/swapped to match panel
-    "novel_sites": 25       // Sites not in panel
-  },
-  "statistics": {
-    "total_records": 638234,
-    "emitted_records": 612847,
-    ...
-  }
-}
-```
-
-### Key field definitions
-
-- `total_records`: number of input rows processed from the source (after basic parsing).
-- `emitted_records`: number of records written to the output.
-- `variant_records`: emitted records with at least one ALT allele.
-- `reference_records`: emitted reference-matching records (ALT empty).
-
-Liftover-specific counters are also included:
-
-- `liftover_unmapped`: no chain interval found
-- `liftover_ambiguous`: multiple chains/intervals eligible (rejected)
-- `liftover_incompatible`: alleles incompatible with target reference checks
-- `liftover_straddled`: endpoints do not lift consistently (e.g., indel spans blocks)
-- `liftover_contig_missing`: lifted contig does not exist in target reference
+`convert_genome` converts genomes in one format to another. This includes, for example, direct-to-consumer (DTC) genotype exports (23andMe, AncestryDNA, MyHeritage, etc.) into standard [VCF](https://samtools.github.io/hts-specs/VCFv4.5.pdf), [BCF](https://samtools.github.io/hts-specs/BCFv2_qref.pdf), or [PLINK](https://www.cog-genomics.org/plink/1.9/formats) binary formats. The converter supports remote references via HTTP(S) and handles compressed `.gz` and `.zip` archives. You can also convert from one genome build from another. It automatically detects genome builds, infers biological sex, handles coordinate liftovers, and harmonizes alleles against reference panels.
+
+## Core Capabilities
+
+1.  **Format Conversion**: Transforms generic CSV/TSV genotype tables into compliant VCF v4.5, BCF v2.2, or PLINK 1.9 binary formats.
+2.  **Smart Input Handling**: Transparently handles plain text, GZIP-compressed files, and ZIP archives.
+3.  **Automatic Inference**:
+    *   **Genome Build**: Detects if input is GRCh37/hg19 or GRCh38/hg19 based on coordinate/allele concordance.
+    *   **Biological Sex**: Infers sex based on X-chromosome heterozygosity and Y-chromosome variant density (needed to determine ploidy for VCF).
+    *   **Strand Orientation**: Detects if the input file is reported on the forward or reverse strand relative to the reference.
+4.  **Automatic Liftover**: If the detected input build differs from the requested output assembly (e.g., input is hg19, output is GRCh38), the tool automatically downloads UCSC chain files and lifts coordinates over.
+5.  **Standardization & Harmonization**:
+    *   **Allele Polarization**: Swaps REF/ALT alleles to match the provided reference genome.
+    *   **Ploidy Enforcement**: Enforces correct haploid/diploid states for sex chromosomes based on sex and Pseudoautosomal Regions (PAR).
+    *   **Panel Alignment**: Aligns alleles against an external reference VCF (e.g., 1000 Genomes) to resolve strand ambiguity (A/T and C/G SNPs).
+
+---
+
+## Usage Logic & Behavior
+
+### Input Parsing
+The tool automatically detects the input format. It supports:
+*   **DTC Formats**: 23andMe, AncestryDNA (5-column), MyHeritage (CSV), deCODEme (6-column with strand), and generic whitespace-delimited formats.
+*   **Standard Formats**: VCF and BCF inputs are also supported for normalization/liftover tasks.
+
+**Compression**: Inputs can be `.gz`, `.zip`, bgzipped, or some combination thereof.
+
+### Genome Build Detection & Liftover
+The conversion pipeline uses a specific logic flow to ensure coordinates are correct:
+
+1.  **Detection**: The tool samples variants from the input and checks concordance against known reference alleles for both `GRCh37` and `GRCh38`.
+2.  **Trigger**: The user specifies a *target* `--assembly` (default: `GRCh38`).
+3.  **Action**:
+    *   If **Input Build == Target Assembly**, conversion proceeds directly.
+    *   If **Input Build != Target Assembly**, the "Liftover Engine" is engaged.
+4.  **Liftover Execution**:
+    *   Required chain files (e.g., `hg19ToHg38.over.chain.gz`) are automatically downloaded from UCSC to a local cache.
+    *   Coordinates are remapped.
+    *   **Fail-Closed Behavior**: Variants that map to multiple locations (ambiguous), do not map at all, or "straddle" chain boundaries (split indels) are discarded to preserve data integrity.
+
+### Sex Inference & Ploidy
+Unless explicitly overridden via flags, the tool infers sex to ensure correct VCF representation:
+*   **Female**: X is Diploid, Y is absent (or filtered).
+*   **Male**: X and Y are Haploid, *except* in Pseudoautosomal Regions (PAR1/PAR2), where they remain Diploid.
+*   **Mitochondrial (MT)**: Always treated as Haploid.
+
+### Allele Standardization (Polarization)
+When `--standardize` is enabled, the tool ensures the `REF` allele in the output VCF matches the FASTA reference provided.
+*   If the input reports "A" but the Reference genome says "G":
+    *   The tool checks if the "A" is a valid ALT.
+    *   It swaps the alleles (REF becomes G, ALT becomes A) and updates the Genotype (GT) indices (e.g., `0/0` -> `1/1`).
+*   Synthetic IDs are generated for variants lacking identifiers (formatted as `chrom:pos:ref:alt`).
+
+### Panel Harmonization
+For preparing data for imputation (e.g., Beagle), strand ambiguity is a major issue (e.g., an A/T SNP is indistinguishable from a T/A SNP if the strand is unknown).
+*   By providing a `--panel` (VCF/BCF), the tool checks if the input alleles match the panel's alleles.
+*   It attempts to align the input to the panel, flipping strands if necessary.
+*   It outputs a "padded" panel containing any novel alleles found in the user data, ensuring the reference panel and target VCF are perfectly compatible for imputation tools.
+
+---
+
+## Output Formats
+
+### VCF (Variant Call Format)
+*   **Version**: 4.5.
+*   **Encoding**: Standard GT (Genotype) field.
+*   **Metadata**: Headers include assembly, conversion software version, and date.
+*   **Symbolic Alleles**: Large deletions/insertions are normalized to `<DEL>` or `<INS>` symbolic alleles with `SVTYPE` info fields.
+
+### BCF (Binary Call Format)
+*   **Version**: 2.2.
+*   **Behavior**: Functionally identical to VCF but highly compressed and indexed. Recommended for large-scale pipelines.
+
+### PLINK 1.9 (Binary)
+Produces a file trio using the output filename as a prefix:
+1.  **`.bed`**: Primary binary genotype matrix.
+2.  **`.bim`**: Variant information (Chromosome, SNP ID, cM, Position, Allele 1, Allele 2).
+3.  **`.fam`**: Sample information (FID, IID, Paternal ID, Maternal ID, Sex, Phenotype).
+    *   *Note*: Sex is encoded as 1 (Male) or 2 (Female). Phenotype is set to -9 (Missing).
+
+### Run Report (`_report.json`)
+Every execution produces a sidecar JSON file containing a comprehensive audit trail:
+*   **Inference Results**: What sex and build were detected.
+*   **Statistics**: Total records, valid records, filtered variants.
+*   **Liftover Details**: Specific counts for unmapped variants, ambiguous mappings, or reference mismatches.
+*   **Panel Stats**: How many sites were harmonized vs. novel.
+
+---
+
+## CLI Options Overview
+
+The tool is controlled via a unified command-line interface.
+
+**Required:**
+*   `--input`: Path to the genotype file.
+*   `--reference`: Path to the reference FASTA (or a URL).
+*   `--output` (or `--output-dir`): Destination for the converted data.
+
+**Key Flags:**
+*   `--format`: `vcf`, `bcf`, or `plink`.
+*   `--assembly`: The **target** assembly (e.g., `GRCh38`). Drive liftover logic.
+*   `--sex`: Override automatic sex inference (`male` or `female`).
+*   `--standardize`: Enable reference-based allele polarization and normalization.
+*   `--panel`: Path to a VCF/BCF reference panel for harmonization.
+*   `--variants-only`: Output only sites where the sample differs from the reference.
+
+---
+
+## Library Usage (API Concepts)
+
+For Rust developers, the core logic is exposed via the `conversion` module. The primary entry point is the `convert_dtc_file` function, driven by a configuration struct.
+
+### `ConversionConfig`
+The configuration object controls the entire pipeline state:
+*   **Paths**: Input, output, reference FASTA, and optional panel paths.
+*   **Format Enums**: `InputFormat` (DTC/VCF/BCF) and `OutputFormat`.
+*   **Biological Context**: `Sex` enum, `ParBoundaries` (defined ranges for X/Y recombination), and `assembly` string.
+*   **Flags**: `standardize` (bool), `include_reference_sites` (bool).
+
+### `convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary>`
+This function executes the pipeline:
+1.  **Pre-scan**: Reads a subset of the file to run the Inference Engine (Sex/Build).
+2.  **Resource Loading**: Fetches/Loads reference genomes, chain files, and panels.
+3.  **Source Iterator**: Wraps the input in a smart iterator that handles parsing, sorting, and initial validation.
+4.  **Transformation Stream**:
+    *   **Liftover Adapter**: If chains are loaded, maps coordinates on-the-fly.
+    *   **Standardizer**: Polarizes alleles against the loaded ReferenceGenome.
+    *   **Harmonizer**: Aligns against the PaddedPanel.
+5.  **Writing**: Streams processed records to the specific output writer (VCF/BCF/PLINK).
+
+### `ConversionSummary`
+The return object provides precise metrics on the run, useful for quality control or integration testing:
+*   `total_records` vs `emitted_records`.
+*   `liftover_unmapped`: Count of variants lost due to missing chain mappings.
+*   `invalid_genotypes`: Count of malformed input lines.
+*   `reference_failures`: Count of sites where reference lookup failed.
