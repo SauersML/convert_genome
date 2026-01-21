@@ -189,8 +189,8 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<String> {
     // Call check_build with our cached paths - no downloads, no MD5 checks
     let result = check_build::detect_build_from_positions_with_refs(
         &variants,
-        Some(hg19_path.to_string_lossy().as_ref()),
-        Some(hg38_path.to_string_lossy().as_ref()),
+        hg19_path.to_string_lossy().as_ref(),
+        hg38_path.to_string_lossy().as_ref(),
     )
     .map_err(|e| anyhow::anyhow!("Build detection failed: {}", e))?;
 
