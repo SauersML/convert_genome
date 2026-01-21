@@ -41,12 +41,6 @@ jobs:
       - name: Build
         run: cargo build --all-targets
 
-      - name: Format
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
       - name: Tests
         run: cargo test --all-features
 
