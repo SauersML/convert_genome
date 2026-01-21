@@ -5,7 +5,7 @@
 //! to represent novel alleles from user data.
 
 use std::collections::HashMap;
-use std::io::{self, BufRead};
+use std::io::BufReader;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -65,15 +65,9 @@ impl PanelIndex {
     }
 
     fn load_vcf<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = std::fs::File::open(path.as_ref())
-            .with_context(|| format!("failed to open panel {}", path.as_ref().display()))?;
-
-        // Handle gzipped VCF
-        let reader: Box<dyn BufRead> = if path.as_ref().to_string_lossy().ends_with(".gz") {
-            Box::new(io::BufReader::new(flate2::read::GzDecoder::new(file)))
-        } else {
-            Box::new(io::BufReader::new(file))
-        };
+        let path = path.as_ref();
+        let reader = crate::smart_reader::open_input(path)
+            .with_context(|| format!("failed to open panel {}", path.display()))?;
 
         let mut vcf_reader = vcf::io::Reader::new(reader);
         let header = vcf_reader.read_header()?;
@@ -141,7 +135,7 @@ impl PanelIndex {
         let file = std::fs::File::open(path.as_ref())
             .with_context(|| format!("failed to open panel {}", path.as_ref().display()))?;
 
-        let mut bcf_reader = bcf::io::Reader::new(io::BufReader::new(file));
+        let mut bcf_reader = bcf::io::Reader::new(BufReader::new(file));
         let header = bcf_reader.read_header()?;
 
         let chrom_order: Vec<String> = header.contigs().keys().map(|k| k.to_string()).collect();

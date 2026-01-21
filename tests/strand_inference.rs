@@ -39,20 +39,22 @@ fn test_infer_forward_strand() {
     let dir = tempfile::tempdir().unwrap();
     let reference = create_source_reference(&dir);
 
-    let records = vec![
-        DtcRecord {
+    // We need >= 50 informative SNPs to trigger inference.
+    let mut records = Vec::new();
+    for _ in 0..30 {
+        records.push(DtcRecord {
             chromosome: "1".to_string(),
             position: 100,
             genotype: "AA".to_string(), // Matches Ref A
             id: None,
-        },
-        DtcRecord {
+        });
+        records.push(DtcRecord {
             chromosome: "1".to_string(),
             position: 200,
             genotype: "GG".to_string(), // Matches Ref G
             id: None,
-        },
-    ];
+        });
+    }
 
     let result = infer_strand_lock(&records, &reference).unwrap();
     assert_eq!(result, InferredStrand::Forward);
@@ -103,7 +105,11 @@ fn test_infer_ambiguous_skips() {
         id: None,
     }];
 
-    // If all skipped, it defaults to Forward with a warning (tested < 50)
-    let result = infer_strand_lock(&records, &reference).unwrap();
-    assert_eq!(result, InferredStrand::Forward);
+    // If all skipped, strand inference is fail-closed (tested < 50)
+    let err = infer_strand_lock(&records, &reference).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Too few informative SNPs"),
+        "unexpected error: {err}"
+    );
 }

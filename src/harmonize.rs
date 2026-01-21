@@ -82,12 +82,45 @@ pub fn harmonize_alleles(
     // Priority: No Flip (Direct Match) > Flip (Comp Match)
     let needs_flip = !has_ref_match && has_ref_comp_match;
 
-    for base in alleles {
+    let original_site = panel.get_original(chrom, pos);
+    let panel_ref = original_site.map(|s| s.ref_allele.as_str());
+
+    for (i, base) in alleles.iter().enumerate() {
         if needs_flip {
             validated_bases.push(complement_seq(base));
-        } else {
-            validated_bases.push(base.to_uppercase());
+            continue;
         }
+
+        let base_upper = base.to_uppercase();
+        if i == 0 {
+            validated_bases.push(base_upper);
+            continue;
+        }
+
+        let mut rescued = None;
+        if let Some(site) = original_site {
+            let direct_matches_alt = site
+                .alt_alleles
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(&base_upper));
+            if direct_matches_alt {
+                rescued = Some(base_upper.clone());
+            } else {
+                let comp = complement_seq(&base_upper);
+                let comp_matches_alt = site
+                    .alt_alleles
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(&comp));
+                let comp_matches_panel_ref = panel_ref
+                    .map(|r| r.eq_ignore_ascii_case(&comp))
+                    .unwrap_or(false);
+                if comp_matches_alt && !comp_matches_panel_ref {
+                    rescued = Some(comp);
+                }
+            }
+        }
+
+        validated_bases.push(rescued.unwrap_or(base_upper));
     }
 
     // Map to indices
