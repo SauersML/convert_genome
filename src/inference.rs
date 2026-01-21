@@ -144,31 +144,23 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<String> {
             continue;
         }
 
-        // We only provide CHROM+POS. check_build will look up the reference bases itself.
-        // We pass an empty ref_base string or standard notation if allowed, but check_build
-        // usually needs the ref base to verify?
-        // Wait, the user said: "check_build ignores the user's --reference... checks these variants against its own internal cache".
-        // check_build::detect_build_from_positions takes a list of variants.
-        // Actually, looking at check_build source (implied), it likely needs to know what the *observed* ref base is in the file if the file has it?
-        // DTC records usually DON'T have a ref base.
-        // The previous code was looking up ref base from the *Target* reference to populate the struct.
-        // If we don't have a ref base, can we use `detect_build_from_positions` effectively?
-        // The user said: "Parse the first ~1000 records... Pass this vector directly to check_build".
+        // Parse genotype to find homozygous calls to use as candidate ref bases
+        let alleles = dtc::parse_genotype(&rec.genotype);
 
-        // Let's assume check_build can handle just Chrom/Pos or we leave ref_base empty/dummy if it loads it itself.
-        // Actually, if we look at the previous code:
-        // `variants.push(check_build::Variant { ref_base: ref_base.to_string() ... })`
-        // It was populating ref_base from the *reference*.
-
-        // If DTC doesn't have ref bases, we can't provide them.
-        // Does `check_build` support lookup solely on position matches?
-        // The user mentioned: "detect_build_from_positions".
-
-        variants.push(check_build::Variant {
-            chrom: rec.chromosome.clone(),
-            pos: rec.position,
-            ref_base: "N".to_string(), // internal check_build logic handles lookups
-        });
+        // We only use homozygous calls (e.g. AA, TT) because statistically
+        // the allele is likely to match the reference.
+        // We skip heterozygous calls because we don't know which is ref.
+        if alleles.len() == 2 {
+            if let (Allele::Base(b1), Allele::Base(b2)) = (&alleles[0], &alleles[1]) {
+                if b1 == b2 && b1.len() == 1 {
+                    variants.push(check_build::Variant {
+                        chrom: rec.chromosome.clone(),
+                        pos: rec.position,
+                        ref_base: b1.clone(),
+                    });
+                }
+            }
+        }
     }
 
     if variants.len() < 100 {
