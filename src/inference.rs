@@ -146,24 +146,24 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<String> {
 
         // We only provide CHROM+POS. check_build will look up the reference bases itself.
         // We pass an empty ref_base string or standard notation if allowed, but check_build
-        // usually needs the ref base to verify? 
+        // usually needs the ref base to verify?
         // Wait, the user said: "check_build ignores the user's --reference... checks these variants against its own internal cache".
-        // check_build::detect_build_from_positions takes a list of variants. 
+        // check_build::detect_build_from_positions takes a list of variants.
         // Actually, looking at check_build source (implied), it likely needs to know what the *observed* ref base is in the file if the file has it?
         // DTC records usually DON'T have a ref base.
         // The previous code was looking up ref base from the *Target* reference to populate the struct.
         // If we don't have a ref base, can we use `detect_build_from_positions` effectively?
         // The user said: "Parse the first ~1000 records... Pass this vector directly to check_build".
-        
+
         // Let's assume check_build can handle just Chrom/Pos or we leave ref_base empty/dummy if it loads it itself.
         // Actually, if we look at the previous code:
         // `variants.push(check_build::Variant { ref_base: ref_base.to_string() ... })`
         // It was populating ref_base from the *reference*.
-        
+
         // If DTC doesn't have ref bases, we can't provide them.
         // Does `check_build` support lookup solely on position matches?
         // The user mentioned: "detect_build_from_positions".
-        
+
         variants.push(check_build::Variant {
             chrom: rec.chromosome.clone(),
             pos: rec.position,
@@ -172,10 +172,7 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<String> {
     }
 
     if variants.len() < 100 {
-        tracing::warn!(
-            "Only {} variants for build detection",
-            variants.len()
-        );
+        tracing::warn!("Only {} variants for build detection", variants.len());
     }
 
     let result = check_build::detect_build_from_positions(&variants)

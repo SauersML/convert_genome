@@ -13,14 +13,14 @@ use tracing;
 /// Index 0 is REF. Indices 1+ are ALTs.
 pub fn remap_sample_genotypes(samples: &Samples, mapping: &HashMap<usize, usize>) -> Samples {
     let keys = samples.keys();
-    
+
     // First, verify we have keys and map the fields we care about to their NUMERIC INDICES in the input
     let mut gt_index = None;
     let mut other_indices = Vec::new();
-    
+
     // Create the new keys list
     let mut new_keys_vec = Vec::new();
-    
+
     for (i, key) in keys.as_ref().iter().enumerate() {
         if key == format_key::GENOTYPE {
             gt_index = Some(i);
@@ -48,24 +48,29 @@ pub fn remap_sample_genotypes(samples: &Samples, mapping: &HashMap<usize, usize>
         if let Some(idx) = gt_index {
             // Look up value by NUMERIC INDEX (idx) using direct slice access
             let val_opt = sample.values().get(idx).cloned().flatten();
-            
+
             if let Some(Value::String(gt_str)) = &val_opt {
                 let new_gt = remap_gt_string(gt_str, mapping);
                 if !mapping.is_empty() && gt_str != &new_gt {
-                    tracing::debug!("Remapped GT: {} -> {} (mapping: {:?})", gt_str, new_gt, mapping);
+                    tracing::debug!(
+                        "Remapped GT: {} -> {} (mapping: {:?})",
+                        gt_str,
+                        new_gt,
+                        mapping
+                    );
                 }
                 new_sample_vals.push(Some(Value::String(new_gt)));
             } else {
                 new_sample_vals.push(val_opt);
             }
         }
-        
+
         // 2. Process other preserved fields
         for (idx, _) in &other_indices {
-             let val_opt = sample.values().get(*idx).cloned().flatten();
-             new_sample_vals.push(val_opt);
+            let val_opt = sample.values().get(*idx).cloned().flatten();
+            new_sample_vals.push(val_opt);
         }
-        
+
         new_values.push(new_sample_vals);
     }
 

@@ -179,13 +179,12 @@ fn test_liftover_fidelity_hg38() -> Result<()> {
                         }
                         noodles::vcf::variant::record::samples::series::Value::Genotype(gt) => {
                             // Check if all alleles are 0 (Ref) and we have at least one allele
-                            let is_hom_ref = gt.iter().count() > 0 && gt.iter().all(|res| {
-                                match res {
+                            let is_hom_ref = gt.iter().count() > 0
+                                && gt.iter().all(|res| match res {
                                     Ok(allele) => allele.0 == Some(0),
                                     Err(_) => false,
-                                }
-                            });
-                            
+                                });
+
                             if is_hom_ref {
                                 matching_genotypes += 1;
                             }

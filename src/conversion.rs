@@ -206,7 +206,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         // Build Detection using check_build library (position-only, not allele-based)
         // This avoids false liftover triggers on homozygous-alt sites
         tracing::info!("Detecting genome build using check_build (position-only)...");
-        
+
         // This uses check_build's internal caching and does NOT require us to provide a reference
         match crate::inference::detect_build_from_dtc(&prescan_records) {
             Ok(detected_build) => {
@@ -220,13 +220,14 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 let builds_match = (detected_normalized.contains("37")
                     || detected_normalized.contains("hg19"))
                     && (target_normalized.contains("37") || target_normalized.contains("hg19"))
-                    || (detected_normalized.contains("38")
-                        || detected_normalized.contains("hg38"))
-                        && (target_normalized.contains("38")
-                            || target_normalized.contains("hg38"));
+                    || (detected_normalized.contains("38") || detected_normalized.contains("hg38"))
+                        && (target_normalized.contains("38") || target_normalized.contains("hg38"));
 
                 if !builds_match {
-                    println!("DEBUG: Detected build {} != target {}. Initiating liftover...", detected_build, config.assembly);
+                    println!(
+                        "DEBUG: Detected build {} != target {}. Initiating liftover...",
+                        detected_build, config.assembly
+                    );
                     tracing::info!(
                         "Detected build {} differs from target {}. Initiating liftover.",
                         detected_build,
@@ -318,26 +319,27 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             // We reuse the valid source reference we loaded (or load it if for some reason it wasn't kept)
             let src_build = inferred_build_opt.as_ref().unwrap();
             if reference.is_none() {
-                 reference = Some(
-                    crate::source_ref::load_source_reference(src_build)
-                        .with_context(|| format!("failed to load source reference {}", src_build))?
+                reference = Some(
+                    crate::source_ref::load_source_reference(src_build).with_context(|| {
+                        format!("failed to load source reference {}", src_build)
+                    })?,
                 );
             }
         } else {
             // No liftover: input matches target. Use user-provided reference.
-             if reference.is_none() {
-                 if let Some(ref fasta_path) = config.reference_fasta {
-                     reference = Some(
+            if reference.is_none() {
+                if let Some(ref fasta_path) = config.reference_fasta {
+                    reference = Some(
                         ReferenceGenome::open(fasta_path, config.reference_fai.clone())
                             .with_context(|| "failed to open reference genome")?,
                     );
-                 }
-             }
+                }
+            }
         }
 
         // Validate we have a reference if required (and not doing liftover, where we just loaded it)
         if reference.is_none() && requires_reference && liftover_chain.is_none() {
-             return Err(anyhow!(
+            return Err(anyhow!(
                 "Reference FASTA is required for {} input or when using --standardize/--panel",
                 match config.input_format {
                     crate::input::InputFormat::Dtc => "DTC",
