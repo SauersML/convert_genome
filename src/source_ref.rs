@@ -153,15 +153,33 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
     })?;
     let reference_path = refs_dir.join(uncompressed_name);
 
-    // If we already expanded it AND have the index, just use it.
+    // If we already have the .fa cached, use it (generate .fai if needed)
     let fai_path = reference_path.with_extension("fa.fai");
-    if reference_path.exists() && fai_path.exists() {
-        return ReferenceGenome::open(&reference_path, Some(fai_path)).with_context(|| {
-            format!(
-                "Failed to open cached source reference at {}",
-                reference_path.display()
-            )
-        });
+    if reference_path.exists() {
+        if fai_path.exists() {
+            // Both exist, use directly
+            return ReferenceGenome::open(&reference_path, Some(fai_path)).with_context(|| {
+                format!(
+                    "Failed to open cached source reference at {}",
+                    reference_path.display()
+                )
+            });
+        } else {
+            // .fa exists but .fai missing - generate it
+            ReferenceGenome::open(&reference_path, None).with_context(|| {
+                format!(
+                    "Failed to open cached source reference at {} (generating index)",
+                    reference_path.display()
+                )
+            })?;
+            // Now use the generated index
+            return ReferenceGenome::open(&reference_path, Some(fai_path)).with_context(|| {
+                format!(
+                    "Failed to open cached source reference at {}",
+                    reference_path.display()
+                )
+            });
+        }
     }
 
     // Try to reuse check_build's cached .fa.gz.
