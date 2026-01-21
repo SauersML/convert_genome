@@ -509,12 +509,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 panel: padded_panel.as_ref(),
                 needs_sort,
             };
-            process_records(
-                source,
-                &mut writer,
-                &mut summary,
-                ctx,
-            )?;
+            process_records(source, &mut writer, &mut summary, ctx)?;
         }
         OutputFormat::Bcf => {
             let mut writer = bcf::io::writer::Builder::default()
@@ -530,12 +525,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 panel: padded_panel.as_ref(),
                 needs_sort,
             };
-            process_records(
-                source,
-                &mut writer,
-                &mut summary,
-                ctx,
-            )?;
+            process_records(source, &mut writer, &mut summary, ctx)?;
         }
         OutputFormat::Plink => {
             let mut writer =
@@ -552,12 +542,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 panel: padded_panel.as_ref(),
                 needs_sort,
             };
-            process_records(
-                source,
-                &mut writer,
-                &mut summary,
-                ctx,
-            )?;
+            process_records(source, &mut writer, &mut summary, ctx)?;
         }
     }
 

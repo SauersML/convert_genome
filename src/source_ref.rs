@@ -64,7 +64,9 @@ fn decompress_gzip_to_path(gz_path: &Path, out_path: &Path) -> Result<()> {
         .with_context(|| format!("failed to open gz reference {}", gz_path.display()))?;
     let mut decoder = GzDecoder::new(input);
 
-    let parent = out_path.parent().ok_or_else(|| anyhow!("Invalid output path"))?;
+    let parent = out_path
+        .parent()
+        .ok_or_else(|| anyhow!("Invalid output path"))?;
     fs::create_dir_all(parent)?;
 
     // Create a unique temporary file in the same directory to avoid race conditions
@@ -74,8 +76,10 @@ fn decompress_gzip_to_path(gz_path: &Path, out_path: &Path) -> Result<()> {
         .unwrap()
         .as_nanos();
     let suffix = format!(".tmp.{}.{}", std::process::id(), nanos);
-    
-    let file_name = out_path.file_name().ok_or_else(|| anyhow!("Invalid filename"))?;
+
+    let file_name = out_path
+        .file_name()
+        .ok_or_else(|| anyhow!("Invalid filename"))?;
     let mut tmp_name = file_name.to_os_string();
     tmp_name.push(suffix);
     let tmp_path = parent.join(tmp_name);
@@ -188,7 +192,7 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
     // Fallback: download ourselves if check_build cache is missing.
     tracing::info!("Downloading source reference from {}", url);
     let resource = remote::fetch_remote_resource(&url)?;
-    
+
     // Copy to unique temp file then rename to avoid race conditions
     let parent = reference_path.parent().unwrap(); // We know this exists from create_dir_all above
     let nanos = std::time::SystemTime::now()
@@ -196,8 +200,10 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
         .unwrap()
         .as_nanos();
     let suffix = format!(".tmp.{}.{}", std::process::id(), nanos);
-    
-    let file_name = reference_path.file_name().ok_or_else(|| anyhow!("Invalid filename"))?;
+
+    let file_name = reference_path
+        .file_name()
+        .ok_or_else(|| anyhow!("Invalid filename"))?;
     let mut tmp_name = file_name.to_os_string();
     tmp_name.push(suffix);
     let tmp_path = parent.join(tmp_name);

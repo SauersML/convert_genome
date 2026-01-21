@@ -1935,11 +1935,12 @@ fn locate_build_dependency(deps_dir: &Path, crate_name: &str) -> Option<PathBuf>
 
             if file_name.starts_with(&prefix)
                 && let Ok(metadata) = std::fs::metadata(&path)
-                    && let Ok(mtime) = metadata.modified()
-                        && (candidate.is_none() || mtime > candidate_mtime) {
-                            candidate = Some(path);
-                            candidate_mtime = mtime;
-                        }
+                && let Ok(mtime) = metadata.modified()
+                && (candidate.is_none() || mtime > candidate_mtime)
+            {
+                candidate = Some(path);
+                candidate_mtime = mtime;
+            }
         }
     }
 
@@ -3487,12 +3488,14 @@ fn is_word_boundary(text: &str, idx: usize, len: usize) -> bool {
     let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
 
     if let Some(c) = before
-        && is_word_char(c) {
-            return false;
-        }
+        && is_word_char(c)
+    {
+        return false;
+    }
     if let Some(c) = after
-        && is_word_char(c) {
-            return false;
-        }
+        && is_word_char(c)
+    {
+        return false;
+    }
     true
 }

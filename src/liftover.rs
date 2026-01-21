@@ -469,40 +469,41 @@ impl<S: VariantSource> VariantSource for LiftoverAdapter<S> {
             // only match the source reference base after complementation.
             if record.reference_bases().eq_ignore_ascii_case("N")
                 && let Some(ref src_ref) = self.source_reference
-                    && let Ok(src_base) = src_ref.base(chrom_str, pos as u64) {
-                        let src_base = src_base.to_ascii_uppercase();
-                        if matches!(src_base, 'A' | 'C' | 'G' | 'T') {
-                            let src_base_str = src_base.to_string();
-                            let comp_src_base_str = reverse_complement_string(&src_base_str);
+                && let Ok(src_base) = src_ref.base(chrom_str, pos as u64)
+            {
+                let src_base = src_base.to_ascii_uppercase();
+                if matches!(src_base, 'A' | 'C' | 'G' | 'T') {
+                    let src_base_str = src_base.to_string();
+                    let comp_src_base_str = reverse_complement_string(&src_base_str);
 
-                            // Only attempt per-record complement rescue for simple SNP-like alleles.
-                            let alts: Vec<String> = record
-                                .alternate_bases()
-                                .as_ref()
-                                .iter()
-                                .map(|s| s.to_ascii_uppercase())
-                                .collect();
+                    // Only attempt per-record complement rescue for simple SNP-like alleles.
+                    let alts: Vec<String> = record
+                        .alternate_bases()
+                        .as_ref()
+                        .iter()
+                        .map(|s| s.to_ascii_uppercase())
+                        .collect();
 
-                            let is_simple_alleles = !alts.is_empty()
-                                && alts.iter().all(|a| a.len() == 1)
-                                && !alts.iter().any(|a| a.starts_with('<'));
+                    let is_simple_alleles = !alts.is_empty()
+                        && alts.iter().all(|a| a.len() == 1)
+                        && !alts.iter().any(|a| a.starts_with('<'));
 
-                            if is_simple_alleles {
-                                let has_src = alts.iter().any(|a| a == &src_base_str);
-                                let has_comp_src = alts.iter().any(|a| a == &comp_src_base_str);
+                    if is_simple_alleles {
+                        let has_src = alts.iter().any(|a| a == &src_base_str);
+                        let has_comp_src = alts.iter().any(|a| a == &comp_src_base_str);
 
-                                if !has_src && has_comp_src {
-                                    // Complement all alleles in-place so source ref base appears.
-                                    let new_alts: Vec<String> =
-                                        alts.iter().map(|a| reverse_complement_string(a)).collect();
-                                    *record.alternate_bases_mut() = new_alts.into();
-                                }
-                            }
-
-                            // Always set REF to the true source base for downstream lifting.
-                            *record.reference_bases_mut() = src_base_str;
+                        if !has_src && has_comp_src {
+                            // Complement all alleles in-place so source ref base appears.
+                            let new_alts: Vec<String> =
+                                alts.iter().map(|a| reverse_complement_string(a)).collect();
+                            *record.alternate_bases_mut() = new_alts.into();
                         }
                     }
+
+                    // Always set REF to the true source base for downstream lifting.
+                    *record.reference_bases_mut() = src_base_str;
+                }
+            }
 
             // Check for indels/SVs - reject them (not supported yet)
             // Check for indels/SVs - reject them (not supported yet)
