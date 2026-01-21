@@ -7,6 +7,7 @@ description = "Convert DTC, VCF, or BCF genome files to VCF, BCF, or PLINK 1.9"
 license = "MIT"
 repository = "https://docs.rs/crate/convert_genome/latest"
 documentation = "https://docs.rs/crate/convert_genome/latest"
+exclude = ["data", "build"]
 
 [dependencies]
 anyhow = "1.0"
