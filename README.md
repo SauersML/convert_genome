@@ -187,52 +187,8 @@ If the input build is detected as `GRCh37`/`hg19` but you specify `--assembly GR
 
 ### Add the Dependency
 
-Add this to your `Cargo.toml`:
-
-```toml
-[dependencies]
-convert_genome = "0.1.2"
 ```
-
-### Core Types and Entry Points
-
-- `ConversionConfig`: configuration struct for controlling input/output formats, paths, inference toggles, and harmonization.
-- `convert_dtc_file`: primary entry point for running a conversion and getting a `ConversionSummary` back.
-
-The library uses `anyhow::Result` for top-level errors and also has internal error types for record-level failures.
-
-### Minimal Example
-
-```rust
-use convert_genome::{convert_dtc_file, ConversionConfig, OutputFormat};
-use convert_genome::cli::Sex;
-use convert_genome::input::InputFormat;
-use std::path::PathBuf;
-
-fn main() -> anyhow::Result<()> {
-    let summary = convert_dtc_file(ConversionConfig {
-        input: PathBuf::from("data/genotypes.txt"),
-        input_format: InputFormat::Auto,
-        input_origin: String::from("local"),
-        reference_fasta: Some(PathBuf::from("GRCh38.fa")),
-        reference_origin: Some(String::from("local")),
-        reference_fai: None,
-        reference_fai_origin: None,
-        output: PathBuf::from("out.vcf"),
-        output_dir: None,
-        output_format: OutputFormat::Vcf,
-        sample_id: String::from("SAMPLE"),
-        assembly: String::from("GRCh38"),
-        include_reference_sites: true,
-        sex: Some(Sex::Female),
-        par_boundaries: None,
-        standardize: true,
-        panel: None,
-    })?;
-
-    eprintln!("emitted_records={}", summary.emitted_records);
-    Ok(())
-}
+cargo add convert_genome
 ```
 
 ## Genome Build Detection & Liftover
