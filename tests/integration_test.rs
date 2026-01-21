@@ -9,6 +9,61 @@ use noodles::vcf;
 use noodles::vcf::variant::record::samples::Sample;
 use rayon::ThreadPoolBuilder;
 
+fn decode_gt_indices_from_value(
+    gt: vcf::variant::record::samples::series::Value,
+) -> Vec<Option<usize>> {
+    match gt {
+        vcf::variant::record::samples::series::Value::String(s) => s
+            .split(|c| c == '/' || c == '|')
+            .map(|tok| {
+                if tok == "." || tok.is_empty() {
+                    None
+                } else {
+                    tok.parse::<usize>().ok()
+                }
+            })
+            .collect(),
+        vcf::variant::record::samples::series::Value::Genotype(geno) => geno
+            .iter()
+            .map(|a| a.ok().and_then(|a| a.0))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+fn gt_alleles_for_record(
+    record: &vcf::variant::RecordBuf,
+    header: &vcf::Header,
+) -> Vec<String> {
+    let ref_base = record.reference_bases().to_string().to_uppercase();
+    let alts: Vec<String> = record
+        .alternate_bases()
+        .as_ref()
+        .iter()
+        .map(|s| s.to_string().to_uppercase())
+        .collect();
+
+    let samples = record.samples();
+    let sample_values = samples.values().next().expect("missing sample");
+    let gt_value = sample_values
+        .iter(header)
+        .next()
+        .expect("missing GT")
+        .expect("invalid sample value")
+        .1
+        .expect("missing GT value");
+
+    let indices = decode_gt_indices_from_value(gt_value);
+    indices
+        .into_iter()
+        .filter_map(|idx| match idx {
+            None => None,
+            Some(0) => Some(ref_base.clone()),
+            Some(n) => alts.get(n.saturating_sub(1)).cloned(),
+        })
+        .collect()
+}
+
 fn write_reference(dir: &TempDir) -> Result<PathBuf> {
     let fasta = dir.child("ref.fa");
     fasta.write_str(">chr1\nACGTACGT\n>chr2\nTTTTCCCC\n")?;
@@ -25,6 +80,14 @@ fn write_panel_vcf(dir: &TempDir) -> Result<PathBuf> {
     let vcf_path = dir.child("panel.vcf");
     vcf_path.write_str(
         "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tP1\tP2\tP3\tP4\tP5\n1\t1500\t.\tT\tTA\t.\t.\t.\tGT\t0/0\t0/0\t0/0\t0/0\t0/0\n",
+    )?;
+    Ok(vcf_path.path().to_path_buf())
+}
+
+fn write_panel_vcf_single_alt(dir: &TempDir) -> Result<PathBuf> {
+    let vcf_path = dir.child("panel_single_alt.vcf");
+    vcf_path.write_str(
+        "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tP1\tP2\tP3\tP4\tP5\n1\t1500\t.\tT\tA\t.\t.\t.\tGT\t0/0\t0/0\t0/0\t0/0\t0/0\n",
     )?;
     Ok(vcf_path.path().to_path_buf())
 }
@@ -239,29 +302,67 @@ fn preserves_private_multiallelic_site_with_panel() -> Result<()> {
             assert!(alts.contains(&"A".to_string()));
             assert!(alts.contains(&"G".to_string()));
 
-            let samples = record.samples();
-            let sample_values = samples.values().next().expect("missing sample");
-            let gt = sample_values
-                .iter(&header)
-                .next()
-                .expect("missing GT")?
-                .1
-                .expect("missing GT value");
-            let gt_str: String = match gt {
-                vcf::variant::record::samples::series::Value::String(s) => s.into_owned(),
-                vcf::variant::record::samples::series::Value::Genotype(geno) => {
-                    let parts: Vec<String> = geno
-                        .iter()
-                        .map(|a| {
-                            let a = a.expect("invalid allele");
-                            a.0.map(|v| v.to_string()).unwrap_or_else(|| ".".to_string())
-                        })
-                        .collect();
-                    parts.join("/")
-                }
-                _ => panic!("unexpected GT type"),
-            };
-            assert!(gt_str == "1/2" || gt_str == "2/1");
+            let mut gt_alleles = gt_alleles_for_record(&record, &header);
+            gt_alleles.sort();
+            assert_eq!(gt_alleles, vec!["A".to_string(), "G".to_string()]);
+
+            break;
+        }
+    }
+
+    assert!(found, "did not find chr1:1500 in output VCF");
+    Ok(())
+}
+
+#[test]
+fn preserves_one_panel_alt_and_one_private_alt_with_panel() -> Result<()> {
+    let temp = TempDir::new()?;
+    let reference = write_reference_2000(&temp)?;
+    let panel = write_panel_vcf_single_alt(&temp)?;
+
+    let mut dtc = String::new();
+    for pos in 1..=2000u64 {
+        if pos == 1500 {
+            dtc.push_str(&format!("rs{pos}\t1\t{pos}\tAG\n"));
+        } else {
+            dtc.push_str(&format!("rs{pos}\t1\t{pos}\tTT\n"));
+        }
+    }
+    let input = write_dtc(&temp, &dtc)?;
+
+    let vcf_path = temp.child("out_one_private.vcf");
+    let mut config = base_config(input, reference, vcf_path.path().to_path_buf());
+    config.standardize = true;
+    config.panel = Some(panel);
+    convert_dtc_file(config)?;
+
+    let mut reader = vcf::io::reader::Builder::default().build_from_path(vcf_path.path())?;
+    let header = reader.read_header()?;
+
+    let mut found = false;
+    for result in reader.record_bufs(&header) {
+        let record = result?;
+        let chrom = record.reference_sequence_name().to_string();
+        let pos_raw = record.variant_start().expect("missing pos");
+        let pos = usize::from(pos_raw) as u64;
+        if chrom == "1" && pos == 1500 {
+            found = true;
+
+            assert_eq!(record.reference_bases().to_string().to_uppercase(), "T");
+
+            let alts: Vec<String> = record
+                .alternate_bases()
+                .as_ref()
+                .iter()
+                .map(|s| s.to_string().to_uppercase())
+                .collect();
+            assert_eq!(alts.len(), 2);
+            assert!(alts.contains(&"A".to_string()));
+            assert!(alts.contains(&"G".to_string()));
+
+            let mut gt_alleles = gt_alleles_for_record(&record, &header);
+            gt_alleles.sort();
+            assert_eq!(gt_alleles, vec!["A".to_string(), "G".to_string()]);
 
             break;
         }
