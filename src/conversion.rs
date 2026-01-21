@@ -187,10 +187,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // Auto-detect build and sex if not provided (DTC format only)
     let mut config = config;
     let mut liftover_chain: Option<Arc<crate::liftover::ChainMap>> = None;
+    #[allow(unused_assignments)]
     let mut inferred_build_opt: Option<String> = None;
     let mut inferred_strand: Option<crate::source_ref::InferredStrand> = None;
 
-    let mut source_reference_for_liftover: Option<ReferenceGenome> = None;
+    let source_reference_for_liftover: Option<ReferenceGenome> = None;
     // We will initialize 'reference' strictly as the TARGET reference after build detection.
     let mut reference: Option<ReferenceGenome> = None;
 
@@ -298,7 +299,13 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             match crate::source_ref::infer_strand_lock(&prescan_records, &source_ref) {
                 Ok(strand) => {
                     inferred_strand = Some(strand);
-                    source_reference_for_liftover = Some(source_ref);
+                    // Do NOT populate source_reference_for_liftover.
+                    // Doing so causes LiftoverAdapter to pre-fill REF with the source base.
+                    // This switches LiftoverAdapter from "Permissive N-ref" mode to "Strict" mode.
+                    // Strict mode rejects records where the source ref doesn't match the target ref
+                    // (which happens frequently e.g. hg19 A -> hg38 G).
+                    // We want permissive lifting for DTC files.
+                    // source_reference_for_liftover = Some(source_ref);
                 }
                 Err(e) => {
                     // If liftover is required, strand uncertainty is a hard error.
@@ -314,37 +321,38 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         }
 
         // Initialize 'reference' for input validation/standardization
-        if liftover_chain.is_some() {
-            // Liftover enabled: input validation must use the SOURCE genome.
-            // We reuse the valid source reference we loaded (or load it if for some reason it wasn't kept)
-            let src_build = inferred_build_opt.as_ref().unwrap();
-            if reference.is_none() {
+        // Initialize 'reference' (Target Reference) for output/validation/standardization
+        if reference.is_none() {
+             // 1. Try user-provided FASTA
+            if let Some(ref fasta_path) = config.reference_fasta {
                 reference = Some(
-                    crate::source_ref::load_source_reference(src_build).with_context(|| {
-                        format!("failed to load source reference {}", src_build)
-                    })?,
+                    ReferenceGenome::open(fasta_path, config.reference_fai.clone())
+                        .with_context(|| "failed to open reference genome")?,
                 );
-            }
-        } else {
-            // No liftover: input matches target. Use user-provided reference.
-            if reference.is_none() {
-                if let Some(ref fasta_path) = config.reference_fasta {
-                    reference = Some(
-                        ReferenceGenome::open(fasta_path, config.reference_fai.clone())
-                            .with_context(|| "failed to open reference genome")?,
-                    );
-                }
+            } else {
+                 // 2. If no user FASTA, but we need one (e.g. for liftover target validation),
+                 // try to load standard reference for the TARGET assembly.
+                 // This mirrors how we load source reference, but for the target.
+                 match crate::source_ref::load_source_reference(&config.assembly) {
+                     Ok(r) => reference = Some(r),
+                     Err(e) => {
+                         // Only soft-fail here; hard failure happens below if it was strictly required.
+                         tracing::debug!("Could not auto-load target reference for {}: {}", config.assembly, e);
+                     }
+                 }
             }
         }
 
         // Validate we have a reference if required (and not doing liftover, where we just loaded it)
         if reference.is_none() && requires_reference && liftover_chain.is_none() {
             return Err(anyhow!(
-                "Reference FASTA is required for {} input or when using --standardize/--panel",
+                "Reference FASTA (Target) is required for {} input or when using --standardize/--panel.
+                Could not load standard reference for target assembly '{}'. Please provide --reference.",
                 match config.input_format {
                     crate::input::InputFormat::Dtc => "DTC",
                     _ => "this",
-                }
+                },
+                config.assembly
             ));
         }
 

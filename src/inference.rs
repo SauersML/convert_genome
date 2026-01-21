@@ -108,6 +108,12 @@ pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<String> {
     let result = check_build::detect_build(path_str.to_string())
         .map_err(|e| anyhow::anyhow!("Build detection failed: {}", e))?;
 
+    println!(
+        "DEBUG: check_build match output: hg19={:.1}%, hg38={:.1}%",
+        result.hg19_match_rate,
+        result.hg38_match_rate
+    );
+
     tracing::info!(
         "Build detection: hg19={:.1}%, hg38={:.1}%",
         result.hg19_match_rate,
@@ -169,6 +175,12 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<String> {
 
     let result = check_build::detect_build_from_positions(&variants)
         .map_err(|e| anyhow::anyhow!("Build detection failed: {}", e))?;
+
+    println!(
+        "DEBUG: output from detect_build_from_positions: hg19={:.1}%, hg38={:.1}%",
+        result.hg19_match_rate,
+        result.hg38_match_rate
+    );
 
     tracing::info!(
         "Build detection: hg19={:.1}%, hg38={:.1}%",
