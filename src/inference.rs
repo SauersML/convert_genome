@@ -111,8 +111,7 @@ pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<String> {
 
     println!(
         "DEBUG: check_build match output: hg19={:.1}%, hg38={:.1}%",
-        result.hg19_match_rate,
-        result.hg38_match_rate
+        result.hg19_match_rate, result.hg38_match_rate
     );
 
     tracing::info!(
@@ -178,7 +177,7 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<String> {
     let refs_dir = crate::source_ref::convert_genome_refs_dir()?;
     let hg19_path = refs_dir.join("hg19.fa");
     let hg38_path = refs_dir.join("hg38.fa");
-    
+
     // Pre-cache both references if they don't exist
     // This downloads once and reuses forever
     if !hg19_path.exists() || !hg38_path.exists() {
@@ -197,8 +196,7 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<String> {
 
     println!(
         "DEBUG: output from detect_build_from_positions: hg19={:.1}%, hg38={:.1}%",
-        result.hg19_match_rate,
-        result.hg38_match_rate
+        result.hg19_match_rate, result.hg38_match_rate
     );
 
     tracing::info!(

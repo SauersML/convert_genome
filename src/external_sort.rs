@@ -5,8 +5,8 @@ use std::{
     io::{self, BufReader, BufWriter, Write},
 };
 
-use noodles::{bcf, vcf};
 use noodles::vcf::variant::io::Write as VariantRecordWrite;
+use noodles::{bcf, vcf};
 use tempfile::NamedTempFile;
 
 use crate::dtc;
@@ -54,8 +54,15 @@ impl RecordOrder {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RecordSortKey {
-    Reference { idx: usize, pos: usize },
-    Natural { order: u32, name: String, pos: usize },
+    Reference {
+        idx: usize,
+        pos: usize,
+    },
+    Natural {
+        order: u32,
+        name: String,
+        pos: usize,
+    },
 }
 
 impl Ord for RecordSortKey {
@@ -136,8 +143,7 @@ impl SpillReader {
                 Ok(Self::Vcf { reader, header })
             }
             SortFormat::Bcf => {
-                let mut reader =
-                    bcf::io::reader::Builder::default().build_from_reader(reader)?;
+                let mut reader = bcf::io::reader::Builder::default().build_from_reader(reader)?;
                 let header = reader.read_header()?;
                 Ok(Self::Bcf { reader, header })
             }
@@ -254,11 +260,7 @@ pub struct RecordMergeIter {
 }
 
 impl RecordMergeIter {
-    fn new(
-        spills: Vec<NamedTempFile>,
-        format: SortFormat,
-        order: RecordOrder,
-    ) -> io::Result<Self> {
+    fn new(spills: Vec<NamedTempFile>, format: SortFormat, order: RecordOrder) -> io::Result<Self> {
         let mut readers = Vec::with_capacity(spills.len());
         for spill in &spills {
             readers.push(SpillReader::open(spill, format)?);

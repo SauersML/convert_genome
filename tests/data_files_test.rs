@@ -2,8 +2,8 @@ use anyhow::{Context, Result, anyhow}; // Added anyhow
 use assert_fs::{TempDir, prelude::*};
 use convert_genome::{ConversionConfig, convert_dtc_file};
 use noodles::vcf::variant::record::samples::Sample; // Needed for iter() on record_buf::Sample
-use std::io::BufRead;
 use std::fs;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 

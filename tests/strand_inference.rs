@@ -108,8 +108,7 @@ fn test_infer_ambiguous_skips() {
     // If all skipped, strand inference is fail-closed (tested < 50)
     let err = infer_strand_lock(&records, &reference).unwrap_err();
     assert!(
-        err.to_string()
-            .contains("Too few informative SNPs"),
+        err.to_string().contains("Too few informative SNPs"),
         "unexpected error: {err}"
     );
 }

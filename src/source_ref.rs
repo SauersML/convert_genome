@@ -191,7 +191,7 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
                 "expanding check_build cached reference"
             );
             decompress_gzip_to_path(&check_build_gz, &reference_path)?;
-            
+
             // Open once to generate .fai index, which noodles will cache next to the .fa file
             ReferenceGenome::open(&reference_path, None).with_context(|| {
                 format!(
@@ -199,7 +199,7 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
                     reference_path.display()
                 )
             })?;
-            
+
             // Now return with the cached index
             let fai_path = reference_path.with_extension("fa.fai");
             return ReferenceGenome::open(&reference_path, Some(fai_path)).with_context(|| {
@@ -247,7 +247,7 @@ pub fn load_source_reference(build: &str) -> Result<ReferenceGenome> {
             reference_path.display()
         )
     })?;
-    
+
     // Now return with the cached index
     let fai_path = reference_path.with_extension("fa.fai");
     ReferenceGenome::open(&reference_path, Some(fai_path)).with_context(|| {

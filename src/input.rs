@@ -414,9 +414,7 @@ pub struct VcfSource {
 
 impl VcfSource {
     /// Create a new VcfSource using natural chromosome ordering (no reference required)
-    pub fn new_without_reference<R: BufRead>(
-        mut reader: vcf::io::Reader<R>,
-    ) -> io::Result<Self> {
+    pub fn new_without_reference<R: BufRead>(mut reader: vcf::io::Reader<R>) -> io::Result<Self> {
         let header = reader.read_header()?;
         let max_records = get_max_records_limit();
         let mut parse_errors = 0;

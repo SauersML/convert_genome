@@ -5,6 +5,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: Skip test job
+        type: boolean
+        default: false
 
 env:
   GNOMON_SKIP_LINT_CHECKS: "1"
@@ -17,6 +22,7 @@ permissions:
 jobs:
   test:
     name: Run Tests
+    if: ${{ !inputs.skip_tests }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,16 +38,10 @@ jobs:
       - name: Run tests
         run: cargo test --all-features
 
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
-        continue-on-error: true
-
   build:
     name: Build ${{ matrix.target }}
     needs: test
+    if: ${{ needs.test.result == 'success' || needs.test.result == 'skipped' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

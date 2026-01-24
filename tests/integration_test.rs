@@ -2,9 +2,9 @@ use std::{fs, path::PathBuf};
 
 use anyhow::Result;
 use assert_fs::{TempDir, prelude::*};
+use convert_genome::input::InputFormat;
 use convert_genome::reference::ReferenceGenome;
 use convert_genome::{ConversionConfig, ConversionSummary, OutputFormat, convert_dtc_file};
-use convert_genome::input::InputFormat;
 use noodles::bcf::io::reader::Builder as BcfReaderBuilder;
 use noodles::vcf;
 use noodles::vcf::variant::record::samples::Sample;
@@ -24,18 +24,14 @@ fn decode_gt_indices_from_value(
                 }
             })
             .collect(),
-        vcf::variant::record::samples::series::Value::Genotype(geno) => geno
-            .iter()
-            .map(|a| a.ok().and_then(|a| a.0))
-            .collect(),
+        vcf::variant::record::samples::series::Value::Genotype(geno) => {
+            geno.iter().map(|a| a.ok().and_then(|a| a.0)).collect()
+        }
         _ => vec![],
     }
 }
 
-fn gt_alleles_for_record(
-    record: &vcf::variant::RecordBuf,
-    header: &vcf::Header,
-) -> Vec<String> {
+fn gt_alleles_for_record(record: &vcf::variant::RecordBuf, header: &vcf::Header) -> Vec<String> {
     let ref_base = record.reference_bases().to_string().to_uppercase();
     let alts: Vec<String> = record
         .alternate_bases()

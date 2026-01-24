@@ -25,7 +25,8 @@ use noodles::vcf::{
         },
     },
     variant::{
-        io::Write as VariantRecordWrite, record::samples::keys::key as format_key,
+        io::Write as VariantRecordWrite,
+        record::samples::keys::key as format_key,
         record::samples::series::value::genotype::Phasing,
         record_buf::{RecordBuf, Samples, samples::sample::Value},
     },
@@ -325,23 +326,27 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         // Initialize 'reference' for input validation/standardization
         // Initialize 'reference' (Target Reference) for output/validation/standardization
         if reference.is_none() {
-             // 1. Try user-provided FASTA
+            // 1. Try user-provided FASTA
             if let Some(ref fasta_path) = config.reference_fasta {
                 reference = Some(
                     ReferenceGenome::open(fasta_path, config.reference_fai.clone())
                         .with_context(|| "failed to open reference genome")?,
                 );
             } else {
-                 // 2. If no user FASTA, but we need one (e.g. for liftover target validation),
-                 // try to load standard reference for the TARGET assembly.
-                 // This mirrors how we load source reference, but for the target.
-                 match crate::source_ref::load_source_reference(&config.assembly) {
-                     Ok(r) => reference = Some(r),
-                     Err(e) => {
-                         // Only soft-fail here; hard failure happens below if it was strictly required.
-                         tracing::debug!("Could not auto-load target reference for {}: {}", config.assembly, e);
-                     }
-                 }
+                // 2. If no user FASTA, but we need one (e.g. for liftover target validation),
+                // try to load standard reference for the TARGET assembly.
+                // This mirrors how we load source reference, but for the target.
+                match crate::source_ref::load_source_reference(&config.assembly) {
+                    Ok(r) => reference = Some(r),
+                    Err(e) => {
+                        // Only soft-fail here; hard failure happens below if it was strictly required.
+                        tracing::debug!(
+                            "Could not auto-load target reference for {}: {}",
+                            config.assembly,
+                            e
+                        );
+                    }
+                }
             }
         }
 
@@ -838,15 +843,13 @@ where
                                 let mut info = final_record.info().clone();
                                 if merged_alts != record_alts {
                                     let infos = ctx.header.infos();
-                                    info.as_mut().retain(|key, _| {
-                                        match infos.get(key) {
-                                            Some(definition) => !matches!(
-                                                definition.number(),
-                                                Number::AlternateBases
-                                                    | Number::ReferenceAlternateBases
-                                            ),
-                                            None => true,
-                                        }
+                                    info.as_mut().retain(|key, _| match infos.get(key) {
+                                        Some(definition) => !matches!(
+                                            definition.number(),
+                                            Number::AlternateBases
+                                                | Number::ReferenceAlternateBases
+                                        ),
+                                        None => true,
                                     });
                                 }
 
@@ -960,7 +963,9 @@ fn normalize_sample_values(record: &mut RecordBuf) {
     }
 }
 
-fn genotype_to_string(genotype: &noodles::vcf::variant::record_buf::samples::sample::value::Genotype) -> String {
+fn genotype_to_string(
+    genotype: &noodles::vcf::variant::record_buf::samples::sample::value::Genotype,
+) -> String {
     let alleles = genotype.as_ref();
     if alleles.is_empty() {
         return String::from(".");
@@ -1570,8 +1575,17 @@ mod tests {
 
     #[test]
     fn determine_ploidy_handles_unknown_sex() {
-        assert_eq!(determine_ploidy("1", 100, Sex::Unknown, None), Ploidy::Diploid);
-        assert_eq!(determine_ploidy("X", 100, Sex::Unknown, None), Ploidy::Diploid);
-        assert_eq!(determine_ploidy("Y", 100, Sex::Unknown, None), Ploidy::Haploid);
+        assert_eq!(
+            determine_ploidy("1", 100, Sex::Unknown, None),
+            Ploidy::Diploid
+        );
+        assert_eq!(
+            determine_ploidy("X", 100, Sex::Unknown, None),
+            Ploidy::Diploid
+        );
+        assert_eq!(
+            determine_ploidy("Y", 100, Sex::Unknown, None),
+            Ploidy::Haploid
+        );
     }
 }
