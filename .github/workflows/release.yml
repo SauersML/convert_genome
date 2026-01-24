@@ -22,7 +22,7 @@ permissions:
 jobs:
   test:
     name: Run Tests
-    if: ${{ !inputs.skip_tests }}
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_tests }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +41,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: test
-    if: ${{ needs.test.result == 'success' || needs.test.result == 'skipped' }}
+    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
