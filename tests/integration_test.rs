@@ -4,6 +4,7 @@ use anyhow::Result;
 use assert_fs::{TempDir, prelude::*};
 use convert_genome::reference::ReferenceGenome;
 use convert_genome::{ConversionConfig, ConversionSummary, OutputFormat, convert_dtc_file};
+use convert_genome::input::InputFormat;
 use noodles::bcf::io::reader::Builder as BcfReaderBuilder;
 use noodles::vcf;
 use noodles::vcf::variant::record::samples::Sample;
@@ -95,6 +96,13 @@ fn write_panel_vcf_single_alt(dir: &TempDir) -> Result<PathBuf> {
 fn write_reference_2000(dir: &TempDir) -> Result<PathBuf> {
     let fasta = dir.child("ref.fa");
     let seq: String = std::iter::repeat('T').take(2000).collect();
+    fasta.write_str(&format!(">1\n{}\n", seq))?;
+    Ok(fasta.path().to_path_buf())
+}
+
+fn write_reference_with_base(dir: &TempDir, base: char, len: usize) -> Result<PathBuf> {
+    let fasta = dir.child("ref.fa");
+    let seq: String = std::iter::repeat(base).take(len).collect();
     fasta.write_str(&format!(">1\n{}\n", seq))?;
     Ok(fasta.path().to_path_buf())
 }
@@ -369,5 +377,47 @@ fn preserves_one_panel_alt_and_one_private_alt_with_panel() -> Result<()> {
     }
 
     assert!(found, "did not find chr1:1500 in output VCF");
+    Ok(())
+}
+
+#[test]
+fn standardize_outputs_sorted_positions() -> Result<()> {
+    let temp = TempDir::new()?;
+    let reference = write_reference_with_base(&temp, 'A', 2000)?;
+    let input = write_dtc(
+        &temp,
+        "##fileformat=VCFv4.2\n\
+##contig=<ID=1,length=2000>\n\
+##contig=<ID=chr1,length=2000>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n\
+1\t20\t.\tA\tG\t.\t.\t.\tGT\t0/1\n\
+chr1\t10\t.\tA\tG\t.\t.\t.\tGT\t0/1\n",
+    )?;
+
+    let vcf_path = temp.child("out_standardize_sorted.vcf");
+    let mut config = base_config(input, reference, vcf_path.path().to_path_buf());
+    config.input_format = InputFormat::Vcf;
+    config.standardize = true;
+    convert_dtc_file(config)?;
+
+    let mut reader = vcf::io::reader::Builder::default().build_from_path(vcf_path.path())?;
+    let header = reader.read_header()?;
+
+    let mut last_pos: Option<usize> = None;
+    for result in reader.record_bufs(&header) {
+        let record = result?;
+        assert_eq!(record.reference_sequence_name(), "1");
+        let pos = usize::from(record.variant_start().expect("missing pos"));
+        if let Some(prev) = last_pos {
+            assert!(
+                pos >= prev,
+                "positions not sorted after standardize: {} then {}",
+                prev,
+                pos
+            );
+        }
+        last_pos = Some(pos);
+    }
+
     Ok(())
 }

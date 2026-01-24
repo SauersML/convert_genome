@@ -4,10 +4,6 @@ on:
   push:
     branches:
       - main
-      - master
-    paths:
-      - 'Cargo.toml'
-      - '**/*.rs'
   workflow_dispatch:
 
 env:

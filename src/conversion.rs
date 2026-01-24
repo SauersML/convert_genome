@@ -386,6 +386,12 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             tracing::info!(panel = %panel_path.display(), "loading reference panel");
             let panel_index = crate::panel::PanelIndex::load(panel_path)
                 .with_context(|| format!("failed to load panel {}", panel_path.display()))?;
+            if panel_index.is_empty() {
+                return Err(anyhow!(
+                    "Panel provided but no sites were loaded from {}",
+                    panel_path.display()
+                ));
+            }
             tracing::info!(sites = panel_index.len(), "panel loaded");
             Some(std::cell::RefCell::new(crate::panel::PaddedPanel::new(
                 panel_index,
