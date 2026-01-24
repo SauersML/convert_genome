@@ -682,7 +682,7 @@ where
         match result {
             Ok(record) => {
                 // Apply standardization if requested
-                let final_record = if ctx.config.standardize {
+                let mut final_record = if ctx.config.standardize {
                     match standardize_record(
                         &record,
                         ctx.reference.expect("reference required for standardize"),
@@ -720,15 +720,73 @@ where
 
                     // Harmonize alleles against panel (handles strand flips)
                     let mut panel_borrow = panel_cell.borrow_mut();
-                    // Called for side effects: registers alleles with panel for padding
-                    if let Err(e) = crate::harmonize::harmonize_alleles(
+                    // Capture allele indices for remapping + register alleles with panel for padding
+                    let harmonized_indices = match crate::harmonize::harmonize_alleles(
                         &all_input_alleles,
                         &ref_base,
                         &chrom,
                         pos,
                         &mut panel_borrow,
                     ) {
-                        tracing::debug!(chrom = %chrom, pos = pos, error = %e, "allele harmonization failed");
+                        Ok(indices) => Some(indices),
+                        Err(e) => {
+                            tracing::debug!(
+                                chrom = %chrom,
+                                pos = pos,
+                                error = %e,
+                                "allele harmonization failed"
+                            );
+                            None
+                        }
+                    };
+
+                    if let Some(indices) = harmonized_indices {
+                        if let Some(site) = panel_borrow.get_original(&chrom, pos) {
+                            let merged_alts = crate::harmonize::get_merged_alts(
+                                site,
+                                panel_borrow.added_alts(&site.chrom, pos),
+                            );
+
+                            let mut mapping = std::collections::HashMap::new();
+                            for (old_idx, new_idx) in indices.iter().enumerate() {
+                                mapping.insert(old_idx, *new_idx);
+                            }
+
+                            let samples = if mapping.iter().any(|(old, new)| old != new) {
+                                remap_sample_genotypes(final_record.samples(), &mapping)
+                            } else {
+                                final_record.samples().clone()
+                            };
+
+                            let pos_val = match final_record.variant_start() {
+                                Some(p) => p,
+                                None => {
+                                    summary.reference_failures += 1;
+                                    continue;
+                                }
+                            };
+
+                            let mut builder = RecordBuf::builder()
+                                .set_reference_sequence_name(
+                                    final_record.reference_sequence_name(),
+                                )
+                                .set_variant_start(pos_val)
+                                .set_ids(final_record.ids().clone())
+                                .set_reference_bases(final_record.reference_bases().to_string())
+                                .set_info(final_record.info().clone())
+                                .set_alternate_bases(
+                                    noodles::vcf::variant::record_buf::AlternateBases::from(
+                                        merged_alts,
+                                    ),
+                                )
+                                .set_samples(samples);
+
+                            if let Some(qual) = final_record.quality_score() {
+                                builder = builder.set_quality_score(qual);
+                            }
+
+                            final_record = builder.build();
+                        }
                     }
                 }
 
