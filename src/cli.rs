@@ -15,6 +15,7 @@ use crate::{
 pub enum Sex {
     Male,
     Female,
+    Unknown,
 }
 
 #[derive(Debug, Parser)]
