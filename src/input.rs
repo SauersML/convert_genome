@@ -5,6 +5,9 @@ use tracing;
 
 use crate::conversion::{ConversionConfig, Ploidy, determine_ploidy, format_genotype};
 use crate::dtc::{self, Allele as DtcAllele, Record as DtcRecord};
+use crate::external_sort::{
+    DtcExternalSorter, DtcOrder, RecordExternalSorter, RecordOrder, SortFormat, SortedRecordIter,
+};
 use crate::reference::ReferenceGenome;
 use clap::ValueEnum;
 
@@ -87,7 +90,7 @@ impl<T: VariantSource + ?Sized> VariantSource for Box<T> {
 /// Adapter for reading DTC (23andMe) files.
 /// Buffers and sorts raw records to ensure cache locality and minimize memory usage.
 pub struct DtcSource {
-    records: std::vec::IntoIter<DtcRecord>,
+    records: crate::external_sort::DtcSortedIter,
     reference: Option<ReferenceGenome>,
     config: ConversionConfig,
     header_keys: Keys,
@@ -102,14 +105,20 @@ impl DtcSource {
         reference: Option<ReferenceGenome>,
         config: ConversionConfig,
         inferred_strand: Option<crate::source_ref::InferredStrand>,
-    ) -> Self {
+    ) -> io::Result<Self> {
         let keys: Keys = vec![String::from("GT")].into_iter().collect();
 
         // Get optional limit from environment
         let max_records = get_max_records_limit();
 
+        let order = if let Some(ref r) = reference {
+            DtcOrder::from_reference(r)
+        } else {
+            DtcOrder::Natural
+        };
+        let mut sorter = DtcExternalSorter::new(order);
+
         // Read records (with optional limit for OOM protection)
-        let mut raw_records = Vec::new();
         let mut parse_errors = 0;
         let mut records_read = 0;
 
@@ -122,7 +131,7 @@ impl DtcSource {
             }
             match res {
                 Ok(rec) => {
-                    raw_records.push(rec);
+                    sorter.push(rec)?;
                     records_read += 1;
                 }
                 Err(e) => {
@@ -132,29 +141,17 @@ impl DtcSource {
             }
         }
 
-        // Sort by chromosome index and position to optimize ReferenceGenome cache usage
-        // If no reference, sort by natural order of chromosome name
-        if let Some(ref r) = reference {
-            raw_records.sort_by_cached_key(|rec| {
-                let idx = r.contig_index(&rec.chromosome).unwrap_or(usize::MAX);
-                (idx, rec.position)
-            });
-        } else {
-            raw_records.sort_by_cached_key(|rec| {
-                let (idx, _) = natural_contig_order(&rec.chromosome);
-                (idx, rec.position)
-            });
-        }
+        let records = sorter.finish()?;
 
-        Self {
-            records: raw_records.into_iter(),
+        Ok(Self {
+            records,
             reference,
             config,
             header_keys: keys,
             initial_parse_errors: parse_errors,
             initial_stats_synced: false,
             inferred_strand: inferred_strand.unwrap_or(crate::source_ref::InferredStrand::Forward),
-        }
+        })
     }
 
     fn convert_record(
@@ -409,23 +406,23 @@ use noodles::vcf;
 use std::io::BufRead;
 
 /// Adapter for reading VCF files.
-/// Buffers and sorts records by contig index and position.
 pub struct VcfSource {
-    records: std::vec::IntoIter<RecordBuf>,
+    records: SortedRecordIter,
     initial_parse_errors: usize,
     initial_stats_synced: bool,
 }
 
 impl VcfSource {
     /// Create a new VcfSource using natural chromosome ordering (no reference required)
-    pub fn new_without_reference<R: BufRead>(mut reader: vcf::io::Reader<R>) -> io::Result<Self> {
+    pub fn new_without_reference<R: BufRead>(
+        mut reader: vcf::io::Reader<R>,
+    ) -> io::Result<Self> {
         let header = reader.read_header()?;
-
         let max_records = get_max_records_limit();
-
-        let mut raw_records = Vec::new();
         let mut parse_errors = 0;
         let mut records_read = 0;
+        let mut sorter =
+            RecordExternalSorter::new(header.clone(), SortFormat::Vcf, RecordOrder::Natural);
 
         for result in reader.record_bufs(&header) {
             if let Some(limit) = max_records
@@ -436,7 +433,7 @@ impl VcfSource {
             }
             match result {
                 Ok(record) => {
-                    raw_records.push(record);
+                    sorter.push(record)?;
                     records_read += 1;
                 }
                 Err(e) => {
@@ -446,15 +443,10 @@ impl VcfSource {
             }
         }
 
-        // Sort using natural chromosome order (no reference needed)
-        raw_records.sort_by_cached_key(|r| {
-            let order = natural_contig_order(r.reference_sequence_name());
-            let pos = r.variant_start().map(usize::from).unwrap_or(0);
-            (order, pos)
-        });
+        let records = sorter.finish()?;
 
         Ok(Self {
-            records: raw_records.into_iter(),
+            records,
             initial_parse_errors: parse_errors,
             initial_stats_synced: false,
         })
@@ -465,13 +457,11 @@ impl VcfSource {
         reference: &ReferenceGenome,
     ) -> io::Result<Self> {
         let header = reader.read_header()?;
-
-        // Get optional limit from environment
         let max_records = get_max_records_limit();
-
-        let mut raw_records = Vec::new();
         let mut parse_errors = 0;
         let mut records_read = 0;
+        let order = RecordOrder::from_reference(reference);
+        let mut sorter = RecordExternalSorter::new(header.clone(), SortFormat::Vcf, order);
 
         for result in reader.record_bufs(&header) {
             if let Some(limit) = max_records
@@ -482,7 +472,7 @@ impl VcfSource {
             }
             match result {
                 Ok(record) => {
-                    raw_records.push(record);
+                    sorter.push(record)?;
                     records_read += 1;
                 }
                 Err(e) => {
@@ -492,17 +482,10 @@ impl VcfSource {
             }
         }
 
-        // Sort by contig index and position
-        raw_records.sort_by_cached_key(|r| {
-            let idx = reference
-                .contig_index(r.reference_sequence_name())
-                .unwrap_or(usize::MAX);
-            let pos = r.variant_start().map(usize::from).unwrap_or(0);
-            (idx, pos)
-        });
+        let records = sorter.finish()?;
 
         Ok(Self {
-            records: raw_records.into_iter(),
+            records,
             initial_parse_errors: parse_errors,
             initial_stats_synced: false,
         })
@@ -521,7 +504,7 @@ impl VariantSource for VcfSource {
 
         self.records.next().map(|record| {
             summary.total_records += 1;
-            Ok(record)
+            record
         })
     }
 }
@@ -533,9 +516,8 @@ impl VariantSource for VcfSource {
 use noodles::bcf;
 
 /// Adapter for reading BCF files.
-/// Buffers and sorts records by contig index and position.
 pub struct BcfSource {
-    records: std::vec::IntoIter<RecordBuf>,
+    records: SortedRecordIter,
     initial_parse_errors: usize,
     initial_stats_synced: bool,
 }
@@ -546,12 +528,11 @@ impl BcfSource {
         mut reader: bcf::io::Reader<R>,
     ) -> io::Result<Self> {
         let header = reader.read_header()?;
-
         let max_records = get_max_records_limit();
-
-        let mut raw_records = Vec::new();
         let mut parse_errors = 0;
         let mut records_read = 0;
+        let mut sorter =
+            RecordExternalSorter::new(header.clone(), SortFormat::Bcf, RecordOrder::Natural);
 
         for result in reader.record_bufs(&header) {
             if let Some(limit) = max_records
@@ -562,7 +543,7 @@ impl BcfSource {
             }
             match result {
                 Ok(record) => {
-                    raw_records.push(record);
+                    sorter.push(record)?;
                     records_read += 1;
                 }
                 Err(e) => {
@@ -572,15 +553,10 @@ impl BcfSource {
             }
         }
 
-        // Sort using natural chromosome order (no reference needed)
-        raw_records.sort_by_cached_key(|r| {
-            let order = natural_contig_order(r.reference_sequence_name());
-            let pos = r.variant_start().map(usize::from).unwrap_or(0);
-            (order, pos)
-        });
+        let records = sorter.finish()?;
 
         Ok(Self {
-            records: raw_records.into_iter(),
+            records,
             initial_parse_errors: parse_errors,
             initial_stats_synced: false,
         })
@@ -591,13 +567,11 @@ impl BcfSource {
         reference: &ReferenceGenome,
     ) -> io::Result<Self> {
         let header = reader.read_header()?;
-
-        // Get optional limit from environment
         let max_records = get_max_records_limit();
-
-        let mut raw_records = Vec::new();
         let mut parse_errors = 0;
         let mut records_read = 0;
+        let order = RecordOrder::from_reference(reference);
+        let mut sorter = RecordExternalSorter::new(header.clone(), SortFormat::Bcf, order);
 
         for result in reader.record_bufs(&header) {
             if let Some(limit) = max_records
@@ -608,7 +582,7 @@ impl BcfSource {
             }
             match result {
                 Ok(record) => {
-                    raw_records.push(record);
+                    sorter.push(record)?;
                     records_read += 1;
                 }
                 Err(e) => {
@@ -618,17 +592,10 @@ impl BcfSource {
             }
         }
 
-        // Sort by contig index and position
-        raw_records.sort_by_cached_key(|r| {
-            let idx = reference
-                .contig_index(r.reference_sequence_name())
-                .unwrap_or(usize::MAX);
-            let pos = r.variant_start().map(usize::from).unwrap_or(0);
-            (idx, pos)
-        });
+        let records = sorter.finish()?;
 
         Ok(Self {
-            records: raw_records.into_iter(),
+            records,
             initial_parse_errors: parse_errors,
             initial_stats_synced: false,
         })
@@ -647,7 +614,7 @@ impl VariantSource for BcfSource {
 
         self.records.next().map(|record| {
             summary.total_records += 1;
-            Ok(record)
+            record
         })
     }
 }

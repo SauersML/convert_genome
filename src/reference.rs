@@ -122,6 +122,10 @@ impl ReferenceGenome {
         self.alias_to_index.get(key.as_ref()).copied()
     }
 
+    pub fn contig_index_map(&self) -> HashMap<String, usize> {
+        self.alias_to_index.clone()
+    }
+
     #[doc(hidden)]
     pub fn cache_len(&self) -> usize {
         self.cache.lock().len()

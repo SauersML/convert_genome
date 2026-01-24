@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow}; // Added anyhow
 use assert_fs::{TempDir, prelude::*};
 use convert_genome::{ConversionConfig, convert_dtc_file};
 use noodles::vcf::variant::record::samples::Sample; // Needed for iter() on record_buf::Sample
+use std::io::BufRead;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -139,8 +140,23 @@ fn test_liftover_fidelity_hg38() -> Result<()> {
         let mut ref_base_matches = 0;
 
         // Use record_bufs for easier sample access
-        for result in reader.record_bufs(&header) {
-            let record = result?;
+        let mut last_seen: Option<(String, usize)> = None;
+        let output_path = output.path().to_path_buf();
+        for (idx, result) in reader.record_bufs(&header).enumerate() {
+            let record = match result {
+                Ok(record) => record,
+                Err(e) => {
+                    println!(
+                        "  Record parse failed at index {} (last seen {:?}): {}",
+                        idx + 1,
+                        last_seen.as_ref().map(|(c, p)| format!("{c}:{p}")),
+                        e
+                    );
+                    println!("  Output file: {}", output_path.display());
+                    dump_record_line(&output_path, idx + 1);
+                    return Err(e.into());
+                }
+            };
 
             // Check REF base integrity (sanity check)
             let chrom = record.reference_sequence_name().to_string();
@@ -150,6 +166,7 @@ fn test_liftover_fidelity_hg38() -> Result<()> {
                 .variant_start()
                 .ok_or_else(|| anyhow!("missing pos"))?;
             let pos = usize::from(pos_raw);
+            last_seen = Some((chrom.clone(), pos));
 
             // hg38_ref lookup
             if let Ok(ref_base) = hg38_ref.base(&chrom, pos as u64)
@@ -215,4 +232,51 @@ fn test_liftover_fidelity_hg38() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn dump_record_line(path: &Path, record_index: usize) {
+    let mut prev = None;
+    let mut curr = None;
+    let mut next = None;
+    let mut seen = 0usize;
+
+    if let Ok(file) = fs::File::open(path) {
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines().flatten() {
+            if line.starts_with('#') {
+                continue;
+            }
+            seen += 1;
+            if seen == record_index.saturating_sub(1) {
+                prev = Some(line);
+            } else if seen == record_index {
+                curr = Some(line);
+            } else if seen == record_index + 1 {
+                next = Some(line);
+                break;
+            }
+        }
+    }
+
+    println!("  Record context for index {}:", record_index);
+    if let Some(line) = prev {
+        println!("    prev: {}", line);
+    }
+    if let Some(line) = curr {
+        let cols: Vec<&str> = line.split('\t').collect();
+        println!("    curr: {}", line);
+        println!("    curr columns: {}", cols.len());
+        if cols.len() >= 9 {
+            println!("    curr FORMAT: {:?}", cols[8]);
+            if cols.len() >= 10 {
+                println!("    curr SAMPLE: {:?}", cols[9]);
+                println!("    curr SAMPLE bytes: {:?}", cols[9].as_bytes());
+            }
+        }
+    } else {
+        println!("    curr: <not found>");
+    }
+    if let Some(line) = next {
+        println!("    next: {}", line);
+    }
 }

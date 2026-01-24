@@ -26,7 +26,8 @@ use noodles::vcf::{
     },
     variant::{
         io::Write as VariantRecordWrite, record::samples::keys::key as format_key,
-        record_buf::RecordBuf,
+        record::samples::series::value::genotype::Phasing,
+        record_buf::{RecordBuf, Samples, samples::sample::Value},
     },
 };
 // rayon removed
@@ -37,6 +38,7 @@ use time::{OffsetDateTime, macros::format_description};
 use crate::{
     ConversionSummary,
     dtc::{self, Allele as DtcAllele, parse_genotype},
+    external_sort::{RecordExternalSorter, RecordOrder, SortFormat},
     liftover::{ChainRegistry, LiftoverAdapter},
     plink::PlinkWriter,
     reference::{ReferenceError, ReferenceGenome},
@@ -423,7 +425,8 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 dtc_reference,
                 source_config,
                 inferred_strand,
-            );
+            )
+            .with_context(|| "failed to initialize DTC source")?;
             Box::new(source)
         }
         crate::input::InputFormat::Vcf => {
@@ -479,7 +482,8 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                         dtc_reference,
                         source_config,
                         inferred_strand,
-                    );
+                    )
+                    .with_context(|| "failed to initialize DTC source")?;
                     Box::new(source)
                 }
                 crate::input::InputFormat::Vcf => {
@@ -675,8 +679,20 @@ where
     S: crate::input::VariantSource,
     W: VariantWriter,
 {
-    let mut buffered_records: Vec<(usize, usize, usize, RecordBuf)> = Vec::new();
-    let mut ordinal: usize = 0;
+    let mut sorter = if ctx.needs_sort {
+        let order = if let Some(reference) = ctx.reference {
+            RecordOrder::from_reference(reference)
+        } else {
+            RecordOrder::Natural
+        };
+        let format = match ctx.config.output_format {
+            OutputFormat::Bcf => SortFormat::Bcf,
+            OutputFormat::Vcf | OutputFormat::Plink => SortFormat::Vcf,
+        };
+        Some(RecordExternalSorter::new(ctx.header.clone(), format, order))
+    } else {
+        None
+    };
 
     while let Some(result) = source.next_variant(summary) {
         match result {
@@ -824,21 +840,13 @@ where
                     }
                 }
 
+                normalize_sample_values(&mut final_record);
                 summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
 
-                if ctx.needs_sort {
-                    let chrom_name = final_record.reference_sequence_name();
-                    let contig_key = if let Some(r) = ctx.reference {
-                        r.contig_index(chrom_name).unwrap_or(usize::MAX)
-                    } else {
-                        let (idx, _) = crate::input::natural_contig_order(chrom_name);
-                        idx as usize
-                    };
-
-                    let pos_key = final_record.variant_start().map(usize::from).unwrap_or(0);
-
-                    buffered_records.push((contig_key, pos_key, ordinal, final_record));
-                    ordinal = ordinal.saturating_add(1);
+                if let Some(sorter) = sorter.as_mut() {
+                    sorter
+                        .push(final_record)
+                        .context("failed to spill sorted records")?;
                 } else {
                     writer
                         .write_variant(ctx.header, &final_record)
@@ -855,12 +863,13 @@ where
         }
     }
 
-    if ctx.needs_sort {
-        buffered_records.sort_by(|(a_contig, a_pos, a_ord, _), (b_contig, b_pos, b_ord, _)| {
-            (a_contig, a_pos, a_ord).cmp(&(b_contig, b_pos, b_ord))
-        });
-
-        for (_, _, _, record) in buffered_records {
+    if let Some(sorter) = sorter {
+        let mut sorted_records = sorter
+            .finish()
+            .context("failed to finalize external sorter")?;
+        while let Some(record) = sorted_records.next() {
+            let mut record = record.context("failed to read sorted spill record")?;
+            normalize_sample_values(&mut record);
             writer
                 .write_variant(ctx.header, &record)
                 .context("failed to write variant record")?;
@@ -868,6 +877,74 @@ where
     }
 
     Ok(())
+}
+
+fn normalize_sample_values(record: &mut RecordBuf) {
+    let keys_len = record.samples().keys().as_ref().len();
+    if keys_len == 0 {
+        return;
+    }
+
+    let mut needs_fix = false;
+    let mut new_values = Vec::new();
+
+    for sample in record.samples().values() {
+        let values = sample.values();
+        if values.len() != keys_len {
+            needs_fix = true;
+        }
+
+        let mut filled = Vec::with_capacity(keys_len);
+        for idx in 0..keys_len {
+            let value = values.get(idx).cloned().unwrap_or(None);
+            let cleaned = match value {
+                Some(Value::String(ref s)) if s.is_empty() => {
+                    needs_fix = true;
+                    None
+                }
+                Some(Value::Genotype(ref gt)) => {
+                    needs_fix = true;
+                    Some(Value::String(genotype_to_string(gt)))
+                }
+                other => other,
+            };
+            filled.push(cleaned);
+        }
+        new_values.push(filled);
+    }
+
+    if new_values.is_empty() {
+        needs_fix = true;
+        new_values.push(vec![None; keys_len]);
+    }
+
+    if needs_fix {
+        let keys = record.samples().keys().clone();
+        *record.samples_mut() = Samples::new(keys, new_values);
+    }
+}
+
+fn genotype_to_string(genotype: &noodles::vcf::variant::record_buf::samples::sample::value::Genotype) -> String {
+    let alleles = genotype.as_ref();
+    if alleles.is_empty() {
+        return String::from(".");
+    }
+
+    let mut out = String::new();
+    for (idx, allele) in alleles.iter().enumerate() {
+        if idx > 0 {
+            let sep = match allele.phasing() {
+                Phasing::Phased => '|',
+                Phasing::Unphased => '/',
+            };
+            out.push(sep);
+        }
+        match allele.position() {
+            Some(pos) => out.push_str(&pos.to_string()),
+            None => out.push('.'),
+        }
+    }
+    out
 }
 
 // parse_genotype moved to dtc.rs

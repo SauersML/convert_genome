@@ -1496,8 +1496,8 @@ fn main() {
 
     // Skip lint checks during release builds or cross-compilation
     // (the grep crate won't be available in target deps during cross-compile)
-    if std::env::var("GNOMON_SKIP_LINT_CHECKS").is_ok() {
-        update_stage("skipping lint checks (GNOMON_SKIP_LINT_CHECKS set)");
+    if std::env::var("GNOMON_SKIP_LINT_CHECKS").is_ok() || std::env::var("DOCS_RS").is_ok() {
+        update_stage("skipping lint checks (GNOMON_SKIP_LINT_CHECKS or DOCS_RS set)");
         return;
     }
 

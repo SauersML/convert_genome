@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod conversion;
 pub mod dtc;
+pub mod external_sort;
 pub mod harmonize;
 pub mod inference;
 pub mod input;
