@@ -1,6 +1,6 @@
 [package]
 name = "convert_genome"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 authors = ["Convert Genome Contributors"]
 description = "Convert DTC, VCF, or BCF genome files to VCF, BCF, or PLINK 1.9"
