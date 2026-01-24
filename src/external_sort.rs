@@ -42,7 +42,12 @@ impl RecordOrder {
                     .get(record.reference_sequence_name())
                     .copied()
                     .unwrap_or(usize::MAX);
-                RecordSortKey::Reference { idx, pos }
+                if idx == usize::MAX {
+                    let (order, name) = natural_contig_order(record.reference_sequence_name());
+                    RecordSortKey::Natural { order, name, pos }
+                } else {
+                    RecordSortKey::Reference { idx, pos }
+                }
             }
             Self::Natural => {
                 let (order, name) = natural_contig_order(record.reference_sequence_name());
