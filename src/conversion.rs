@@ -716,7 +716,7 @@ where
 
                     // Build list of all input alleles: [REF, ALT1, ALT2...]
                     let mut all_input_alleles = vec![ref_base.clone()];
-                    all_input_alleles.extend(record_alts);
+                    all_input_alleles.extend(record_alts.iter().cloned());
 
                     // Harmonize alleles against panel (handles strand flips)
                     let mut panel_borrow = panel_cell.borrow_mut();
@@ -783,14 +783,30 @@ where
                                     }
                                 };
 
+                                let mut info = final_record.info().clone();
+                                if merged_alts != record_alts {
+                                    let infos = ctx.header.infos();
+                                    info.as_mut().retain(|key, _| {
+                                        match infos.get(key) {
+                                            Some(definition) => !matches!(
+                                                definition.number(),
+                                                Number::AlternateBases
+                                                    | Number::ReferenceAlternateBases
+                                            ),
+                                            None => true,
+                                        }
+                                    });
+                                }
+
                                 let mut builder = RecordBuf::builder()
                                     .set_reference_sequence_name(
                                         final_record.reference_sequence_name(),
                                     )
                                     .set_variant_start(pos_val)
                                     .set_ids(final_record.ids().clone())
+                                    .set_filters(final_record.filters().clone())
                                     .set_reference_bases(final_record.reference_bases().to_string())
-                                    .set_info(final_record.info().clone())
+                                    .set_info(info)
                                     .set_alternate_bases(
                                         noodles::vcf::variant::record_buf::AlternateBases::from(
                                             merged_alts,
