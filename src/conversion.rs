@@ -370,8 +370,8 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                     sex_inferred = true;
                 }
                 Err(e) => {
-                    tracing::warn!("Sex inference failed: {}. Defaulting to Female.", e);
-                    config.sex = Some(Sex::Female);
+                    tracing::warn!("Sex inference failed: {}. Defaulting to Unknown.", e);
+                    config.sex = Some(Sex::Unknown);
                     sex_inferred = true;
                 }
             }
@@ -742,50 +742,68 @@ where
 
                     if let Some(indices) = harmonized_indices {
                         if let Some(site) = panel_borrow.get_original(&chrom, pos) {
-                            let merged_alts = crate::harmonize::get_merged_alts(
-                                site,
-                                panel_borrow.added_alts(&site.chrom, pos),
-                            );
+                            let record_ref_len = final_record.reference_bases().len();
+                            let panel_ref_len = site.ref_allele.len();
+                            let panel_alts_same_len = site
+                                .alt_alleles
+                                .iter()
+                                .all(|alt| alt.len() == panel_ref_len);
+                            let record_alts_same_len = final_record
+                                .alternate_bases()
+                                .as_ref()
+                                .iter()
+                                .all(|alt| alt.len() == record_ref_len);
 
-                            let mut mapping = std::collections::HashMap::new();
-                            for (old_idx, new_idx) in indices.iter().enumerate() {
-                                mapping.insert(old_idx, *new_idx);
-                            }
+                            let should_inject_panel_alts = panel_ref_len == record_ref_len
+                                && panel_alts_same_len
+                                && record_alts_same_len;
 
-                            let samples = if mapping.iter().any(|(old, new)| old != new) {
-                                remap_sample_genotypes(final_record.samples(), &mapping)
-                            } else {
-                                final_record.samples().clone()
-                            };
+                            if should_inject_panel_alts {
+                                let merged_alts = crate::harmonize::get_merged_alts(
+                                    site,
+                                    panel_borrow.added_alts(&site.chrom, pos),
+                                );
 
-                            let pos_val = match final_record.variant_start() {
-                                Some(p) => p,
-                                None => {
-                                    summary.reference_failures += 1;
-                                    continue;
+                                let mut mapping = std::collections::HashMap::new();
+                                for (old_idx, new_idx) in indices.iter().enumerate() {
+                                    mapping.insert(old_idx, *new_idx);
                                 }
-                            };
 
-                            let mut builder = RecordBuf::builder()
-                                .set_reference_sequence_name(
-                                    final_record.reference_sequence_name(),
-                                )
-                                .set_variant_start(pos_val)
-                                .set_ids(final_record.ids().clone())
-                                .set_reference_bases(final_record.reference_bases().to_string())
-                                .set_info(final_record.info().clone())
-                                .set_alternate_bases(
-                                    noodles::vcf::variant::record_buf::AlternateBases::from(
-                                        merged_alts,
-                                    ),
-                                )
-                                .set_samples(samples);
+                                let samples = if mapping.iter().any(|(old, new)| old != new) {
+                                    remap_sample_genotypes(final_record.samples(), &mapping)
+                                } else {
+                                    final_record.samples().clone()
+                                };
 
-                            if let Some(qual) = final_record.quality_score() {
-                                builder = builder.set_quality_score(qual);
+                                let pos_val = match final_record.variant_start() {
+                                    Some(p) => p,
+                                    None => {
+                                        summary.reference_failures += 1;
+                                        continue;
+                                    }
+                                };
+
+                                let mut builder = RecordBuf::builder()
+                                    .set_reference_sequence_name(
+                                        final_record.reference_sequence_name(),
+                                    )
+                                    .set_variant_start(pos_val)
+                                    .set_ids(final_record.ids().clone())
+                                    .set_reference_bases(final_record.reference_bases().to_string())
+                                    .set_info(final_record.info().clone())
+                                    .set_alternate_bases(
+                                        noodles::vcf::variant::record_buf::AlternateBases::from(
+                                            merged_alts,
+                                        ),
+                                    )
+                                    .set_samples(samples);
+
+                                if let Some(qual) = final_record.quality_score() {
+                                    builder = builder.set_quality_score(qual);
+                                }
+
+                                final_record = builder.build();
                             }
-
-                            final_record = builder.build();
                         }
                     }
                 }
@@ -914,6 +932,8 @@ pub fn determine_ploidy(
         (c, _) if c != "X" && c != "Y" => Ploidy::Diploid,
         ("X", Sex::Female) => Ploidy::Diploid,
         ("Y", Sex::Female) => Ploidy::Zero,
+        ("X", Sex::Unknown) => Ploidy::Diploid,
+        ("Y", Sex::Unknown) => Ploidy::Haploid,
         ("Y", Sex::Male) => {
             if let Some(b) = boundaries {
                 if b.is_par(short_chrom, pos) {
@@ -1095,7 +1115,7 @@ pub fn standardize_record(
     let ploidy = determine_ploidy(
         &canonical_name,
         pos,
-        config.sex.unwrap_or(Sex::Female),
+        config.sex.unwrap_or(Sex::Unknown),
         config.par_boundaries.as_ref(),
     );
     if ploidy == Ploidy::Zero {
@@ -1417,5 +1437,12 @@ mod tests {
         assert!(!header.contigs().is_empty());
         assert!(header.other_records().contains_key("source"));
         assert!(header.other_records().contains_key("reference"));
+    }
+
+    #[test]
+    fn determine_ploidy_handles_unknown_sex() {
+        assert_eq!(determine_ploidy("1", 100, Sex::Unknown, None), Ploidy::Diploid);
+        assert_eq!(determine_ploidy("X", 100, Sex::Unknown, None), Ploidy::Diploid);
+        assert_eq!(determine_ploidy("Y", 100, Sex::Unknown, None), Ploidy::Haploid);
     }
 }

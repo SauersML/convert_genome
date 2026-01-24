@@ -61,6 +61,7 @@ impl PlinkWriter {
         let sex_code = match sex {
             Sex::Male => "1",
             Sex::Female => "2",
+            Sex::Unknown => "0",
         };
         // Phenotype -9 = missing
         writeln!(self.fam, "{0}\t{0}\t0\t0\t{1}\t-9", sample_id, sex_code)?;

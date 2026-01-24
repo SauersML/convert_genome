@@ -223,7 +223,7 @@ impl DtcSource {
         let ploidy = determine_ploidy(
             &canonical_name,
             position,
-            self.config.sex.unwrap_or(crate::cli::Sex::Female),
+            self.config.sex.unwrap_or(crate::cli::Sex::Unknown),
             self.config.par_boundaries.as_ref(),
         );
 

@@ -91,6 +91,7 @@ pub fn infer_sex_from_records(records: &[DtcRecord], build: &str) -> Result<Sex>
     match result.final_call {
         InferredSex::Male => Ok(Sex::Male),
         InferredSex::Female => Ok(Sex::Female),
+        InferredSex::Indeterminate => Ok(Sex::Unknown),
     }
 }
 
@@ -267,5 +268,32 @@ mod tests {
         assert!(!is_heterozygous("AA"));
         assert!(!is_heterozygous("--"));
         assert!(!is_heterozygous("A"));
+    }
+
+    #[test]
+    fn test_infer_sex_indeterminate_without_sex_chromosomes() {
+        let records = vec![
+            DtcRecord {
+                id: Some("rs1".to_string()),
+                chromosome: "1".to_string(),
+                position: 100,
+                genotype: "AA".to_string(),
+            },
+            DtcRecord {
+                id: Some("rs2".to_string()),
+                chromosome: "2".to_string(),
+                position: 200,
+                genotype: "GG".to_string(),
+            },
+            DtcRecord {
+                id: Some("rs3".to_string()),
+                chromosome: "3".to_string(),
+                position: 300,
+                genotype: "TT".to_string(),
+            },
+        ];
+
+        let sex = infer_sex_from_records(&records, "GRCh38").unwrap();
+        assert_eq!(sex, Sex::Unknown);
     }
 }

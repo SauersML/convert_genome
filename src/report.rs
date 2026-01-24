@@ -219,6 +219,18 @@ fn output_format_name(f: Option<OutputFormat>) -> String {
 fn sex_name(s: Option<Sex>) -> String {
     match s {
         Some(Sex::Male) => "male".to_string(),
-        Some(Sex::Female) | None => "female".to_string(),
+        Some(Sex::Female) => "female".to_string(),
+        Some(Sex::Unknown) | None => "indeterminate".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sex_name_maps_unknown() {
+        assert_eq!(sex_name(Some(Sex::Unknown)), "indeterminate");
+        assert_eq!(sex_name(None), "indeterminate");
     }
 }
