@@ -380,6 +380,36 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         }
     }
 
+    if !matches!(config.input_format, crate::input::InputFormat::Dtc) {
+        if reference.is_none() && (config.reference_fasta.is_some() || requires_reference) {
+            if let Some(ref fasta_path) = config.reference_fasta {
+                reference = Some(
+                    ReferenceGenome::open(fasta_path, config.reference_fai.clone())
+                        .with_context(|| "failed to open reference genome")?,
+                );
+            } else if requires_reference {
+                match crate::source_ref::load_source_reference(&config.assembly) {
+                    Ok(r) => reference = Some(r),
+                    Err(e) => {
+                        tracing::debug!(
+                            "Could not auto-load target reference for {}: {}",
+                            config.assembly,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        if reference.is_none() && requires_reference {
+            return Err(anyhow!(
+                "Reference FASTA (Target) is required for this input or when using --standardize/--panel.
+                Could not load standard reference for target assembly '{}'. Please provide --reference.",
+                config.assembly
+            ));
+        }
+    }
+
     // Load panel if provided
     let padded_panel: Option<std::cell::RefCell<crate::panel::PaddedPanel>> =
         if let Some(panel_path) = &config.panel {
@@ -529,7 +559,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         }
     };
 
-    let needs_sort = liftover_chain.is_some();
+    let needs_sort = liftover_chain.is_some() || config.standardize || config.panel.is_some();
 
     // Apply Liftover Adapter if active
     if let Some(chain) = liftover_chain {
