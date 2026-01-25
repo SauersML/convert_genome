@@ -57,12 +57,38 @@ pub fn write_padded_panel<P: AsRef<Path>>(
 
     let mut records_written = 0u64;
 
+    let chrom_rank = header
+        .contigs()
+        .keys()
+        .enumerate()
+        .map(|(i, c)| (c.to_string(), i))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut novel_sites: Vec<&PanelSite> = padded.novel_sites().collect();
+    novel_sites.sort_by(|a, b| compare_sites(a, b, &chrom_rank));
+    let mut next_novel_idx = 0usize;
+
     // Stream through original panel records
     for result in vcf_reader.record_bufs(&header) {
         let mut record = result?;
 
         let chrom = record.reference_sequence_name().to_string();
         let pos = record.variant_start().map(usize::from).unwrap_or(0) as u64;
+
+        // Emit novel sites that should come before this record
+        while let Some(site) = novel_sites.get(next_novel_idx) {
+            if compare_site_to_record(site, &chrom, pos, &chrom_rank) == std::cmp::Ordering::Less {
+                let mut novel_record = site_to_record(site)?;
+                if let Some(samples) = build_missing_samples(&header)? {
+                    *novel_record.samples_mut() = samples;
+                }
+                vcf_writer.write_variant_record(&header, &novel_record)?;
+                records_written += 1;
+                next_novel_idx += 1;
+            } else {
+                break;
+            }
+        }
 
         // Check if we need to add alleles to this site
         if let Some(added_alts) = padded.added_alts(&chrom, pos) {
@@ -106,7 +132,7 @@ pub fn write_padded_panel<P: AsRef<Path>>(
     if novel_count > 0 {
         tracing::info!("Writing {} novel sites...", novel_count);
 
-        for site in padded.novel_sites() {
+        for site in novel_sites.iter().skip(next_novel_idx) {
             let mut record = site_to_record(site)?;
             if let Some(samples) = build_missing_samples(&header)? {
                 *record.samples_mut() = samples;
@@ -124,6 +150,56 @@ pub fn write_padded_panel<P: AsRef<Path>>(
     );
 
     Ok(())
+}
+
+fn compare_sites(
+    a: &PanelSite,
+    b: &PanelSite,
+    chrom_rank: &std::collections::HashMap<String, usize>,
+) -> std::cmp::Ordering {
+    let a_rank = contig_rank(&a.chrom, chrom_rank);
+    let b_rank = contig_rank(&b.chrom, chrom_rank);
+    match a_rank.cmp(&b_rank) {
+        std::cmp::Ordering::Equal => match a.chrom.cmp(&b.chrom) {
+            std::cmp::Ordering::Equal => a.pos.cmp(&b.pos),
+            other => other,
+        },
+        other => other,
+    }
+}
+
+fn compare_site_to_record(
+    site: &PanelSite,
+    chrom: &str,
+    pos: u64,
+    chrom_rank: &std::collections::HashMap<String, usize>,
+) -> std::cmp::Ordering {
+    let site_rank = contig_rank(&site.chrom, chrom_rank);
+    let record_rank = contig_rank(chrom, chrom_rank);
+    match site_rank.cmp(&record_rank) {
+        std::cmp::Ordering::Equal => match site.chrom.as_str().cmp(chrom) {
+            std::cmp::Ordering::Equal => site.pos.cmp(&pos),
+            other => other,
+        },
+        other => other,
+    }
+}
+
+fn contig_rank(chrom: &str, chrom_rank: &std::collections::HashMap<String, usize>) -> usize {
+    if let Some(rank) = chrom_rank.get(chrom) {
+        return *rank;
+    }
+    if chrom.starts_with("chr") {
+        if let Some(rank) = chrom_rank.get(chrom.trim_start_matches("chr")) {
+            return *rank;
+        }
+    } else {
+        let alt = format!("chr{}", chrom);
+        if let Some(rank) = chrom_rank.get(&alt) {
+            return *rank;
+        }
+    }
+    usize::MAX
 }
 
 fn build_missing_samples(header: &vcf::Header) -> Result<Option<vcf::variant::record_buf::Samples>> {
@@ -241,6 +317,45 @@ mod tests {
                 record.reference_sequence_name(),
                 record.variant_start().map(usize::from).unwrap_or(0)
             );
+        }
+    }
+
+    #[test]
+    fn test_padded_panel_output_sorted_by_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("panel.vcf");
+        let output_path = dir.path().join("panel_out.vcf");
+
+        let vcf = concat!(
+            "##fileformat=VCFv4.3\n",
+            "##contig=<ID=chr1,length=1000>\n",
+            "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n",
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\n",
+            "chr1\t200\trs1\tA\tG\t.\tPASS\t.\tGT\t0/1\n"
+        );
+        std::fs::write(&original_path, vcf).unwrap();
+
+        let panel_index = crate::panel::PanelIndex::load(&original_path).unwrap();
+        let mut padded = crate::panel::PaddedPanel::new(panel_index);
+        padded.get_or_add_allele_index("chr1", 100, "C", "A");
+
+        write_padded_panel(&original_path, &padded, &output_path).unwrap();
+
+        let reader = std::fs::File::open(&output_path).unwrap();
+        let mut vcf_reader = vcf::io::Reader::new(std::io::BufReader::new(reader));
+        let header = vcf_reader.read_header().unwrap();
+
+        let mut last_pos = 0usize;
+        for result in vcf_reader.record_bufs(&header) {
+            let record = result.unwrap();
+            let pos = record.variant_start().map(usize::from).unwrap_or(0);
+            assert!(
+                pos >= last_pos,
+                "panel output not sorted: {} then {}",
+                last_pos,
+                pos
+            );
+            last_pos = pos;
         }
     }
 }
