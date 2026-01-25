@@ -87,6 +87,12 @@ pub fn write_padded_panel<P: AsRef<Path>>(
             );
         }
 
+        if header.sample_names().len() > 0 && record.samples().values().count() == 0 {
+            if let Some(samples) = build_missing_samples(&header)? {
+                *record.samples_mut() = samples;
+            }
+        }
+
         vcf_writer.write_variant_record(&header, &record)?;
         records_written += 1;
 

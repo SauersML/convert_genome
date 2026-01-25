@@ -220,10 +220,11 @@ fn classify_chromosome(chrom: &str) -> infer_sex::Chromosome {
         .to_string();
 
     match normalized.as_str() {
-        "X" => infer_sex::Chromosome::X,
-        "Y" => infer_sex::Chromosome::Y,
+        "X" | "23" | "25" | "PAR" | "PSEUDOAUTOSOMAL" => infer_sex::Chromosome::X,
+        "Y" | "24" => infer_sex::Chromosome::Y,
         "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | "12" | "13" | "14"
         | "15" | "16" | "17" | "18" | "19" | "20" | "21" | "22" => infer_sex::Chromosome::Autosome,
+        "M" | "MT" | "MITO" | "MITOCHONDRIAL" | "26" => infer_sex::Chromosome::Autosome,
         _ => infer_sex::Chromosome::Autosome, // Treat unknown as autosome (conservative)
     }
 }
@@ -257,6 +258,11 @@ mod tests {
         );
         assert_eq!(classify_chromosome("X"), infer_sex::Chromosome::X);
         assert_eq!(classify_chromosome("chrY"), infer_sex::Chromosome::Y);
+        assert_eq!(classify_chromosome("23"), infer_sex::Chromosome::X);
+        assert_eq!(classify_chromosome("24"), infer_sex::Chromosome::Y);
+        assert_eq!(classify_chromosome("25"), infer_sex::Chromosome::X);
+        assert_eq!(classify_chromosome("26"), infer_sex::Chromosome::Autosome);
+        assert_eq!(classify_chromosome("chrM"), infer_sex::Chromosome::Autosome);
     }
 
     #[test]
