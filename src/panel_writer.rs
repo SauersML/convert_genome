@@ -101,7 +101,10 @@ pub fn write_padded_panel<P: AsRef<Path>>(
         tracing::info!("Writing {} novel sites...", novel_count);
 
         for site in padded.novel_sites() {
-            let record = site_to_record(site)?;
+            let mut record = site_to_record(site)?;
+            if let Some(samples) = build_missing_samples(&header)? {
+                *record.samples_mut() = samples;
+            }
             vcf_writer.write_variant_record(&header, &record)?;
             records_written += 1;
         }
@@ -115,6 +118,28 @@ pub fn write_padded_panel<P: AsRef<Path>>(
     );
 
     Ok(())
+}
+
+fn build_missing_samples(header: &vcf::Header) -> Result<Option<vcf::variant::record_buf::Samples>> {
+    use vcf::variant::record_buf::samples::{sample::Value, Keys};
+    use vcf::variant::record_buf::Samples;
+
+    let sample_count = header.sample_names().len();
+    if sample_count == 0 {
+        return Ok(None);
+    }
+
+    let format_keys: Vec<String> = header.formats().keys().map(|k| k.to_string()).collect();
+    if format_keys.is_empty() {
+        anyhow::bail!("panel header has samples but no FORMAT definitions");
+    }
+
+    let keys: Keys = format_keys.into_iter().collect();
+    let keys_len = keys.as_ref().len();
+    let empty_sample: Vec<Option<Value>> = vec![None; keys_len];
+    let values = vec![empty_sample; sample_count];
+
+    Ok(Some(Samples::new(keys, values)))
 }
 
 /// Convert a PanelSite to a VCF RecordBuf.
@@ -172,5 +197,44 @@ mod tests {
         let record = site_to_record(&site).unwrap();
         assert_eq!(record.reference_sequence_name(), "1");
         assert_eq!(record.reference_bases().to_string(), "A");
+    }
+
+    #[test]
+    fn test_padded_panel_includes_samples_for_novel_sites() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("panel.vcf");
+        let output_path = dir.path().join("panel_out.vcf");
+
+        let vcf = concat!(
+            "##fileformat=VCFv4.3\n",
+            "##contig=<ID=chr22,length=1000>\n",
+            "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n",
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2\n",
+            "chr22\t1\trs1\tA\tG\t.\tPASS\t.\tGT\t0/1\t0/0\n"
+        );
+        std::fs::write(&original_path, vcf).unwrap();
+
+        let panel_index = crate::panel::PanelIndex::load(&original_path).unwrap();
+        let mut padded = crate::panel::PaddedPanel::new(panel_index);
+        padded.get_or_add_allele_index("chr22", 2, "C", "A");
+
+        write_padded_panel(&original_path, &padded, &output_path).unwrap();
+
+        let reader = std::fs::File::open(&output_path).unwrap();
+        let mut vcf_reader = vcf::io::Reader::new(std::io::BufReader::new(reader));
+        let header = vcf_reader.read_header().unwrap();
+        let expected_samples = header.sample_names().len();
+
+        for result in vcf_reader.record_bufs(&header) {
+            let record = result.unwrap();
+            let sample_count = record.samples().values().count();
+            assert_eq!(
+                sample_count,
+                expected_samples,
+                "record missing samples at {}:{}",
+                record.reference_sequence_name(),
+                record.variant_start().map(usize::from).unwrap_or(0)
+            );
+        }
     }
 }
