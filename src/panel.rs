@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use noodles::vcf;
+use noodles::vcf::variant::record::AlternateBases as _;
 
 /// A site definition from the reference panel.
 #[derive(Debug, Clone)]
@@ -75,44 +76,34 @@ impl PanelIndex {
         // Extract chromosome order from header contigs
         let chrom_order: Vec<String> = header.contigs().keys().map(|k| k.to_string()).collect();
 
-        let mut sites = HashMap::new();
+        let mut sites = HashMap::with_capacity(estimate_panel_capacity(path));
         let mut record_count = 0u64;
 
-        // Use record_bufs for proper RecordBuf access
-        for result in vcf_reader.record_bufs(&header) {
-            let record = result?;
+        let mut record = vcf::Record::default();
+        loop {
+            if vcf_reader.read_record(&mut record)? == 0 {
+                break;
+            }
             record_count += 1;
 
             let chrom = record.reference_sequence_name().to_string();
-            let pos = record.variant_start().map(usize::from).unwrap_or(0) as u64;
-
-            let id = {
-                let ids = record.ids();
-                if ids.as_ref().is_empty() {
-                    None
-                } else {
-                    Some(
-                        ids.as_ref()
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect::<Vec<_>>()
-                            .join(";"),
-                    )
-                }
-            };
+            let pos = record
+                .variant_start()
+                .transpose()?
+                .map(|p| usize::from(p) as u64)
+                .unwrap_or(0);
 
             let ref_allele = record.reference_bases().to_string();
             let alt_alleles: Vec<String> = record
                 .alternate_bases()
-                .as_ref()
                 .iter()
-                .map(|a| a.to_string())
-                .collect();
+                .map(|a| a.map(|s| s.to_string()))
+                .collect::<std::io::Result<Vec<_>>>()?;
 
             let site = PanelSite {
                 chrom: chrom.clone(),
                 pos,
-                id,
+                id: None,
                 ref_allele,
                 alt_alleles,
             };
@@ -140,44 +131,36 @@ impl PanelIndex {
 
         let chrom_order: Vec<String> = header.contigs().keys().map(|k| k.to_string()).collect();
 
-        let mut sites = HashMap::new();
+        let mut sites = HashMap::with_capacity(estimate_panel_capacity(path.as_ref()));
         let mut record_count = 0u64;
 
-        // Use record_bufs for proper RecordBuf access
-        for result in bcf_reader.record_bufs(&header) {
-            let record = result?;
+        let string_maps = vcf::header::StringMaps::try_from(&header)?;
+        let mut record = bcf::Record::default();
+        loop {
+            if bcf_reader.read_record(&mut record)? == 0 {
+                break;
+            }
             record_count += 1;
 
-            let chrom = record.reference_sequence_name().to_string();
-            let pos = record.variant_start().map(usize::from).unwrap_or(0) as u64;
+            let chrom = record.reference_sequence_name(&string_maps)?.to_string();
+            let pos = record
+                .variant_start()
+                .transpose()?
+                .map(|p| usize::from(p) as u64)
+                .unwrap_or(0);
 
-            let id = {
-                let ids = record.ids();
-                if ids.as_ref().is_empty() {
-                    None
-                } else {
-                    Some(
-                        ids.as_ref()
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect::<Vec<_>>()
-                            .join(";"),
-                    )
-                }
-            };
-
-            let ref_allele = record.reference_bases().to_string();
+            let ref_allele = std::str::from_utf8(record.reference_bases().as_ref())?
+                .to_string();
             let alt_alleles: Vec<String> = record
                 .alternate_bases()
-                .as_ref()
                 .iter()
-                .map(|a| a.to_string())
-                .collect();
+                .map(|a| a.map(|s| s.to_string()))
+                .collect::<std::io::Result<Vec<_>>>()?;
 
             let site = PanelSite {
                 chrom: chrom.clone(),
                 pos,
-                id,
+                id: None,
                 ref_allele,
                 alt_alleles,
             };
@@ -380,6 +363,19 @@ impl PaddedPanel {
     pub fn novel_sites(&self) -> impl Iterator<Item = &PanelSite> {
         self.novel_sites.iter()
     }
+}
+
+fn estimate_panel_capacity(path: &Path) -> usize {
+    let default_capacity = 1_000_000usize;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return default_capacity;
+    };
+    let len = meta.len();
+    if len == 0 {
+        return default_capacity;
+    }
+    let estimated = (len / 80) as usize;
+    estimated.clamp(100_000, 8_000_000)
 }
 
 #[cfg(test)]
