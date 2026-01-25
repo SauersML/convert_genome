@@ -6,6 +6,15 @@
 
 `convert_genome` converts genomes in one format to another. This includes, for example, direct-to-consumer (DTC) genotype exports (23andMe, AncestryDNA, MyHeritage, etc.) into standard [VCF](https://samtools.github.io/hts-specs/VCFv4.5.pdf), [BCF](https://samtools.github.io/hts-specs/BCFv2_qref.pdf), or [PLINK](https://www.cog-genomics.org/plink/1.9/formats) binary formats. The converter supports remote references via HTTP(S) and handles compressed `.gz` and `.zip` archives. You can also convert from one genome build from another. It automatically detects genome builds, infers biological sex, handles coordinate liftovers, and harmonizes alleles against reference panels.
 
+## Installation
+
+### Automatic Install (Recommended)
+Installs the latest binary for your platform (macOS/Linux/Windows):
+```bash
+# macOS / Linux / Windows (Git Bash)
+curl -fsSL https://raw.githubusercontent.com/SauersML/convert_genome/main/install.sh | bash
+```
+
 ## Core Capabilities
 
 1.  **Format Conversion**: Transforms generic CSV/TSV genotype tables into compliant VCF v4.5, BCF v2.2, or PLINK 1.9 binary formats.
