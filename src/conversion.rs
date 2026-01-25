@@ -435,7 +435,31 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             None
         };
 
-    let header = build_header(&config, reference.as_ref())?;
+    let input_header = match config.input_format {
+        crate::input::InputFormat::Vcf => {
+            let reader = crate::smart_reader::open_input(&config.input)
+                .with_context(|| format!("failed to open input {}", config.input.display()))?;
+            let mut vcf_reader = vcf::io::Reader::new(reader);
+            Some(
+                vcf_reader
+                    .read_header()
+                    .with_context(|| "failed to read VCF header")?,
+            )
+        }
+        crate::input::InputFormat::Bcf => {
+            let reader = crate::smart_reader::open_input(&config.input)
+                .with_context(|| format!("failed to open input {}", config.input.display()))?;
+            let mut bcf_reader = bcf::io::Reader::new(reader);
+            Some(
+                bcf_reader
+                    .read_header()
+                    .with_context(|| "failed to read BCF header")?,
+            )
+        }
+        _ => None,
+    };
+
+    let header = build_header(&config, reference.as_ref(), input_header.as_ref())?;
 
     // Instantiate Source Iterator
     let mut source: Box<dyn crate::input::VariantSource> = match config.input_format {
@@ -1125,7 +1149,16 @@ pub fn standardize_record(
         None => {
             summary.unknown_chromosomes += 1;
             if warned_unknown_chroms.insert(chrom.to_string()) {
-                tracing::warn!("chromosome not in reference: {}", chrom);
+                const WARN_LIMIT: usize = 5;
+                let unique = warned_unknown_chroms.len();
+                if unique <= WARN_LIMIT {
+                    tracing::warn!("chromosome not in reference: {}", chrom);
+                    if unique == WARN_LIMIT {
+                        tracing::warn!(
+                            "additional unknown chromosomes will be suppressed"
+                        );
+                    }
+                }
             }
             return Ok(None);
         }
@@ -1308,6 +1341,7 @@ pub fn parse_genotype_for_tests(raw: &str) -> Vec<DtcAllele> {
 fn build_header(
     config: &ConversionConfig,
     reference: Option<&ReferenceGenome>,
+    input_header: Option<&vcf::Header>,
 ) -> Result<vcf::Header> {
     let mut builder = vcf::Header::builder().set_file_format(FileFormat::new(4, 5));
 
@@ -1369,6 +1403,26 @@ fn build_header(
     builder = builder.add_sample_name(config.sample_id.clone());
 
     let mut header = builder.build();
+
+    if let Some(input_header) = input_header {
+        for (id, format) in input_header.formats() {
+            if !header.formats().contains_key(id) {
+                header.formats_mut().insert(id.clone(), format.clone());
+            }
+        }
+
+        for (id, info) in input_header.infos() {
+            if !header.infos().contains_key(id) {
+                header.infos_mut().insert(id.clone(), info.clone());
+            }
+        }
+
+        for (id, filter) in input_header.filters() {
+            if !header.filters().contains_key(id) {
+                header.filters_mut().insert(id.clone(), filter.clone());
+            }
+        }
+    }
 
     insert_other_record(
         &mut header,
@@ -1537,7 +1591,7 @@ mod tests {
             panel: None,
         };
 
-        let header = build_header(&config, Some(&reference)).unwrap();
+        let header = build_header(&config, Some(&reference), None).unwrap();
 
         // Write header to string
         let mut buf = Vec::new();
@@ -1576,7 +1630,7 @@ mod tests {
             panel: None,
         };
 
-        let header = build_header(&config, Some(&reference)).unwrap();
+        let header = build_header(&config, Some(&reference), None).unwrap();
         assert!(!header.contigs().is_empty());
         assert!(header.other_records().contains_key("source"));
         assert!(header.other_records().contains_key("reference"));
