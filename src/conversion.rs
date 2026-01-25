@@ -720,6 +720,8 @@ where
     S: crate::input::VariantSource,
     W: VariantWriter,
 {
+    let mut warned_unknown_chroms = std::collections::HashSet::new();
+
     let mut sorter = if ctx.needs_sort {
         let order = if let Some(reference) = ctx.reference {
             RecordOrder::from_reference(reference)
@@ -744,6 +746,8 @@ where
                         &record,
                         ctx.reference.expect("reference required for standardize"),
                         ctx.config,
+                        summary,
+                        &mut warned_unknown_chroms,
                     ) {
                         Ok(Some(standardized)) => standardized,
                         Ok(None) => continue, // Filtered out
@@ -1104,6 +1108,8 @@ pub fn standardize_record(
     record: &RecordBuf,
     reference: &ReferenceGenome,
     config: &ConversionConfig,
+    summary: &mut crate::ConversionSummary,
+    warned_unknown_chroms: &mut std::collections::HashSet<String>,
 ) -> Result<Option<RecordBuf>, RecordConversionError> {
     use noodles::vcf::variant::record_buf::{AlternateBases, Ids};
 
@@ -1117,7 +1123,10 @@ pub fn standardize_record(
     let canonical_name = match reference.resolve_contig_name(chrom) {
         Some(name) => name.to_string(),
         None => {
-            tracing::warn!("unknown chromosome: {}", chrom);
+            summary.unknown_chromosomes += 1;
+            if warned_unknown_chroms.insert(chrom.to_string()) {
+                tracing::warn!("chromosome not in reference: {}", chrom);
+            }
             return Ok(None);
         }
     };
