@@ -907,7 +907,7 @@ where
                     }
                 }
 
-                normalize_sample_values(&mut final_record);
+                normalize_record(&mut final_record);
                 summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
 
                 if let Some(sorter) = sorter.as_mut() {
@@ -936,7 +936,7 @@ where
             .context("failed to finalize external sorter")?;
         while let Some(record) = sorted_records.next() {
             let mut record = record.context("failed to read sorted spill record")?;
-            normalize_sample_values(&mut record);
+            normalize_record(&mut record);
             writer
                 .write_variant(ctx.header, &record)
                 .context("failed to write variant record")?;
@@ -946,8 +946,23 @@ where
     Ok(())
 }
 
-fn normalize_sample_values(record: &mut RecordBuf) {
-    let keys_len = record.samples().keys().as_ref().len();
+/// Normalizes and standardizes RecordBuf fields for VCF/BCF compatibility.
+/// Handles empty string normalization, genotype string conversion, and enforces
+/// correct data types for reserved keys like MQ (RMS mapping quality).
+fn normalize_record(record: &mut RecordBuf) {
+    // 1. Standardize INFO fields.
+    // Site-level MQ must be a Float in VCF 4.3+. If input data provides it as
+    // an Integer, we cast it to prevent writer definition mismatches.
+    use noodles::vcf::variant::record_buf::info::field::Value as InfoValue;
+    if let Some(value_opt) = record.info_mut().get_mut("MQ") {
+        if let Some(InfoValue::Integer(n)) = value_opt {
+            *value_opt = Some(InfoValue::Float(*n as f32));
+        }
+    }
+
+    // 2. Standardize Sample (FORMAT) values.
+    let keys = record.samples().keys().clone();
+    let keys_len = keys.as_ref().len();
     if keys_len == 0 {
         return;
     }
@@ -964,6 +979,8 @@ fn normalize_sample_values(record: &mut RecordBuf) {
         let mut filled = Vec::with_capacity(keys_len);
         for idx in 0..keys_len {
             let value = values.get(idx).cloned().unwrap_or(None);
+            let key_name = keys.as_ref().get_index(idx).map(|s| s.as_str()).unwrap_or("");
+
             let cleaned = match value {
                 Some(Value::String(ref s)) if s.is_empty() => {
                     needs_fix = true;
@@ -972,6 +989,11 @@ fn normalize_sample_values(record: &mut RecordBuf) {
                 Some(Value::Genotype(ref gt)) => {
                     needs_fix = true;
                     Some(Value::String(genotype_to_string(gt)))
+                }
+                // Ensure sample-level MQ is an Integer as per VCF 4.5 specifications.
+                Some(Value::Float(f)) if key_name == "MQ" => {
+                    needs_fix = true;
+                    Some(Value::Integer(f as i32))
                 }
                 other => other,
             };
@@ -986,7 +1008,6 @@ fn normalize_sample_values(record: &mut RecordBuf) {
     }
 
     if needs_fix {
-        let keys = record.samples().keys().clone();
         *record.samples_mut() = Samples::new(keys, new_values);
     }
 }
@@ -1369,25 +1390,36 @@ fn build_header(
         );
 
     // Add symbolic alleles for Indels as per VCF spec
-    builder = builder
-        .add_alternative_allele("DEL", Map::<AlternativeAllele>::new("Deletion"))
-        .add_alternative_allele("INS", Map::<AlternativeAllele>::new("Insertion"))
-        .add_info(
-            "IMPRECISE",
-            Map::<InfoMap>::new(
-                Number::Count(0),
-                Type::Flag,
-                "Imprecise structural variation",
-            ),
-        )
-        .add_info(
-            "SVTYPE",
-            Map::<InfoMap>::new(
-                Number::Count(1),
-                Type::String,
-                "Type of structural variation",
-            ),
-        );
+        builder = builder
+            .add_alternative_allele("DEL", Map::<AlternativeAllele>::new("Deletion"))
+            .add_alternative_allele("INS", Map::<AlternativeAllele>::new("Insertion"))
+            .add_info(
+                "IMPRECISE",
+                Map::<InfoMap>::new(
+                    Number::Count(0),
+                    Type::Flag,
+                    "Imprecise structural variation",
+                ),
+            )
+            .add_info(
+                "SVTYPE",
+                Map::<InfoMap>::new(
+                    Number::Count(1),
+                    Type::String,
+                    "Type of structural variation",
+                ),
+            )
+            // Explicitly define MQ fields to ensure consistency with strict VCF/BCF writers.
+            // As of VCF 4.3, site-level INFO MQ is defined as Float.
+            .add_info(
+                "MQ",
+                Map::<InfoMap>::new(Number::Count(1), Type::Float, "RMS mapping quality"),
+            )
+            // Sample-level FORMAT MQ is defined as Integer in VCF 4.5.
+            .add_format(
+                "MQ",
+                Map::<Format>::new(FmtNumber::Count(1), FmtType::Integer, "RMS mapping quality"),
+            );
 
     // Add contigs from reference if available
     if let Some(ref_genome) = reference {
