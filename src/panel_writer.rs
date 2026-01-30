@@ -211,7 +211,17 @@ fn build_missing_samples(header: &vcf::Header) -> Result<Option<vcf::variant::re
         return Ok(None);
     }
 
-    let format_keys: Vec<String> = header.formats().keys().map(|k| k.to_string()).collect();
+    let header_formats = header.formats();
+    let mut format_keys = Vec::with_capacity(header_formats.len());
+    if header_formats.contains_key("GT") {
+        format_keys.push("GT".to_string());
+    }
+    for key in header_formats.keys() {
+        let key_str = key.to_string();
+        if key_str != "GT" {
+            format_keys.push(key_str);
+        }
+    }
     if format_keys.is_empty() {
         anyhow::bail!("panel header has samples but no FORMAT definitions");
     }

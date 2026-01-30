@@ -14,20 +14,22 @@ use tracing;
 pub fn remap_sample_genotypes(samples: &Samples, mapping: &HashMap<usize, usize>) -> Samples {
     let keys = samples.keys();
 
-    // First, verify we have keys and map the fields we care about to their NUMERIC INDICES in the input
-    let mut gt_index = None;
-    let mut other_indices = Vec::new();
-
-    // Create the new keys list
+    // Build new keys and a map of where each value should come from.
     let mut new_keys_vec = Vec::new();
+    let mut extraction_map: Vec<(usize, bool)> = Vec::new();
+
+    if let Some(gt_pos) = keys.as_ref().iter().position(|k| k == format_key::GENOTYPE) {
+        new_keys_vec.push(format_key::GENOTYPE.to_string());
+        extraction_map.push((gt_pos, true));
+    }
 
     for (i, key) in keys.as_ref().iter().enumerate() {
         if key == format_key::GENOTYPE {
-            gt_index = Some(i);
+            continue;
+        }
+        if key == "GQ" || key == "DP" || key == "MIN_DP" {
             new_keys_vec.push(key.clone());
-        } else if key == "GQ" || key == "DP" || key == "MIN_DP" {
-            other_indices.push((i, key.clone()));
-            new_keys_vec.push(key.clone());
+            extraction_map.push((i, false));
         } else {
             // Drop other fields (PL, AD, GP) as they become invalid when alleles change
             // and we cannot easily reorder/recalculate them without more complex logic.
@@ -42,33 +44,28 @@ pub fn remap_sample_genotypes(samples: &Samples, mapping: &HashMap<usize, usize>
     let mut new_values = Vec::new();
 
     for sample in samples.values() {
-        let mut new_sample_vals = Vec::new();
+        let mut new_sample_vals = Vec::with_capacity(extraction_map.len());
 
-        // 1. Process GT if present (always first in standard VCFs, but let's follow our key order)
-        if let Some(idx) = gt_index {
-            // Look up value by NUMERIC INDEX (idx) using direct slice access
-            let val_opt = sample.values().get(idx).cloned().flatten();
-
-            if let Some(Value::String(gt_str)) = &val_opt {
-                let new_gt = remap_gt_string(gt_str, mapping);
-                if !mapping.is_empty() && gt_str != &new_gt {
-                    tracing::debug!(
-                        "Remapped GT: {} -> {} (mapping: {:?})",
-                        gt_str,
-                        new_gt,
-                        mapping
-                    );
+        for (idx, is_gt) in &extraction_map {
+            let val_opt = sample.values().get(*idx).cloned().flatten();
+            if *is_gt {
+                if let Some(Value::String(gt_str)) = &val_opt {
+                    let new_gt = remap_gt_string(gt_str, mapping);
+                    if !mapping.is_empty() && gt_str != &new_gt {
+                        tracing::debug!(
+                            "Remapped GT: {} -> {} (mapping: {:?})",
+                            gt_str,
+                            new_gt,
+                            mapping
+                        );
+                    }
+                    new_sample_vals.push(Some(Value::String(new_gt)));
+                } else {
+                    new_sample_vals.push(val_opt);
                 }
-                new_sample_vals.push(Some(Value::String(new_gt)));
             } else {
                 new_sample_vals.push(val_opt);
             }
-        }
-
-        // 2. Process other preserved fields
-        for (idx, _) in &other_indices {
-            let val_opt = sample.values().get(*idx).cloned().flatten();
-            new_sample_vals.push(val_opt);
         }
 
         new_values.push(new_sample_vals);
