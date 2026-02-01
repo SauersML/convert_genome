@@ -215,66 +215,68 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         // Pre-scan DTC file for inference (done once, used for both)
         let prescan_records = prescan_dtc_records(&config.input)?;
 
-        // Build Detection using check_build library (position-only, not allele-based)
-        // This avoids false liftover triggers on homozygous-alt sites
-        // Build Detection using check_build library (position-only, not allele-based)
-        // This avoids false liftover triggers on homozygous-alt sites
-        tracing::info!("Detecting genome build using check_build (position-only)...");
+        if prescan_records.is_empty() {
+            tracing::warn!("No records available for build detection; skipping build inference");
+        } else {
+            // Build Detection using check_build library (position-only, not allele-based)
+            // This avoids false liftover triggers on homozygous-alt sites
+            tracing::info!("Detecting genome build using check_build (position-only)...");
 
-        // This uses check_build's internal caching and does NOT require us to provide a reference
-        match crate::inference::detect_build_from_dtc(&prescan_records) {
-            Ok(detection) => {
-                tracing::info!("Detected input build: {}", detection.detected_build);
-                inferred_build_opt = Some(detection.detected_build.clone());
-                build_detection = Some(crate::report::BuildDetection {
-                    detected_build: detection.detected_build.clone(),
-                    hg19_match_rate: detection.hg19_match_rate,
-                    hg38_match_rate: detection.hg38_match_rate,
-                });
+            // This uses check_build's internal caching and does NOT require us to provide a reference
+            match crate::inference::detect_build_from_dtc(&prescan_records) {
+                Ok(detection) => {
+                    tracing::info!("Detected input build: {}", detection.detected_build);
+                    inferred_build_opt = Some(detection.detected_build.clone());
+                    build_detection = Some(crate::report::BuildDetection {
+                        detected_build: detection.detected_build.clone(),
+                        hg19_match_rate: detection.hg19_match_rate,
+                        hg38_match_rate: detection.hg38_match_rate,
+                    });
 
-                if !builds_match(&detection.detected_build, &config.assembly) {
-                    println!(
-                        "DEBUG: Detected build {} != target {}. Initiating liftover...",
-                        detection.detected_build, config.assembly
-                    );
-                    tracing::info!(
-                        "Detected build {} differs from target {}. Initiating liftover.",
-                        detection.detected_build,
-                        config.assembly
-                    );
+                    if !builds_match(&detection.detected_build, &config.assembly) {
+                        println!(
+                            "DEBUG: Detected build {} != target {}. Initiating liftover...",
+                            detection.detected_build, config.assembly
+                        );
+                        tracing::info!(
+                            "Detected build {} differs from target {}. Initiating liftover.",
+                            detection.detected_build,
+                            config.assembly
+                        );
 
-                    // Setup Liftover
-                    match ChainRegistry::new() {
-                        Ok(registry) => {
-                            match registry.get_chain(&detection.detected_build, &config.assembly) {
-                                Ok(chain) => {
-                                    println!("DEBUG: Chain loaded successfully.");
-                                    let liftover_chain_local = Some(Arc::new(chain));
-                                    liftover_chain = liftover_chain_local;
-                                    // Force standardization for liftover workflow
-                                    config.standardize = true;
-                                }
-                                Err(e) => {
-                                    println!("DEBUG: Failed to load chain: {}", e);
-                                    tracing::error!("Failed to load chain file: {}", e);
+                        // Setup Liftover
+                        match ChainRegistry::new() {
+                            Ok(registry) => {
+                                match registry.get_chain(&detection.detected_build, &config.assembly) {
+                                    Ok(chain) => {
+                                        println!("DEBUG: Chain loaded successfully.");
+                                        let liftover_chain_local = Some(Arc::new(chain));
+                                        liftover_chain = liftover_chain_local;
+                                        // Force standardization for liftover workflow
+                                        config.standardize = true;
+                                    }
+                                    Err(e) => {
+                                        println!("DEBUG: Failed to load chain: {}", e);
+                                        tracing::error!("Failed to load chain file: {}", e);
+                                    }
                                 }
                             }
+                            Err(e) => {
+                                println!("DEBUG: ChainRegistry init failed: {}", e);
+                                tracing::error!("Failed to initialize ChainRegistry: {}", e);
+                            }
                         }
-                        Err(e) => {
-                            println!("DEBUG: ChainRegistry init failed: {}", e);
-                            tracing::error!("Failed to initialize ChainRegistry: {}", e);
-                        }
+                    } else {
+                        tracing::info!("Build matches target assembly. No liftover needed.");
                     }
-                } else {
-                    tracing::info!("Build matches target assembly. No liftover needed.");
                 }
-            }
-            Err(e) => {
-                return Err(anyhow!(
-                    "Build detection failed: {}. Refusing to assume input matches target ({})",
-                    e,
-                    config.assembly
-                ));
+                Err(e) => {
+                    return Err(anyhow!(
+                        "Build detection failed: {}. Refusing to assume input matches target ({})",
+                        e,
+                        config.assembly
+                    ));
+                }
             }
         }
 
@@ -380,7 +382,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             &config.input,
             config.input_format,
         ) {
-            Ok(detection) => {
+            Ok(Some(detection)) => {
                 tracing::info!("Detected input build: {}", detection.detected_build);
                 build_detection = Some(crate::report::BuildDetection {
                     detected_build: detection.detected_build.clone(),
@@ -416,6 +418,9 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 } else {
                     tracing::info!("Build matches target assembly. No liftover needed.");
                 }
+            }
+            Ok(None) => {
+                tracing::warn!("No records available for build detection; skipping build inference");
             }
             Err(e) => {
                 return Err(anyhow!(

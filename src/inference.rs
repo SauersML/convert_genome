@@ -118,9 +118,11 @@ fn classify_build(detection: check_build::BuildResult) -> BuildDetectionResult {
     }
 }
 
-fn detect_build_from_variants(variants: &[check_build::Variant]) -> Result<BuildDetectionResult> {
+fn detect_build_from_variants(
+    variants: &[check_build::Variant],
+) -> Result<Option<BuildDetectionResult>> {
     if variants.is_empty() {
-        anyhow::bail!("No variants available for build detection");
+        return Ok(None);
     }
 
     // Ensure we have cached references (downloads if needed, uses cache otherwise)
@@ -150,13 +152,13 @@ fn detect_build_from_variants(variants: &[check_build::Variant]) -> Result<Build
         result.hg38_match_rate
     );
 
-    Ok(classify_build(result))
+    Ok(Some(classify_build(result)))
 }
 
 /// Detect genome build from a VCF file using check_build.
 ///
 /// Returns "GRCh37" or "GRCh38" based on reference allele matching.
-pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<BuildDetectionResult> {
+pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<Option<BuildDetectionResult>> {
     let reader = smart_reader::open_input(vcf_path)
         .with_context(|| format!("failed to open input {}", vcf_path.display()))?;
     let mut vcf_reader = vcf::io::Reader::new(reader);
@@ -219,7 +221,7 @@ pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<BuildDetectionResult> {
     detect_build_from_variants(&variants)
 }
 
-pub fn detect_build_from_bcf(bcf_path: &Path) -> Result<BuildDetectionResult> {
+pub fn detect_build_from_bcf(bcf_path: &Path) -> Result<Option<BuildDetectionResult>> {
     let reader = smart_reader::open_input(bcf_path)
         .with_context(|| format!("failed to open input {}", bcf_path.display()))?;
     let mut bcf_reader = bcf::io::Reader::new(reader);
@@ -285,7 +287,7 @@ pub fn detect_build_from_bcf(bcf_path: &Path) -> Result<BuildDetectionResult> {
 pub fn detect_build_from_variant_file(
     path: &Path,
     format: InputFormat,
-) -> Result<BuildDetectionResult> {
+) -> Result<Option<BuildDetectionResult>> {
     match format {
         InputFormat::Vcf => detect_build_from_vcf(path),
         InputFormat::Bcf => detect_build_from_bcf(path),
@@ -340,7 +342,9 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<BuildDetectionResu
         tracing::warn!("Only {} variants for build detection", variants.len());
     }
 
-    detect_build_from_variants(&variants)
+    detect_build_from_variants(&variants)?.ok_or_else(|| {
+        anyhow::anyhow!("No variants available for build detection")
+    })
 }
 
 /// Classify chromosome string into Chromosome enum for infer_sex.
