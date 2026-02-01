@@ -164,6 +164,16 @@ fn prescan_dtc_records(input: &std::path::Path) -> Result<Vec<dtc::Record>> {
     Ok(records)
 }
 
+fn builds_match(detected_build: &str, target_build: &str) -> bool {
+    let detected_normalized = detected_build.to_lowercase();
+    let target_normalized = target_build.to_lowercase();
+
+    (detected_normalized.contains("37") || detected_normalized.contains("hg19"))
+        && (target_normalized.contains("37") || target_normalized.contains("hg19"))
+        || (detected_normalized.contains("38") || detected_normalized.contains("hg38"))
+            && (target_normalized.contains("38") || target_normalized.contains("hg38"))
+}
+
 /// Convert the provided direct-to-consumer genotype file into VCF or BCF.
 /// Convert the provided input file into VCF, BCF, or PLINK.
 pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
@@ -180,7 +190,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     );
 
     // Determine if reference is required based on input format and options
-    let requires_reference = matches!(config.input_format, crate::input::InputFormat::Dtc)
+    let mut requires_reference = matches!(config.input_format, crate::input::InputFormat::Dtc)
         || config.standardize
         || config.panel.is_some();
 
@@ -213,41 +223,30 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
         // This uses check_build's internal caching and does NOT require us to provide a reference
         match crate::inference::detect_build_from_dtc(&prescan_records) {
-            Ok(detected_build) => {
-                tracing::info!("Detected input build: {}", detected_build);
-                inferred_build_opt = Some(detected_build.clone());
+            Ok(detection) => {
+                tracing::info!("Detected input build: {}", detection.detected_build);
+                inferred_build_opt = Some(detection.detected_build.clone());
+                build_detection = Some(crate::report::BuildDetection {
+                    detected_build: detection.detected_build.clone(),
+                    hg19_match_rate: detection.hg19_match_rate,
+                    hg38_match_rate: detection.hg38_match_rate,
+                });
 
-                // Normalize build names for comparison
-                let detected_normalized = detected_build.to_lowercase();
-                let target_normalized = config.assembly.to_lowercase();
-
-                let builds_match = (detected_normalized.contains("37")
-                    || detected_normalized.contains("hg19"))
-                    && (target_normalized.contains("37") || target_normalized.contains("hg19"))
-                    || (detected_normalized.contains("38") || detected_normalized.contains("hg38"))
-                        && (target_normalized.contains("38") || target_normalized.contains("hg38"));
-
-                if !builds_match {
+                if !builds_match(&detection.detected_build, &config.assembly) {
                     println!(
                         "DEBUG: Detected build {} != target {}. Initiating liftover...",
-                        detected_build, config.assembly
+                        detection.detected_build, config.assembly
                     );
                     tracing::info!(
                         "Detected build {} differs from target {}. Initiating liftover.",
-                        detected_build,
+                        detection.detected_build,
                         config.assembly
                     );
-
-                    build_detection = Some(crate::report::BuildDetection {
-                        detected_build: detected_build.clone(),
-                        hg19_match_rate: if detected_build == "GRCh37" { 1.0 } else { 0.0 },
-                        hg38_match_rate: if detected_build == "GRCh38" { 1.0 } else { 0.0 },
-                    });
 
                     // Setup Liftover
                     match ChainRegistry::new() {
                         Ok(registry) => {
-                            match registry.get_chain(&detected_build, &config.assembly) {
+                            match registry.get_chain(&detection.detected_build, &config.assembly) {
                                 Ok(chain) => {
                                     println!("DEBUG: Chain loaded successfully.");
                                     let liftover_chain_local = Some(Arc::new(chain));
@@ -268,19 +267,6 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                     }
                 } else {
                     tracing::info!("Build matches target assembly. No liftover needed.");
-                    build_detection = Some(crate::report::BuildDetection {
-                        detected_build: config.assembly.clone(),
-                        hg19_match_rate: if target_normalized.contains("37") {
-                            1.0
-                        } else {
-                            0.0
-                        },
-                        hg38_match_rate: if target_normalized.contains("38") {
-                            1.0
-                        } else {
-                            0.0
-                        },
-                    });
                 }
             }
             Err(e) => {
@@ -383,6 +369,66 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 }
             }
         }
+    }
+
+    if matches!(
+        config.input_format,
+        crate::input::InputFormat::Vcf | crate::input::InputFormat::Bcf
+    ) {
+        tracing::info!("Detecting genome build using check_build (position-only)...");
+        match crate::inference::detect_build_from_variant_file(
+            &config.input,
+            config.input_format,
+        ) {
+            Ok(detection) => {
+                tracing::info!("Detected input build: {}", detection.detected_build);
+                build_detection = Some(crate::report::BuildDetection {
+                    detected_build: detection.detected_build.clone(),
+                    hg19_match_rate: detection.hg19_match_rate,
+                    hg38_match_rate: detection.hg38_match_rate,
+                });
+
+                if !builds_match(&detection.detected_build, &config.assembly) {
+                    tracing::info!(
+                        "Detected build {} differs from target {}. Initiating liftover.",
+                        detection.detected_build,
+                        config.assembly
+                    );
+
+                    match ChainRegistry::new() {
+                        Ok(registry) => {
+                            match registry.get_chain(&detection.detected_build, &config.assembly) {
+                                Ok(chain) => {
+                                    let liftover_chain_local = Some(Arc::new(chain));
+                                    liftover_chain = liftover_chain_local;
+                                    // Force standardization for liftover workflow
+                                    config.standardize = true;
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to load chain file: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to initialize ChainRegistry: {}", e);
+                        }
+                    }
+                } else {
+                    tracing::info!("Build matches target assembly. No liftover needed.");
+                }
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "Build detection failed: {}. Refusing to assume input matches target ({})",
+                    e,
+                    config.assembly
+                ));
+            }
+        }
+    }
+
+    if liftover_chain.is_some() {
+        requires_reference = true;
     }
 
     if !matches!(config.input_format, crate::input::InputFormat::Dtc) {

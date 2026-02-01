@@ -6,10 +6,20 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use noodles::{bcf, vcf};
 
 use crate::cli::Sex;
 use crate::dtc::{self, Allele, Record as DtcRecord};
+use crate::input::InputFormat;
+use crate::smart_reader;
+
+#[derive(Debug, Clone)]
+pub struct BuildDetectionResult {
+    pub detected_build: String,
+    pub hg19_match_rate: f64,
+    pub hg38_match_rate: f64,
+}
 
 /// Infer sex from DTC records.
 ///
@@ -95,24 +105,44 @@ pub fn infer_sex_from_records(records: &[DtcRecord], build: &str) -> Result<Sex>
     }
 }
 
-/// Detect genome build from a VCF file using check_build.
-///
-/// Returns "GRCh37" or "GRCh38" based on reference allele matching.
-pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<String> {
-    let path_str = vcf_path.to_string_lossy();
+fn classify_build(detection: check_build::BuildResult) -> BuildDetectionResult {
+    let detected_build = match detection.better_match() {
+        Some(check_build::Reference::Hg19) => "GRCh37".to_string(),
+        Some(check_build::Reference::Hg38) | None => "GRCh38".to_string(),
+    };
 
-    // check_build requires .vcf extension
-    if !path_str.ends_with(".vcf") {
-        anyhow::bail!("check_build requires .vcf file, got: {}", path_str);
+    BuildDetectionResult {
+        detected_build,
+        hg19_match_rate: detection.hg19_match_rate,
+        hg38_match_rate: detection.hg38_match_rate,
+    }
+}
+
+fn detect_build_from_variants(variants: &[check_build::Variant]) -> Result<BuildDetectionResult> {
+    if variants.is_empty() {
+        anyhow::bail!("No variants available for build detection");
     }
 
-    let result = check_build::detect_build(path_str.to_string())
-        .map_err(|e| anyhow::anyhow!("Build detection failed: {}", e))?;
+    // Ensure we have cached references (downloads if needed, uses cache otherwise)
+    let refs_dir = crate::source_ref::convert_genome_refs_dir()?;
+    let hg19_path = refs_dir.join("hg19.fa");
+    let hg38_path = refs_dir.join("hg38.fa");
 
-    println!(
-        "DEBUG: check_build match output: hg19={:.1}%, hg38={:.1}%",
-        result.hg19_match_rate, result.hg38_match_rate
-    );
+    // Pre-cache both references if they don't exist
+    // This downloads once and reuses forever
+    if !hg19_path.exists() || !hg38_path.exists() {
+        tracing::info!("Caching reference genomes for build detection");
+        crate::source_ref::load_source_reference("GRCh37")?;
+        crate::source_ref::load_source_reference("GRCh38")?;
+    }
+
+    // Call check_build with our cached paths - no downloads, no MD5 checks
+    let result = check_build::detect_build_from_positions_with_refs(
+        variants,
+        hg19_path.to_string_lossy().as_ref(),
+        hg38_path.to_string_lossy().as_ref(),
+    )
+    .map_err(|e| anyhow::anyhow!("Build detection failed: {}", e))?;
 
     tracing::info!(
         "Build detection: hg19={:.1}%, hg38={:.1}%",
@@ -120,16 +150,153 @@ pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<String> {
         result.hg38_match_rate
     );
 
-    match result.better_match() {
-        Some(check_build::Reference::Hg19) => Ok("GRCh37".to_string()),
-        Some(check_build::Reference::Hg38) | None => Ok("GRCh38".to_string()),
+    Ok(classify_build(result))
+}
+
+/// Detect genome build from a VCF file using check_build.
+///
+/// Returns "GRCh37" or "GRCh38" based on reference allele matching.
+pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<BuildDetectionResult> {
+    let reader = smart_reader::open_input(vcf_path)
+        .with_context(|| format!("failed to open input {}", vcf_path.display()))?;
+    let mut vcf_reader = vcf::io::Reader::new(reader);
+    let header = vcf_reader.read_header()?;
+
+    let mut variants = Vec::with_capacity(1000);
+    let mut records_seen = 0usize;
+
+    for result in vcf_reader.record_bufs(&header) {
+        let record = match result {
+            Ok(record) => record,
+            Err(e) => {
+                tracing::warn!("failed to read VCF record: {}", e);
+                continue;
+            }
+        };
+
+        records_seen += 1;
+        if variants.len() >= 1000 {
+            break;
+        }
+
+        let chrom = record.reference_sequence_name().to_uppercase();
+        if matches!(
+            chrom.as_str(),
+            "X" | "Y" | "CHRX" | "CHRY" | "MT" | "CHRM"
+        ) {
+            continue;
+        }
+
+        let pos = match record.variant_start().map(|p| usize::from(p) as u64) {
+            Some(pos) if pos > 0 => pos,
+            _ => continue,
+        };
+
+        let ref_base = record.reference_bases().to_ascii_uppercase();
+        if ref_base.len() != 1 {
+            continue;
+        }
+        let base = ref_base.chars().next().unwrap();
+        if !matches!(base, 'A' | 'C' | 'G' | 'T') {
+            continue;
+        }
+
+        variants.push(check_build::Variant {
+            chrom: record.reference_sequence_name().to_string(),
+            pos,
+            ref_base,
+        });
+    }
+
+    if variants.len() < 100 {
+        tracing::warn!(
+            variants = variants.len(),
+            records = records_seen,
+            "Low variant count for build detection"
+        );
+    }
+
+    detect_build_from_variants(&variants)
+}
+
+pub fn detect_build_from_bcf(bcf_path: &Path) -> Result<BuildDetectionResult> {
+    let reader = smart_reader::open_input(bcf_path)
+        .with_context(|| format!("failed to open input {}", bcf_path.display()))?;
+    let mut bcf_reader = bcf::io::Reader::new(reader);
+    let header = bcf_reader.read_header()?;
+
+    let mut variants = Vec::with_capacity(1000);
+    let mut records_seen = 0usize;
+
+    for result in bcf_reader.record_bufs(&header) {
+        let record = match result {
+            Ok(record) => record,
+            Err(e) => {
+                tracing::warn!("failed to read BCF record: {}", e);
+                continue;
+            }
+        };
+
+        records_seen += 1;
+        if variants.len() >= 1000 {
+            break;
+        }
+
+        let chrom = record.reference_sequence_name().to_uppercase();
+        if matches!(
+            chrom.as_str(),
+            "X" | "Y" | "CHRX" | "CHRY" | "MT" | "CHRM"
+        ) {
+            continue;
+        }
+
+        let pos = match record.variant_start().map(|p| usize::from(p) as u64) {
+            Some(pos) if pos > 0 => pos,
+            _ => continue,
+        };
+
+        let ref_base = record.reference_bases().to_ascii_uppercase();
+        if ref_base.len() != 1 {
+            continue;
+        }
+        let base = ref_base.chars().next().unwrap();
+        if !matches!(base, 'A' | 'C' | 'G' | 'T') {
+            continue;
+        }
+
+        variants.push(check_build::Variant {
+            chrom: record.reference_sequence_name().to_string(),
+            pos,
+            ref_base,
+        });
+    }
+
+    if variants.len() < 100 {
+        tracing::warn!(
+            variants = variants.len(),
+            records = records_seen,
+            "Low variant count for build detection"
+        );
+    }
+
+    detect_build_from_variants(&variants)
+}
+
+pub fn detect_build_from_variant_file(
+    path: &Path,
+    format: InputFormat,
+) -> Result<BuildDetectionResult> {
+    match format {
+        InputFormat::Vcf => detect_build_from_vcf(path),
+        InputFormat::Bcf => detect_build_from_bcf(path),
+        _ => anyhow::bail!("Build detection requires VCF or BCF input"),
     }
 }
 
 /// Detect build from DTC records using check_build.
 ///
 /// Builds Variant list from records (positions only), then checks against hg19/hg38.
-pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<String> {
+pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<BuildDetectionResult> {
     // Build Variant list for check_build (max 1000 for speed)
     let mut variants = Vec::with_capacity(1000);
 
@@ -173,42 +340,7 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<String> {
         tracing::warn!("Only {} variants for build detection", variants.len());
     }
 
-    // Ensure we have cached references (downloads if needed, uses cache otherwise)
-    let refs_dir = crate::source_ref::convert_genome_refs_dir()?;
-    let hg19_path = refs_dir.join("hg19.fa");
-    let hg38_path = refs_dir.join("hg38.fa");
-
-    // Pre-cache both references if they don't exist
-    // This downloads once and reuses forever
-    if !hg19_path.exists() || !hg38_path.exists() {
-        tracing::info!("Caching reference genomes for build detection");
-        crate::source_ref::load_source_reference("GRCh37")?;
-        crate::source_ref::load_source_reference("GRCh38")?;
-    }
-
-    // Call check_build with our cached paths - no downloads, no MD5 checks
-    let result = check_build::detect_build_from_positions_with_refs(
-        &variants,
-        hg19_path.to_string_lossy().as_ref(),
-        hg38_path.to_string_lossy().as_ref(),
-    )
-    .map_err(|e| anyhow::anyhow!("Build detection failed: {}", e))?;
-
-    println!(
-        "DEBUG: output from detect_build_from_positions: hg19={:.1}%, hg38={:.1}%",
-        result.hg19_match_rate, result.hg38_match_rate
-    );
-
-    tracing::info!(
-        "Build detection: hg19={:.1}%, hg38={:.1}%",
-        result.hg19_match_rate,
-        result.hg38_match_rate
-    );
-
-    match result.better_match() {
-        Some(check_build::Reference::Hg19) => Ok("GRCh37".to_string()),
-        Some(check_build::Reference::Hg38) | None => Ok("GRCh38".to_string()),
-    }
+    detect_build_from_variants(&variants)
 }
 
 /// Classify chromosome string into Chromosome enum for infer_sex.
