@@ -143,8 +143,7 @@ fn detect_build_from_variants(
         variants,
         hg19_path.to_string_lossy().as_ref(),
         hg38_path.to_string_lossy().as_ref(),
-    )
-    .map_err(|e| anyhow::anyhow!("Build detection failed: {}", e))?;
+    )?;
 
     tracing::info!(
         "Build detection: hg19={:.1}%, hg38={:.1}%",

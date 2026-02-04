@@ -6,6 +6,7 @@ use crate::dtc::{self, Record as DtcRecord};
 use crate::reference::ReferenceGenome;
 use crate::remote::{self};
 use std::fs;
+use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,10 +32,76 @@ fn check_build_cache_dir() -> Result<PathBuf> {
     Ok(xdg_cache_dir()?.join("check_build"))
 }
 
+fn candidate_refs_dirs() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(dirs) = directories::ProjectDirs::from("com", "convert_genome", "convert_genome") {
+        candidates.push(dirs.cache_dir().join("refs"));
+    }
+
+    if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
+        candidates.push(PathBuf::from(dir).join("convert_genome").join("refs"));
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(
+            PathBuf::from(home)
+                .join(".cache")
+                .join("convert_genome")
+                .join("refs"),
+        );
+    }
+
+    candidates.push(std::env::temp_dir().join("convert_genome").join("refs"));
+
+    let mut deduped = Vec::new();
+    for candidate in candidates {
+        if !deduped.contains(&candidate) {
+            deduped.push(candidate);
+        }
+    }
+
+    deduped
+}
+
+fn ensure_writable_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let test_path = path.join(format!(".writetest.{}.{}", std::process::id(), nanos));
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&test_path)
+        .with_context(|| format!("failed to create {}", test_path.display()))?;
+    file.write_all(b"")?;
+    file.flush()?;
+    fs::remove_file(&test_path)
+        .with_context(|| format!("failed to clean up {}", test_path.display()))?;
+
+    Ok(())
+}
+
 pub fn convert_genome_refs_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("com", "convert_genome", "convert_genome")
-        .ok_or_else(|| anyhow!("Failed to determine cache directory"))?;
-    Ok(dirs.cache_dir().join("refs"))
+    let candidates = candidate_refs_dirs();
+    let mut errors = Vec::new();
+
+    for candidate in candidates {
+        match ensure_writable_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) => errors.push(format!("{} ({})", candidate.display(), err)),
+        }
+    }
+
+    Err(anyhow!(
+        "Failed to find a writable cache directory. Tried: {}",
+        errors.join("; ")
+    ))
 }
 
 fn build_to_check_build_filename(build: &str) -> Option<&'static str> {
