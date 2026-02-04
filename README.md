@@ -108,8 +108,12 @@ The tool is controlled via a unified command-line interface.
 
 **Required:**
 *   `--input`: Path to the genotype file.
-*   `--reference`: Path to the reference FASTA (or a URL).
 *   `--output` (or `--output-dir`): Destination for the converted data.
+
+**Optional:**
+*   `--reference`: Path/URL to the reference FASTA. If omitted, the tool downloads a known
+    reference for the target assembly when it needs one (e.g., standardization, liftover,
+    or DTC inputs).
 
 **Key Flags:**
 *   `--format`: `vcf`, `bcf`, or `plink`.
