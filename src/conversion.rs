@@ -211,10 +211,13 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // build_detection variable is used in report_builder
     let mut build_detection: Option<crate::report::BuildDetection> = None;
 
-    let mut set_auto_reference_metadata = |reference: &ReferenceGenome| {
+    fn set_auto_reference_metadata(
+        config: &mut ConversionConfig,
+        reference: &ReferenceGenome,
+    ) {
         config.reference_fasta = Some(reference.path().to_path_buf());
         config.reference_origin = Some(format!("auto({})", config.assembly));
-    };
+    }
 
     if matches!(config.input_format, crate::input::InputFormat::Dtc) {
         // Pre-scan DTC file for inference (done once, used for both)
@@ -331,7 +334,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 // This mirrors how we load source reference, but for the target.
                 match crate::source_ref::load_source_reference(&config.assembly) {
                     Ok(r) => {
-                        set_auto_reference_metadata(&r);
+                        set_auto_reference_metadata(&mut config, &r);
                         reference = Some(r);
                     }
                     Err(e) => {
@@ -454,7 +457,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             } else if requires_reference {
                 match crate::source_ref::load_source_reference(&config.assembly) {
                     Ok(r) => {
-                        set_auto_reference_metadata(&r);
+                        set_auto_reference_metadata(&mut config, &r);
                         reference = Some(r);
                     }
                     Err(e) => {
