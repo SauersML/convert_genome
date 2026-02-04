@@ -211,6 +211,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // build_detection variable is used in report_builder
     let mut build_detection: Option<crate::report::BuildDetection> = None;
 
+    let mut set_auto_reference_metadata = |reference: &ReferenceGenome| {
+        config.reference_fasta = Some(reference.path().to_path_buf());
+        config.reference_origin = Some(format!("auto({})", config.assembly));
+    };
+
     if matches!(config.input_format, crate::input::InputFormat::Dtc) {
         // Pre-scan DTC file for inference (done once, used for both)
         let prescan_records = prescan_dtc_records(&config.input)?;
@@ -325,7 +330,10 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 // try to load standard reference for the TARGET assembly.
                 // This mirrors how we load source reference, but for the target.
                 match crate::source_ref::load_source_reference(&config.assembly) {
-                    Ok(r) => reference = Some(r),
+                    Ok(r) => {
+                        set_auto_reference_metadata(&r);
+                        reference = Some(r);
+                    }
                     Err(e) => {
                         // Only soft-fail here; hard failure happens below if it was strictly required.
                         tracing::debug!(
@@ -445,7 +453,10 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 );
             } else if requires_reference {
                 match crate::source_ref::load_source_reference(&config.assembly) {
-                    Ok(r) => reference = Some(r),
+                    Ok(r) => {
+                        set_auto_reference_metadata(&r);
+                        reference = Some(r);
+                    }
                     Err(e) => {
                         tracing::debug!(
                             "Could not auto-load target reference for {}: {}",

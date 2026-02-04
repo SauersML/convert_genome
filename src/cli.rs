@@ -29,9 +29,9 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = InputFormat::Auto)]
     input_format: InputFormat,
 
-    /// Reference genome FASTA (GRCh38)
+    /// Reference genome FASTA (GRCh38). If omitted, a known reference is downloaded as needed.
     #[arg(value_name = "REFERENCE")]
-    reference: PathBuf,
+    reference: Option<PathBuf>,
 
     /// Output VCF or BCF path (mutually exclusive with --output-dir)
     #[arg(value_name = "OUTPUT", conflicts_with = "output_dir")]
@@ -110,14 +110,24 @@ pub fn run() -> Result<()> {
 
     let mut resources = ResourceManager::new();
     let input_origin = cli.input.to_string_lossy().to_string();
-    let reference_origin = cli.reference.to_string_lossy().to_string();
+    let reference_origin = cli
+        .reference
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
     let reference_fai_origin = cli
         .reference_fai
         .as_ref()
         .map(|path| path.to_string_lossy().to_string());
 
     let resolved_input = resources.resolve(&cli.input)?;
-    let resolved_reference = resources.resolve(&cli.reference)?;
+    if cli.reference.is_none() && cli.reference_fai.is_some() {
+        anyhow::bail!("--reference-fai requires --reference");
+    }
+
+    let resolved_reference = match &cli.reference {
+        Some(path) => Some(resources.resolve(path)?),
+        None => None,
+    };
     let resolved_reference_fai = match &cli.reference_fai {
         Some(path) => Some(resources.resolve(path)?),
         None => None,
@@ -139,8 +149,8 @@ pub fn run() -> Result<()> {
         input: resolved_input,
         input_format,
         input_origin,
-        reference_fasta: Some(resolved_reference),
-        reference_origin: Some(reference_origin),
+        reference_fasta: resolved_reference,
+        reference_origin,
         reference_fai: resolved_reference_fai,
         reference_fai_origin,
         output: output.clone(),
