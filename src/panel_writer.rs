@@ -3,7 +3,7 @@
 //! This module handles writing the modified (padded) reference panel
 //! that includes novel alleles from user data.
 
-use std::io::{self, BufRead, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -23,15 +23,10 @@ pub fn write_padded_panel<P: AsRef<Path>>(
     let original = original_panel_path.as_ref();
     let output = output_path.as_ref();
 
-    // Open original panel for reading
-    let file = std::fs::File::open(original)
+    // Use shared smart reader so BGZF / concatenated gzip / nested compression
+    // behaves the same as panel loading and conversion code paths.
+    let reader = crate::smart_reader::open_input(original)
         .with_context(|| format!("failed to open original panel {}", original.display()))?;
-
-    let reader: Box<dyn BufRead> = if original.to_string_lossy().ends_with(".gz") {
-        Box::new(io::BufReader::new(flate2::read::GzDecoder::new(file)))
-    } else {
-        Box::new(io::BufReader::new(file))
-    };
 
     let mut vcf_reader = vcf::io::Reader::new(reader);
     let header = vcf_reader.read_header()?;
@@ -41,7 +36,7 @@ pub fn write_padded_panel<P: AsRef<Path>>(
         .with_context(|| format!("failed to create padded panel {}", output.display()))?;
 
     // Wrap in gzip if needed
-    let writer: Box<dyn Write> = if output.to_string_lossy().ends_with(".gz") {
+    let writer: Box<dyn Write> = if is_gzip_path(output) {
         Box::new(flate2::write::GzEncoder::new(
             BufWriter::new(out_file),
             flate2::Compression::default(),
@@ -150,6 +145,16 @@ pub fn write_padded_panel<P: AsRef<Path>>(
     );
 
     Ok(())
+}
+
+fn is_gzip_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            let lower = ext.to_ascii_lowercase();
+            lower == "gz" || lower == "bgz" || lower == "bgzf"
+        })
+        .unwrap_or(false)
 }
 
 fn compare_sites(
@@ -275,6 +280,8 @@ fn site_to_record(site: &PanelSite) -> Result<vcf::variant::record_buf::RecordBu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
+    use std::io::Write;
 
     #[test]
     fn test_site_to_record() {
@@ -289,6 +296,14 @@ mod tests {
         let record = site_to_record(&site).unwrap();
         assert_eq!(record.reference_sequence_name(), "1");
         assert_eq!(record.reference_bases().to_string(), "A");
+    }
+
+    #[test]
+    fn test_is_gzip_path_extensions() {
+        assert!(is_gzip_path(std::path::Path::new("panel.vcf.gz")));
+        assert!(is_gzip_path(std::path::Path::new("panel.vcf.bgz")));
+        assert!(is_gzip_path(std::path::Path::new("panel.vcf.bgzf")));
+        assert!(!is_gzip_path(std::path::Path::new("panel.vcf")));
     }
 
     #[test]
@@ -367,5 +382,46 @@ mod tests {
             );
             last_pos = pos;
         }
+    }
+
+    #[test]
+    fn test_padded_panel_reads_all_concatenated_gzip_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir.path().join("panel.vcf.gz");
+        let output_path = dir.path().join("panel_out.vcf");
+
+        let header_and_first = concat!(
+            "##fileformat=VCFv4.3\n",
+            "##contig=<ID=chr1,length=1000>\n",
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+            "chr1\t1\trs1\tA\tG\t.\tPASS\t.\n"
+        );
+        let second = "chr1\t2\trs2\tC\tT\t.\tPASS\t.\n";
+
+        // Build a concatenated gzip stream (BGZF-style multi-member gzip).
+        {
+            let file = std::fs::File::create(&original_path).unwrap();
+            let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            encoder.write_all(header_and_first.as_bytes()).unwrap();
+            encoder.finish().unwrap();
+        }
+        {
+            let file = OpenOptions::new().append(true).open(&original_path).unwrap();
+            let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            encoder.write_all(second.as_bytes()).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let panel_index = crate::panel::PanelIndex::load(&original_path).unwrap();
+        assert_eq!(panel_index.len(), 2);
+        let padded = crate::panel::PaddedPanel::new(panel_index);
+
+        write_padded_panel(&original_path, &padded, &output_path).unwrap();
+
+        let reader = std::fs::File::open(&output_path).unwrap();
+        let mut vcf_reader = vcf::io::Reader::new(std::io::BufReader::new(reader));
+        let header = vcf_reader.read_header().unwrap();
+        let record_count = vcf_reader.record_bufs(&header).count();
+        assert_eq!(record_count, 2);
     }
 }

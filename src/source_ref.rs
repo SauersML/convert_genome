@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use url::Url;
 
 use crate::dtc::{self, Record as DtcRecord};
@@ -129,7 +129,7 @@ fn build_to_uncompressed_name(build: &str) -> Option<&'static str> {
 fn decompress_gzip_to_path(gz_path: &Path, out_path: &Path) -> Result<()> {
     let input = fs::File::open(gz_path)
         .with_context(|| format!("failed to open gz reference {}", gz_path.display()))?;
-    let mut decoder = GzDecoder::new(input);
+    let mut decoder = MultiGzDecoder::new(input);
 
     let parent = out_path
         .parent()
