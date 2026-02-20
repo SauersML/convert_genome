@@ -108,7 +108,7 @@ The tool is controlled via a unified command-line interface.
 
 **Required:**
 *   `--input`: Path to the genotype file.
-*   `--output` (or `--output-dir`): Destination for the converted data.
+*   `--output` (or `--output-dir`): Destination for the converted data (`--output-dir` writes `genotypes.vcf`, and also `panel.vcf` when `--panel` is used).
 
 **Optional:**
 *   `--reference`: Path/URL to the reference FASTA. If omitted, the tool downloads a known
