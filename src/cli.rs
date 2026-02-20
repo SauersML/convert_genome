@@ -37,7 +37,7 @@ struct Cli {
     #[arg(value_name = "OUTPUT", conflicts_with = "output_dir")]
     output: Option<PathBuf>,
 
-    /// Output directory for panel mode (produces panel.vcf + genotypes.vcf)
+    /// Output directory (always produces genotypes.vcf; also panel.vcf when --panel is set)
     #[arg(long, value_name = "DIR", conflicts_with = "output")]
     output_dir: Option<PathBuf>,
 
@@ -85,19 +85,16 @@ pub fn run() -> Result<()> {
     init_logging(&cli.log_level)?;
 
     // Validate output arguments
-    let output = match (&cli.output, &cli.output_dir, &cli.panel) {
-        (Some(output), None, _) => output.clone(),
-        (None, Some(dir), Some(_)) => {
-            // Panel mode - create output directory and use genotypes.vcf as output
+    let output = match (&cli.output, &cli.output_dir) {
+        (Some(output), None) => output.clone(),
+        (None, Some(dir)) => {
+            // Directory mode - create output directory and use genotypes.vcf as output
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("failed to create output directory: {}", dir.display()))?;
             dir.join("genotypes.vcf")
         }
-        (None, Some(_), None) => {
-            anyhow::bail!("--output-dir requires --panel");
-        }
-        (None, None, _) => {
-            anyhow::bail!("Either --output or --output-dir (with --panel) is required");
+        (None, None) => {
+            anyhow::bail!("Either --output or --output-dir is required");
         }
         _ => unreachable!(), // conflicts_with handles other cases
     };
