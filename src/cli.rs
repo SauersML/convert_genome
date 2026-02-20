@@ -30,7 +30,7 @@ struct Cli {
     input_format: InputFormat,
 
     /// Reference genome FASTA (GRCh38). If omitted, a known reference is downloaded as needed.
-    #[arg(value_name = "REFERENCE")]
+    #[arg(long, value_name = "REFERENCE")]
     reference: Option<PathBuf>,
 
     /// Output VCF or BCF path (mutually exclusive with --output-dir)
@@ -282,5 +282,32 @@ fn print_summary(summary: &ConversionSummary) {
             "Ignored {count} malformed input lines.",
             count = summary.parse_errors
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_output_without_reference_positional() {
+        let cli = Cli::parse_from(["convert_genome", "input.txt", "output.vcf"]);
+        assert_eq!(cli.input, PathBuf::from("input.txt"));
+        assert_eq!(cli.reference, None);
+        assert_eq!(cli.output, Some(PathBuf::from("output.vcf")));
+    }
+
+    #[test]
+    fn parses_explicit_reference_flag() {
+        let cli = Cli::parse_from([
+            "convert_genome",
+            "input.txt",
+            "--reference",
+            "ref.fa",
+            "output.vcf",
+        ]);
+        assert_eq!(cli.reference, Some(PathBuf::from("ref.fa")));
+        assert_eq!(cli.output, Some(PathBuf::from("output.vcf")));
     }
 }
