@@ -307,4 +307,26 @@ mod tests {
         assert_eq!(cli.reference, Some(PathBuf::from("ref.fa")));
         assert_eq!(cli.output, Some(PathBuf::from("output.vcf")));
     }
+
+    #[test]
+    fn parses_output_dir_without_reference() {
+        let cli = Cli::parse_from([
+            "convert_genome",
+            "--output-dir",
+            "out",
+            "input.vcf.gz",
+            "--panel",
+            "panel.bcf",
+            "--standardize",
+            "--assembly",
+            "GRCh38",
+        ]);
+
+        assert_eq!(cli.input, PathBuf::from("input.vcf.gz"));
+        assert_eq!(cli.reference, None);
+        assert_eq!(cli.output_dir, Some(PathBuf::from("out")));
+        assert_eq!(cli.panel, Some(PathBuf::from("panel.bcf")));
+        assert!(cli.standardize);
+        assert_eq!(cli.assembly, "GRCh38");
+    }
 }

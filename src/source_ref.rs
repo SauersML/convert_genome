@@ -179,26 +179,16 @@ impl SourceReferenceRegistry {
     /// Get the download URL for a specific genome build.
     pub fn get_url(build: &str) -> Option<Url> {
         let normalized = build.to_lowercase();
-        // URLs for basic FASTA files (no alts/patches for speed/simplicity)
+        // URLs for basic FASTA files (no alts/patches for speed/simplicity).
+        // Use HTTPS to avoid UCSC HTTP 403 responses.
         if normalized.contains("37") || normalized.contains("hg19") {
-            // Using a reliable source for hg19 fasta (e.g., from UCSC or similar)
-            // Use a known public UCSC URL.
-            // Using GRC assembly from NCBI or similar is best.
-            // Let's use the one from the project's S3 or similar if available, otherwise a public one.
-            // User didn't specify, so I'll suggest a standard UCSC hg19 URL.
-            // Warning: These files are large (900MB+ gzipped).
-            // Using a smaller masked version or chrom-by-chrom might be better, but we need random access.
-            // Let's assume the user has a way to get these or we use a standard one.
-            // Since I can't browse the web for a URL, I will use a standard easy-to-guess one or rely on the user providing it?
-            // "Source reference loading" implies we fetch it.
-            // Let's use the 1000 Genomes hs37d5 or standard hg19.
             Some(
-                Url::parse("http://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz")
+                Url::parse("https://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz")
                     .unwrap(),
             )
         } else if normalized.contains("38") || normalized.contains("hg38") {
             Some(
-                Url::parse("http://hgdownload.cse.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz")
+                Url::parse("https://hgdownload.cse.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz")
                     .unwrap(),
             )
         } else {
