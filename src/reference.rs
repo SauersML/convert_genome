@@ -57,12 +57,22 @@ impl ReferenceGenome {
         let canonical = fs::canonicalize(path)?;
 
         let index_path = fai_path.unwrap_or_else(|| default_index_path(&canonical));
-        let index = if index_path.exists() {
-            fai::fs::read(&index_path)?
+        let rebuild_index = should_rebuild_index(&canonical, &index_path)?;
+        let index = if rebuild_index {
+            build_and_write_index(&canonical, &index_path)?
         } else {
-            let index = fasta::fs::index(&canonical)?;
-            fai::fs::write(&index_path, &index)?;
-            index
+            match fai::fs::read(&index_path) {
+                Ok(index) => index,
+                Err(err) => {
+                    tracing::warn!(
+                        fasta = %canonical.display(),
+                        fai = %index_path.display(),
+                        error = %err,
+                        "failed to read FASTA index; rebuilding"
+                    );
+                    build_and_write_index(&canonical, &index_path)?
+                }
+            }
         };
 
         let reader = fasta::io::indexed_reader::Builder::default()
@@ -194,6 +204,29 @@ fn default_index_path(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+fn should_rebuild_index(fasta_path: &Path, index_path: &Path) -> Result<bool, io::Error> {
+    if !index_path.exists() {
+        return Ok(true);
+    }
+
+    let fasta_meta = fs::metadata(fasta_path)?;
+    let index_meta = fs::metadata(index_path)?;
+
+    // Rebuild when FASTA is newer than the existing index.
+    // This prevents stale line-width/offset values when the FASTA was rewritten
+    // (e.g., sequence wrapping changed from one line to multiple lines).
+    match (fasta_meta.modified(), index_meta.modified()) {
+        (Ok(fasta_mtime), Ok(index_mtime)) => Ok(fasta_mtime > index_mtime),
+        _ => Ok(false),
+    }
+}
+
+fn build_and_write_index(path: &Path, index_path: &Path) -> Result<fai::Index, ReferenceError> {
+    let index = fasta::fs::index(path)?;
+    fai::fs::write(index_path, &index)?;
+    Ok(index)
+}
+
 fn canonical_key(raw: &str) -> Cow<'_, str> {
     let trimmed = raw.trim();
     let stripped = trimmed.strip_prefix("chr").unwrap_or(trimmed);
@@ -286,7 +319,7 @@ impl ParBoundaries {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{io::Write, thread, time::Duration};
 
     #[test]
     fn reference_fetches_base() {
@@ -336,5 +369,92 @@ mod tests {
 
         // 26 -> MT (mapped to chrM -> MT)
         assert_eq!(reference.resolve_contig_name("26").unwrap(), "chrM");
+    }
+
+    #[test]
+    fn reference_reads_wrapped_fasta_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let fasta_path = dir.path().join("wrapped.fa");
+        {
+            let mut file = fs::File::create(&fasta_path).unwrap();
+            writeln!(file, ">chr1").unwrap();
+            writeln!(file, "AC").unwrap();
+            writeln!(file, "GT").unwrap();
+            writeln!(file, "AC").unwrap();
+        }
+
+        let reference = ReferenceGenome::open(&fasta_path, None).unwrap();
+        assert_eq!(reference.base("chr1", 1).unwrap(), 'A');
+        assert_eq!(reference.base("chr1", 3).unwrap(), 'G');
+        assert_eq!(reference.base("chr1", 6).unwrap(), 'C');
+    }
+
+    #[test]
+    fn single_line_and_wrapped_fasta_have_identical_bases() {
+        let dir = tempfile::tempdir().unwrap();
+        let single_path = dir.path().join("single.fa");
+        let wrapped_path = dir.path().join("wrapped.fa");
+
+        {
+            let mut file = fs::File::create(&single_path).unwrap();
+            writeln!(file, ">chr1").unwrap();
+            writeln!(file, "ACGTACGTACGT").unwrap();
+        }
+
+        {
+            let mut file = fs::File::create(&wrapped_path).unwrap();
+            writeln!(file, ">chr1").unwrap();
+            writeln!(file, "ACG").unwrap();
+            writeln!(file, "TAC").unwrap();
+            writeln!(file, "GTA").unwrap();
+            writeln!(file, "CGT").unwrap();
+        }
+
+        let single = ReferenceGenome::open(&single_path, None).unwrap();
+        let wrapped = ReferenceGenome::open(&wrapped_path, None).unwrap();
+
+        for pos in 1..=12 {
+            assert_eq!(
+                single.base("1", pos).unwrap(),
+                wrapped.base("1", pos).unwrap(),
+                "base mismatch at position {pos}"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_fai_is_rebuilt_after_fasta_rewrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let fasta_path = dir.path().join("ref.fa");
+        let expected = "ACGTACGTACGTACGT";
+
+        {
+            let mut file = fs::File::create(&fasta_path).unwrap();
+            writeln!(file, ">chr1").unwrap();
+            writeln!(file, "{expected}").unwrap();
+        }
+
+        // Generate initial index based on single-line sequence layout.
+        let _ = ReferenceGenome::open(&fasta_path, None).unwrap();
+
+        // Ensure mtime changes so stale-index detection is deterministic.
+        thread::sleep(Duration::from_secs(1));
+
+        // Rewrite FASTA with wrapped sequence lines; old index is now stale.
+        {
+            let mut file = fs::File::create(&fasta_path).unwrap();
+            writeln!(file, ">chr1").unwrap();
+            writeln!(file, "ACGT").unwrap();
+            writeln!(file, "ACGT").unwrap();
+            writeln!(file, "ACGT").unwrap();
+            writeln!(file, "ACGT").unwrap();
+        }
+
+        let reference = ReferenceGenome::open(&fasta_path, None).unwrap();
+
+        for (i, base) in expected.chars().enumerate() {
+            let pos = (i + 1) as u64;
+            assert_eq!(reference.base("chr1", pos).unwrap(), base);
+        }
     }
 }
