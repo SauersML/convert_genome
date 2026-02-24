@@ -441,6 +441,33 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 ));
             }
         }
+
+        if config.sex.is_none() {
+            let build_for_sex = build_detection
+                .as_ref()
+                .map(|d| d.detected_build.as_str())
+                .unwrap_or(&config.assembly);
+            tracing::info!(
+                "Sex not specified, inferring from variant input (assuming {})...",
+                build_for_sex
+            );
+            match crate::inference::infer_sex_from_variant_file(
+                &config.input,
+                config.input_format,
+                build_for_sex,
+            ) {
+                Ok(inferred) => {
+                    tracing::info!("Inferred sex: {:?}", inferred);
+                    config.sex = Some(inferred);
+                    sex_inferred = true;
+                }
+                Err(e) => {
+                    tracing::warn!("Sex inference failed: {}. Defaulting to Unknown.", e);
+                    config.sex = Some(Sex::Unknown);
+                    sex_inferred = true;
+                }
+            }
+        }
     }
 
     if liftover_chain.is_some() {

@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use noodles::{bcf, vcf};
+use noodles::vcf::variant::record_buf::samples::sample::Value;
 
 use crate::cli::Sex;
 use crate::dtc::{self, Allele, Record as DtcRecord};
@@ -294,6 +295,112 @@ pub fn detect_build_from_variant_file(
     }
 }
 
+pub fn infer_sex_from_variant_file(path: &Path, format: InputFormat, build: &str) -> Result<Sex> {
+    use infer_sex::{DecisionThresholds, GenomeBuild, InferenceConfig, PlatformDefinition, SexInferenceAccumulator, VariantInfo};
+
+    let genome_build = if build.contains("37") || build.to_lowercase().contains("hg19") {
+        GenomeBuild::Build37
+    } else {
+        GenomeBuild::Build38
+    };
+
+    let mut n_autosomes = 0u64;
+    let mut n_y_nonpar = 0u64;
+    let constants = genome_build.algorithm_constants();
+
+    let mut pending_variants: Vec<VariantInfo> = Vec::new();
+
+    let mut process_record = |record: &noodles::vcf::variant::RecordBuf| {
+        let chrom_name = record.reference_sequence_name().to_string();
+        let chrom = classify_chromosome(&chrom_name);
+        let pos = match record.variant_start().map(|p| usize::from(p) as u64) {
+            Some(p) if p > 0 => p,
+            _ => return,
+        };
+
+        match chrom {
+            infer_sex::Chromosome::Autosome => n_autosomes += 1,
+            infer_sex::Chromosome::Y => {
+                if constants.is_in_y_non_par(pos) {
+                    n_y_nonpar += 1;
+                }
+            }
+            infer_sex::Chromosome::X => {}
+        }
+
+        if let Some(is_het) = first_sample_is_heterozygous(record) {
+            pending_variants.push(VariantInfo {
+                chrom,
+                pos,
+                is_heterozygous: is_het,
+            });
+        }
+    };
+
+    match format {
+        InputFormat::Vcf => {
+            let reader = smart_reader::open_input(path)
+                .with_context(|| format!("failed to open input {}", path.display()))?;
+            let mut vcf_reader = vcf::io::Reader::new(reader);
+            let header = vcf_reader.read_header()?;
+            for result in vcf_reader.record_bufs(&header) {
+                match result {
+                    Ok(record) => process_record(&record),
+                    Err(e) => tracing::warn!("failed to read VCF record for sex inference: {}", e),
+                }
+            }
+        }
+        InputFormat::Bcf => {
+            let reader = smart_reader::open_input(path)
+                .with_context(|| format!("failed to open input {}", path.display()))?;
+            let mut bcf_reader = bcf::io::Reader::new(reader);
+            let header = bcf_reader.read_header()?;
+            for result in bcf_reader.record_bufs(&header) {
+                match result {
+                    Ok(record) => process_record(&record),
+                    Err(e) => tracing::warn!("failed to read BCF record for sex inference: {}", e),
+                }
+            }
+        }
+        _ => anyhow::bail!("Sex inference from variant files requires VCF or BCF input"),
+    }
+
+    if n_autosomes == 0 {
+        anyhow::bail!("No autosomal variants found - cannot infer sex");
+    }
+
+    let config = InferenceConfig {
+        build: genome_build,
+        platform: PlatformDefinition {
+            n_attempted_autosomes: n_autosomes,
+            n_attempted_y_nonpar: n_y_nonpar.max(1),
+        },
+        thresholds: Some(DecisionThresholds::default()),
+    };
+
+    let mut acc = SexInferenceAccumulator::new(config);
+    for variant in &pending_variants {
+        acc.process_variant(variant);
+    }
+
+    let result = acc
+        .finish()
+        .map_err(|e| anyhow::anyhow!("Sex inference failed: {:?}", e))?;
+
+    tracing::info!(
+        "Variant-file sex inference: {:?} (Y density: {:?}, X/auto ratio: {:?})",
+        result.final_call,
+        result.report.y_genome_density,
+        result.report.x_autosome_het_ratio
+    );
+
+    match result.final_call {
+        infer_sex::InferredSex::Male => Ok(Sex::Male),
+        infer_sex::InferredSex::Female => Ok(Sex::Female),
+        infer_sex::InferredSex::Indeterminate => Ok(Sex::Unknown),
+    }
+}
+
 /// Detect build from DTC records using check_build.
 ///
 /// Builds Variant list from records (positions only), then checks against hg19/hg38.
@@ -377,6 +484,42 @@ fn is_heterozygous(genotype: &str) -> bool {
         (Allele::Base(a), Allele::Base(b)) => !a.eq_ignore_ascii_case(b),
         (Allele::Missing, _) | (_, Allele::Missing) => false,
         (a, b) => a != b,
+    }
+}
+
+fn first_sample_is_heterozygous(record: &noodles::vcf::variant::RecordBuf) -> Option<bool> {
+    let keys = record.samples().keys();
+    let gt_index = keys.as_ref().iter().position(|k| k.as_str() == "GT")?;
+    let mut samples = record.samples().values();
+    let first_sample = samples.next()?;
+    let value = first_sample.values().get(gt_index)?.as_ref()?;
+
+    match value {
+        Value::Genotype(genotype) => {
+            let alleles = genotype.as_ref();
+            if alleles.is_empty() {
+                return None;
+            }
+            let observed: Vec<usize> = alleles.iter().filter_map(|a| a.position()).collect();
+            if observed.is_empty() {
+                return None;
+            }
+            if observed.len() == 1 {
+                return Some(false);
+            }
+            Some(observed[0] != observed[1])
+        }
+        Value::String(genotype) => {
+            let parts: Vec<&str> = genotype.split(['/', '|']).collect();
+            if parts.is_empty() || parts.iter().any(|p| p.is_empty() || *p == ".") {
+                return None;
+            }
+            if parts.len() == 1 {
+                return Some(false);
+            }
+            Some(parts[0] != parts[1])
+        }
+        _ => None,
     }
 }
 
