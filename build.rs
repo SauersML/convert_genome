@@ -1730,8 +1730,7 @@ fn manually_check_for_unused_variables() {
         }
     };
 
-    let panic_strategy = std::env::var("CARGO_CFG_PANIC").ok();
-    let mut manual_lint_args = manual_lint_arguments(&build_path, panic_strategy.as_deref());
+    let mut manual_lint_args = manual_lint_arguments(&build_path);
     let source_path = match manual_lint_args.pop() {
         Some(path) => path,
         None => {
@@ -1759,10 +1758,10 @@ fn manually_check_for_unused_variables() {
             }
             None => {
                 emit_stage_detail(&format!(
-                    "manual lint self-check: missing rlib for dependency '{crate_name}'"
+                    "manual lint self-check: missing extern artifact for dependency '{crate_name}'"
                 ));
                 eprintln!(
-                    "manual lint self-check fatal error: required dependency '{crate_name}' rlib not found in {:?}",
+                    "manual lint self-check fatal error: required dependency '{crate_name}' extern artifact not found in {:?}",
                     deps_dir
                 );
                 std::process::exit(1);
@@ -1893,7 +1892,7 @@ fn manually_check_for_unused_variables() {
     }
 }
 
-fn manual_lint_arguments(build_path: &Path, panic_strategy: Option<&str>) -> Vec<OsString> {
+fn manual_lint_arguments(build_path: &Path) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--edition"),
         OsString::from("2024"),
@@ -1905,14 +1904,13 @@ fn manual_lint_arguments(build_path: &Path, panic_strategy: Option<&str>) -> Vec
         OsString::from("unused_imports"),
         OsString::from("--crate-type"),
         OsString::from("bin"),
+        OsString::from("--emit"),
+        OsString::from("metadata"),
         OsString::from("--error-format"),
         OsString::from("human"),
+        OsString::from("--crate-name"),
+        OsString::from("convert_genome_build_script_self_lint"),
     ];
-
-    if let Some(strategy) = panic_strategy {
-        args.push(OsString::from("-C"));
-        args.push(OsString::from(format!("panic={strategy}")));
-    }
 
     args.push(build_path.as_os_str().to_os_string());
     args
@@ -1926,33 +1924,39 @@ fn build_dependencies_directory() -> Option<PathBuf> {
 
 fn locate_build_dependency(deps_dir: &Path, crate_name: &str) -> Option<PathBuf> {
     let prefix = format!("lib{crate_name}-");
-    let mut candidate: Option<PathBuf> = None;
-    let mut candidate_mtime = std::time::SystemTime::UNIX_EPOCH;
+    for extension in ["rmeta", "rlib"] {
+        let mut candidate: Option<PathBuf> = None;
+        let mut candidate_mtime = std::time::SystemTime::UNIX_EPOCH;
 
-    if let Ok(entries) = std::fs::read_dir(deps_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rlib") {
-                continue;
+        if let Ok(entries) = std::fs::read_dir(deps_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some(extension) {
+                    continue;
+                }
+
+                let file_name = match path.file_name().and_then(|name| name.to_str()) {
+                    Some(name) => name,
+                    None => continue,
+                };
+
+                if file_name.starts_with(&prefix)
+                    && let Ok(metadata) = std::fs::metadata(&path)
+                    && let Ok(mtime) = metadata.modified()
+                    && (candidate.is_none() || mtime > candidate_mtime)
+                {
+                    candidate = Some(path);
+                    candidate_mtime = mtime;
+                }
             }
+        }
 
-            let file_name = match path.file_name().and_then(|name| name.to_str()) {
-                Some(name) => name,
-                None => continue,
-            };
-
-            if file_name.starts_with(&prefix)
-                && let Ok(metadata) = std::fs::metadata(&path)
-                && let Ok(mtime) = metadata.modified()
-                && (candidate.is_none() || mtime > candidate_mtime)
-            {
-                candidate = Some(path);
-                candidate_mtime = mtime;
-            }
+        if candidate.is_some() {
+            return candidate;
         }
     }
 
-    candidate
+    None
 }
 
 fn command_preview(program: &OsStr, args: &[OsString]) -> String {
