@@ -1730,7 +1730,8 @@ fn manually_check_for_unused_variables() {
         }
     };
 
-    let mut manual_lint_args = manual_lint_arguments(&build_path);
+    let panic_strategy = std::env::var("CARGO_CFG_PANIC").ok();
+    let mut manual_lint_args = manual_lint_arguments(&build_path, panic_strategy.as_deref());
     let source_path = match manual_lint_args.pop() {
         Some(path) => path,
         None => {
@@ -1892,8 +1893,8 @@ fn manually_check_for_unused_variables() {
     }
 }
 
-fn manual_lint_arguments(build_path: &Path) -> Vec<OsString> {
-    vec![
+fn manual_lint_arguments(build_path: &Path, panic_strategy: Option<&str>) -> Vec<OsString> {
+    let mut args = vec![
         OsString::from("--edition"),
         OsString::from("2024"),
         OsString::from("-D"),
@@ -1906,8 +1907,15 @@ fn manual_lint_arguments(build_path: &Path) -> Vec<OsString> {
         OsString::from("bin"),
         OsString::from("--error-format"),
         OsString::from("human"),
-        build_path.as_os_str().to_os_string(),
-    ]
+    ];
+
+    if let Some(strategy) = panic_strategy {
+        args.push(OsString::from("-C"));
+        args.push(OsString::from(format!("panic={strategy}")));
+    }
+
+    args.push(build_path.as_os_str().to_os_string());
+    args
 }
 
 fn build_dependencies_directory() -> Option<PathBuf> {
