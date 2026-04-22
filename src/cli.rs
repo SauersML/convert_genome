@@ -58,7 +58,7 @@ struct Cli {
     sample: Option<String>,
 
     /// Target build for the output (embedded in metadata)
-    #[arg(long = "output-build", default_value = "GRCh38", alias = "assembly")]
+    #[arg(long = "output-build", default_value = "GRCh38")]
     assembly: String,
 
     /// Caller-asserted input build (e.g. GRCh37, GRCh38). When set, skip
@@ -327,7 +327,7 @@ mod tests {
             "--panel",
             "panel.bcf",
             "--standardize",
-            "--assembly",
+            "--output-build",
             "GRCh38",
         ]);
 
@@ -374,16 +374,16 @@ mod tests {
     }
 
     #[test]
-    fn assembly_alias_still_accepted() {
-        // Backwards-compat alias: --assembly continues to work for one
-        // release. Internal field name stays `assembly` to minimize churn.
-        let cli = Cli::parse_from([
+    fn assembly_flag_is_rejected() {
+        // Clean break: --assembly is no longer accepted as of 0.2.0.
+        // Callers must use --output-build instead.
+        let result = Cli::try_parse_from([
             "convert_genome",
             "input.vcf.gz",
             "output.vcf",
             "--assembly",
             "GRCh37",
         ]);
-        assert_eq!(cli.assembly, "GRCh37");
+        assert!(result.is_err(), "--assembly should no longer be accepted");
     }
 }
