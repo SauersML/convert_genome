@@ -90,6 +90,7 @@ fn create_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> Convers
         par_boundaries: None,
         standardize: false,
         panel: None,
+        input_build: None,
     }
 }
 
