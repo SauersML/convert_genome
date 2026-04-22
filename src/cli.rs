@@ -57,11 +57,11 @@ struct Cli {
     #[arg(long, value_name = "SAMPLE")]
     sample: Option<String>,
 
-    /// Assembly label to embed in metadata
-    #[arg(long, default_value = "GRCh38")]
+    /// Target build for the output (embedded in metadata)
+    #[arg(long = "output-build", default_value = "GRCh38", alias = "assembly")]
     assembly: String,
 
-    /// Caller-asserted source build (e.g. GRCh37, GRCh38). When set, skip
+    /// Caller-asserted input build (e.g. GRCh37, GRCh38). When set, skip
     /// position-based build detection (`check_build`) and treat the input
     /// as already in this build. Saves ~13 minutes per invocation for
     /// callers that already know the input build (e.g. fixed-build
@@ -359,5 +359,31 @@ mod tests {
             "GRCh38",
         ]);
         assert_eq!(cli.input_build.as_deref(), Some("GRCh38"));
+    }
+
+    #[test]
+    fn parses_output_build_flag() {
+        let cli = Cli::parse_from([
+            "convert_genome",
+            "input.vcf.gz",
+            "output.vcf",
+            "--output-build",
+            "GRCh37",
+        ]);
+        assert_eq!(cli.assembly, "GRCh37");
+    }
+
+    #[test]
+    fn assembly_alias_still_accepted() {
+        // Backwards-compat alias: --assembly continues to work for one
+        // release. Internal field name stays `assembly` to minimize churn.
+        let cli = Cli::parse_from([
+            "convert_genome",
+            "input.vcf.gz",
+            "output.vcf",
+            "--assembly",
+            "GRCh37",
+        ]);
+        assert_eq!(cli.assembly, "GRCh37");
     }
 }
