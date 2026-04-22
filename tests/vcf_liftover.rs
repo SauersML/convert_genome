@@ -110,6 +110,7 @@ fn base_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> Conversio
         par_boundaries: convert_genome::reference::ParBoundaries::new("GRCh38"),
         standardize: false,
         panel: None,
+        input_build: None,
     }
 }
 

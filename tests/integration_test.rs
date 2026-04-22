@@ -122,6 +122,7 @@ fn base_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> Conversio
         par_boundaries: None,
         standardize: false,
         panel: None,
+        input_build: None,
     }
 }
 

@@ -52,6 +52,7 @@ impl Fixtures {
             par_boundaries: None,
             standardize: false,
             panel: None,
+            input_build: None,
         }
     }
 }

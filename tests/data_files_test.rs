@@ -40,6 +40,7 @@ fn base_config(input: PathBuf, output: PathBuf, assembly: &str) -> ConversionCon
         par_boundaries: None,
         standardize: false,
         panel: None,
+        input_build: None,
     }
 }
 

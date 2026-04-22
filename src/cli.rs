@@ -61,6 +61,14 @@ struct Cli {
     #[arg(long, default_value = "GRCh38")]
     assembly: String,
 
+    /// Caller-asserted source build (e.g. GRCh37, GRCh38). When set, skip
+    /// position-based build detection (`check_build`) and treat the input
+    /// as already in this build. Saves ~13 minutes per invocation for
+    /// callers that already know the input build (e.g. fixed-build
+    /// production pipelines).
+    #[arg(long, value_name = "BUILD")]
+    input_build: Option<String>,
+
     /// When set, omit reference-only sites from the output
     #[arg(long)]
     variants_only: bool,
@@ -160,6 +168,7 @@ pub fn run() -> Result<()> {
         par_boundaries: crate::reference::ParBoundaries::new(&cli.assembly),
         standardize: cli.standardize,
         panel: resolved_panel,
+        input_build: cli.input_build.clone(),
     };
 
     let summary = convert_dtc_file(config)?;
@@ -328,5 +337,27 @@ mod tests {
         assert_eq!(cli.panel, Some(PathBuf::from("panel.bcf")));
         assert!(cli.standardize);
         assert_eq!(cli.assembly, "GRCh38");
+    }
+
+    #[test]
+    fn input_build_is_optional_and_defaults_to_none() {
+        let cli = Cli::parse_from([
+            "convert_genome",
+            "input.vcf.gz",
+            "output.vcf",
+        ]);
+        assert_eq!(cli.input_build, None);
+    }
+
+    #[test]
+    fn parses_input_build_flag() {
+        let cli = Cli::parse_from([
+            "convert_genome",
+            "input.vcf.gz",
+            "output.vcf",
+            "--input-build",
+            "GRCh38",
+        ]);
+        assert_eq!(cli.input_build.as_deref(), Some("GRCh38"));
     }
 }
