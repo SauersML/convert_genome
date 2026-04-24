@@ -70,150 +70,145 @@ impl PlinkWriter {
     }
 
     pub fn write_variant(&mut self, record: &RecordBuf) -> io::Result<()> {
-        let alt_bases = record.alternate_bases();
-
-        // If no ALTs, just skip or write as monomorphic?
-        // PLINK usually wants at least one ALT or forced dummy.
-        // Existing logic handled 1 ALT.
-        // Let's handle 0 ALTs by writing a monomorphic site (ALT=".")
-        if alt_bases.is_empty() {
-            // Monomorphic sites are not useful for PLINK/Beagle and writing "." as ALT is invalid.
-            return Ok(());
-        }
-
-        // Iterate over all ALT alleles (1-based index)
-        for (i, alt_allele) in alt_bases.as_ref().iter().enumerate() {
-            let alt_idx = i + 1; // 1-based index of the ALT allele we are targeting
-
-            // If multiallelic (more than 1 ALT), append suffix to ID
-            let suffix = if alt_bases.len() > 1 {
-                Some(format!("_ALT{}", alt_idx))
-            } else {
-                None
-            };
-
-            self.write_biallelic_variant(record, alt_idx, suffix, alt_allele)?;
-        }
-
-        Ok(())
+        // Delegate to the shared row formatter, writing into the live .bim/.bed files.
+        let Self { bed, bim, .. } = self;
+        write_plink_row(record, bim, bed)
     }
 
-    /// Write a single biallelic variant line to BIM and BED
-    fn write_biallelic_variant(
-        &mut self,
-        record: &RecordBuf,
-        target_alt_idx: usize,
-        id_suffix: Option<String>,
-        alt_allele_str: &str,
-    ) -> io::Result<()> {
-        // Write BIM line
-        let chrom = record.reference_sequence_name();
+    /// Append a raw PLINK chunk (.bim text + .bed bytes) produced by a worker.
+    /// Used by the parallel pipeline to merge per-chromosome output.
+    pub fn append_chunk(&mut self, bim: &[u8], bed: &[u8]) -> io::Result<()> {
+        self.bim.write_all(bim)?;
+        self.bed.write_all(bed)?;
+        Ok(())
+    }
+}
 
-        // Ids
-        let mut id = if record.ids().is_empty() {
-            ".".to_string()
+/// Emit the PLINK rows for one variant record into the given .bim text sink
+/// and .bed byte sink. Extracted from `PlinkWriter::write_variant` so the
+/// parallel pipeline can target in-memory buffers.
+pub fn write_plink_row<B: Write, D: Write>(
+    record: &RecordBuf,
+    bim: &mut B,
+    bed: &mut D,
+) -> io::Result<()> {
+    let alt_bases = record.alternate_bases();
+    if alt_bases.is_empty() {
+        return Ok(());
+    }
+
+    for (i, alt_allele) in alt_bases.as_ref().iter().enumerate() {
+        let alt_idx = i + 1;
+
+        let suffix = if alt_bases.len() > 1 {
+            Some(format!("_ALT{}", alt_idx))
         } else {
-            record
-                .ids()
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-                .join(";")
+            None
         };
 
-        if let Some(suffix) = id_suffix {
-            if id == "." {
-                // Generate synthetic ID if missing
-                let pos = record.variant_start().map(usize::from).unwrap_or(0);
-                id = format!("{}:{}{}", chrom, pos, suffix);
-            } else {
-                id.push_str(&suffix);
-            }
+        write_biallelic_variant(record, alt_idx, suffix, alt_allele, bim, bed)?;
+    }
+
+    Ok(())
+}
+
+fn write_biallelic_variant<B: Write, D: Write>(
+    record: &RecordBuf,
+    target_alt_idx: usize,
+    id_suffix: Option<String>,
+    alt_allele_str: &str,
+    bim: &mut B,
+    bed: &mut D,
+) -> io::Result<()> {
+    let chrom = record.reference_sequence_name();
+
+    let mut id = if record.ids().is_empty() {
+        ".".to_string()
+    } else {
+        record
+            .ids()
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(";")
+    };
+
+    if let Some(suffix) = id_suffix {
+        if id == "." {
+            let pos = record.variant_start().map(usize::from).unwrap_or(0);
+            id = format!("{}:{}{}", chrom, pos, suffix);
+        } else {
+            id.push_str(&suffix);
         }
+    }
 
-        let pos = record.variant_start().map(usize::from).unwrap_or(0);
-        let ref_base = record.reference_bases();
+    let pos = record.variant_start().map(usize::from).unwrap_or(0);
+    let ref_base = record.reference_bases();
 
-        writeln!(
-            self.bim,
-            "{}\t{}\t0\t{}\t{}\t{}",
-            chrom, id, pos, ref_base, alt_allele_str
-        )?;
+    writeln!(
+        bim,
+        "{}\t{}\t0\t{}\t{}\t{}",
+        chrom, id, pos, ref_base, alt_allele_str
+    )?;
 
-        // Write BED Genotypes
-        let mut byte = 0u8;
-        let mut count = 0;
+    let mut byte = 0u8;
+    let mut count = 0;
 
-        for sample in record.samples().values() {
-            let genotype_val = sample.get(key::GENOTYPE);
+    for sample in record.samples().values() {
+        let genotype_val = sample.get(key::GENOTYPE);
 
-            // Map genotype bits logic:
-            // 00 (0) = HomRef (0 copies of target alt)
-            // 01 (1) = Missing
-            // 10 (2) = Het (1 copy of target alt)
-            // 11 (3) = HomAlt (2 copies of target alt)
+        let bits: u8 = match genotype_val {
+            Some(Some(Value::String(s))) => {
+                let (a1, a2) = parse_gt_indices(s);
+                let mut copies = 0;
+                let mut missing = false;
 
-            // Map genotype string to PLINK bed bits
-            // 00 (0) = HomRef, 01 (1) = Missing, 10 (2) = Het, 11 (3) = HomAlt
-            let bits: u8 = match genotype_val {
-                Some(Some(Value::String(s))) => {
-                    let (a1, a2) = parse_gt_indices(s);
-                    // Count how many match target_alt_idx
-                    let mut copies = 0;
-                    let mut missing = false;
-
-                    // Helper to check allele
-                    let check = |idx_opt: Option<usize>| {
-                        if let Some(idx) = idx_opt {
-                            if idx == target_alt_idx { 1 } else { 0 }
-                        } else {
-                            // If index is missing (None), is the whole GT missing?
-                            // Usually in VCF "./." means both missing.
-                            // If "0/." -> one missing. PLINK doesn't support half-calls well.
-                            // Treat any missing as Missing GT.
-                            2 // Special marker
-                        }
-                    };
-
-                    let c1 = check(a1);
-                    let c2 = check(a2);
-
-                    if c1 == 2 || c2 == 2 {
-                        missing = true;
+                let check = |idx_opt: Option<usize>| {
+                    if let Some(idx) = idx_opt {
+                        if idx == target_alt_idx { 1 } else { 0 }
                     } else {
-                        copies = c1 + c2;
+                        2
                     }
+                };
 
-                    if missing {
-                        1 // Missing (01)
-                    } else {
-                        match copies {
-                            0 => 0, // HomRef (00)
-                            1 => 2, // Het (10)
-                            2 => 3, // HomAlt (11)
-                            _ => 1, // Should not happen for diploid
-                        }
+                let c1 = check(a1);
+                let c2 = check(a2);
+
+                if c1 == 2 || c2 == 2 {
+                    missing = true;
+                } else {
+                    copies = c1 + c2;
+                }
+
+                if missing {
+                    1
+                } else {
+                    match copies {
+                        0 => 0,
+                        1 => 2,
+                        2 => 3,
+                        _ => 1,
                     }
                 }
-                _ => 1, // Missing (None, None, or not a String)
-            };
-
-            byte |= bits << (2 * count);
-            count += 1;
-
-            if count == 4 {
-                self.bed.write_all(&[byte])?;
-                byte = 0;
-                count = 0;
             }
-        }
+            _ => 1,
+        };
 
-        if count > 0 {
-            self.bed.write_all(&[byte])?;
-        }
+        byte |= bits << (2 * count);
+        count += 1;
 
-        Ok(())
+        if count == 4 {
+            bed.write_all(&[byte])?;
+            byte = 0;
+            count = 0;
+        }
     }
+
+    if count > 0 {
+        bed.write_all(&[byte])?;
+    }
+
+    Ok(())
 }
 
 /// Helper to parse GT string into two indices.

@@ -31,7 +31,7 @@ use noodles::vcf::{
         record_buf::{RecordBuf, Samples, samples::sample::Value},
     },
 };
-// rayon removed
+use rayon::prelude::*;
 
 use thiserror::Error;
 use time::{OffsetDateTime, macros::format_description};
@@ -580,7 +580,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     }
 
     // Load panel if provided
-    let padded_panel: Option<std::cell::RefCell<crate::panel::PaddedPanel>> =
+    let padded_panel: Option<parking_lot::Mutex<crate::panel::PaddedPanel>> =
         if let Some(panel_path) = &config.panel {
             tracing::info!(panel = %panel_path.display(), "loading reference panel");
             let panel_index = crate::panel::PanelIndex::load(panel_path)
@@ -592,7 +592,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 ));
             }
             tracing::info!(sites = panel_index.len(), "panel loaded");
-            Some(std::cell::RefCell::new(crate::panel::PaddedPanel::new(
+            Some(parking_lot::Mutex::new(crate::panel::PaddedPanel::new(
                 panel_index,
             )))
         } else {
@@ -767,6 +767,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
     let mut summary = crate::ConversionSummary::default();
 
+    let use_parallel = should_parallelize(&config);
     match config.output_format {
         OutputFormat::Vcf => {
             let output = fs::File::create(&config.output)
@@ -782,7 +783,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 panel: padded_panel.as_ref(),
                 needs_sort,
             };
-            process_records(source, &mut writer, &mut summary, ctx)?;
+            if use_parallel {
+                process_records_parallel_vcf(source, &mut writer, &mut summary, ctx)?;
+            } else {
+                process_records(source, &mut writer, &mut summary, ctx)?;
+            }
         }
         OutputFormat::Bcf => {
             let mut writer = bcf::io::writer::Builder::default()
@@ -815,13 +820,17 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 panel: padded_panel.as_ref(),
                 needs_sort,
             };
-            process_records(source, &mut writer, &mut summary, ctx)?;
+            if use_parallel {
+                process_records_parallel_plink(source, &mut writer, &mut summary, ctx)?;
+            } else {
+                process_records(source, &mut writer, &mut summary, ctx)?;
+            }
         }
     }
 
     // Write padded panel if we have one and output_dir is set
     if let (Some(panel), Some(output_dir)) = (&padded_panel, &config.output_dir) {
-        let panel = panel.borrow();
+        let panel = panel.lock();
         if panel.modified_site_count() > 0 || panel.novel_site_count() > 0 {
             let panel_output = output_dir.join("panel.vcf");
             tracing::info!(
@@ -842,7 +851,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
     // Build and write the run report
     let panel_info = padded_panel.as_ref().map(|p| {
-        let panel = p.borrow();
+        let panel = p.lock();
         crate::report::PanelInfo {
             path: config
                 .panel
@@ -894,8 +903,154 @@ struct ProcessingContext<'a> {
     reference: Option<&'a ReferenceGenome>,
     header: &'a vcf::Header,
     config: &'a ConversionConfig,
-    panel: Option<&'a std::cell::RefCell<crate::panel::PaddedPanel>>,
+    panel: Option<&'a parking_lot::Mutex<crate::panel::PaddedPanel>>,
     needs_sort: bool,
+}
+
+/// Apply standardize + panel harmonization + normalize to a single record.
+/// Returns Some(RecordBuf) if the record should be emitted, or None if filtered.
+/// Updates `summary` counters for skips and standardization failures.
+fn transform_record(
+    record: RecordBuf,
+    ctx: &ProcessingContext,
+    summary: &mut crate::ConversionSummary,
+    warned_unknown_chroms: &mut std::collections::HashSet<String>,
+) -> Option<RecordBuf> {
+    let mut final_record = if ctx.config.standardize {
+        match standardize_record(
+            &record,
+            ctx.reference.expect("reference required for standardize"),
+            ctx.config,
+            summary,
+            warned_unknown_chroms,
+        ) {
+            Ok(Some(standardized)) => standardized,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to standardize record, skipping");
+                summary.reference_failures += 1;
+                return None;
+            }
+        }
+    } else {
+        record
+    };
+
+    if let Some(panel_cell) = ctx.panel {
+        let chrom = final_record.reference_sequence_name().to_string();
+        let pos = final_record.variant_start().map(usize::from).unwrap_or(0) as u64;
+        let ref_base = final_record.reference_bases().to_string();
+
+        let record_alts: Vec<String> = final_record
+            .alternate_bases()
+            .as_ref()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut all_input_alleles = vec![ref_base.clone()];
+        all_input_alleles.extend(record_alts.iter().cloned());
+
+        let mut panel_borrow = panel_cell.lock();
+        let harmonized_indices = match crate::harmonize::harmonize_alleles(
+            &all_input_alleles,
+            &ref_base,
+            &chrom,
+            pos,
+            &mut panel_borrow,
+        ) {
+            Ok(indices) => Some(indices),
+            Err(e) => {
+                tracing::debug!(
+                    chrom = %chrom,
+                    pos = pos,
+                    error = %e,
+                    "allele harmonization failed"
+                );
+                None
+            }
+        };
+
+        if let Some(indices) = harmonized_indices {
+            if let Some(site) = panel_borrow.get_original(&chrom, pos) {
+                let record_ref_len = final_record.reference_bases().len();
+                let panel_ref_len = site.ref_allele.len();
+                let panel_alts_same_len = site
+                    .alt_alleles
+                    .iter()
+                    .all(|alt| alt.len() == panel_ref_len);
+                let record_alts_same_len = final_record
+                    .alternate_bases()
+                    .as_ref()
+                    .iter()
+                    .all(|alt| alt.len() == record_ref_len);
+
+                let should_inject_panel_alts = panel_ref_len == record_ref_len
+                    && panel_alts_same_len
+                    && record_alts_same_len;
+
+                if should_inject_panel_alts {
+                    let merged_alts = crate::harmonize::get_merged_alts(
+                        site,
+                        panel_borrow.added_alts(&site.chrom, pos),
+                    );
+
+                    let mut mapping = std::collections::HashMap::new();
+                    for (old_idx, new_idx) in indices.iter().enumerate() {
+                        mapping.insert(old_idx, *new_idx);
+                    }
+
+                    let samples = if mapping.iter().any(|(old, new)| old != new) {
+                        remap_sample_genotypes(final_record.samples(), &mapping)
+                    } else {
+                        final_record.samples().clone()
+                    };
+
+                    let pos_val = match final_record.variant_start() {
+                        Some(p) => p,
+                        None => {
+                            summary.reference_failures += 1;
+                            return None;
+                        }
+                    };
+
+                    let mut info = final_record.info().clone();
+                    if merged_alts != record_alts {
+                        let infos = ctx.header.infos();
+                        info.as_mut().retain(|key, _| match infos.get(key) {
+                            Some(definition) => !matches!(
+                                definition.number(),
+                                Number::AlternateBases | Number::ReferenceAlternateBases
+                            ),
+                            None => true,
+                        });
+                    }
+
+                    let mut builder = RecordBuf::builder()
+                        .set_reference_sequence_name(final_record.reference_sequence_name())
+                        .set_variant_start(pos_val)
+                        .set_ids(final_record.ids().clone())
+                        .set_filters(final_record.filters().clone())
+                        .set_reference_bases(final_record.reference_bases().to_string())
+                        .set_info(info)
+                        .set_alternate_bases(
+                            noodles::vcf::variant::record_buf::AlternateBases::from(merged_alts),
+                        )
+                        .set_samples(samples);
+
+                    if let Some(qual) = final_record.quality_score() {
+                        builder = builder.set_quality_score(qual);
+                    }
+
+                    final_record = builder.build();
+                }
+            }
+        }
+    }
+
+    normalize_record(&mut final_record);
+    summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
+    Some(final_record)
 }
 
 fn process_records<S, W>(
@@ -928,151 +1083,11 @@ where
     while let Some(result) = source.next_variant(summary) {
         match result {
             Ok(record) => {
-                // Apply standardization if requested
-                let mut final_record = if ctx.config.standardize {
-                    match standardize_record(
-                        &record,
-                        ctx.reference.expect("reference required for standardize"),
-                        ctx.config,
-                        summary,
-                        &mut warned_unknown_chroms,
-                    ) {
-                        Ok(Some(standardized)) => standardized,
-                        Ok(None) => continue, // Filtered out
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to standardize record, skipping");
-                            summary.reference_failures += 1;
-                            continue;
-                        }
-                    }
-                } else {
-                    record
+                let Some(final_record) =
+                    transform_record(record, &ctx, summary, &mut warned_unknown_chroms)
+                else {
+                    continue;
                 };
-
-                // Apply panel harmonization if panel is provided
-                if let Some(panel_cell) = ctx.panel {
-                    let chrom = final_record.reference_sequence_name().to_string();
-                    let pos = final_record.variant_start().map(usize::from).unwrap_or(0) as u64;
-                    let ref_base = final_record.reference_bases().to_string();
-
-                    // Collect alleles from the record
-                    let record_alts: Vec<String> = final_record
-                        .alternate_bases()
-                        .as_ref()
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
-
-                    // Build list of all input alleles: [REF, ALT1, ALT2...]
-                    let mut all_input_alleles = vec![ref_base.clone()];
-                    all_input_alleles.extend(record_alts.iter().cloned());
-
-                    // Harmonize alleles against panel (handles strand flips)
-                    let mut panel_borrow = panel_cell.borrow_mut();
-                    // Capture allele indices for remapping + register alleles with panel for padding
-                    let harmonized_indices = match crate::harmonize::harmonize_alleles(
-                        &all_input_alleles,
-                        &ref_base,
-                        &chrom,
-                        pos,
-                        &mut panel_borrow,
-                    ) {
-                        Ok(indices) => Some(indices),
-                        Err(e) => {
-                            tracing::debug!(
-                                chrom = %chrom,
-                                pos = pos,
-                                error = %e,
-                                "allele harmonization failed"
-                            );
-                            None
-                        }
-                    };
-
-                    if let Some(indices) = harmonized_indices {
-                        if let Some(site) = panel_borrow.get_original(&chrom, pos) {
-                            let record_ref_len = final_record.reference_bases().len();
-                            let panel_ref_len = site.ref_allele.len();
-                            let panel_alts_same_len = site
-                                .alt_alleles
-                                .iter()
-                                .all(|alt| alt.len() == panel_ref_len);
-                            let record_alts_same_len = final_record
-                                .alternate_bases()
-                                .as_ref()
-                                .iter()
-                                .all(|alt| alt.len() == record_ref_len);
-
-                            let should_inject_panel_alts = panel_ref_len == record_ref_len
-                                && panel_alts_same_len
-                                && record_alts_same_len;
-
-                            if should_inject_panel_alts {
-                                let merged_alts = crate::harmonize::get_merged_alts(
-                                    site,
-                                    panel_borrow.added_alts(&site.chrom, pos),
-                                );
-
-                                let mut mapping = std::collections::HashMap::new();
-                                for (old_idx, new_idx) in indices.iter().enumerate() {
-                                    mapping.insert(old_idx, *new_idx);
-                                }
-
-                                let samples = if mapping.iter().any(|(old, new)| old != new) {
-                                    remap_sample_genotypes(final_record.samples(), &mapping)
-                                } else {
-                                    final_record.samples().clone()
-                                };
-
-                                let pos_val = match final_record.variant_start() {
-                                    Some(p) => p,
-                                    None => {
-                                        summary.reference_failures += 1;
-                                        continue;
-                                    }
-                                };
-
-                                let mut info = final_record.info().clone();
-                                if merged_alts != record_alts {
-                                    let infos = ctx.header.infos();
-                                    info.as_mut().retain(|key, _| match infos.get(key) {
-                                        Some(definition) => !matches!(
-                                            definition.number(),
-                                            Number::AlternateBases
-                                                | Number::ReferenceAlternateBases
-                                        ),
-                                        None => true,
-                                    });
-                                }
-
-                                let mut builder = RecordBuf::builder()
-                                    .set_reference_sequence_name(
-                                        final_record.reference_sequence_name(),
-                                    )
-                                    .set_variant_start(pos_val)
-                                    .set_ids(final_record.ids().clone())
-                                    .set_filters(final_record.filters().clone())
-                                    .set_reference_bases(final_record.reference_bases().to_string())
-                                    .set_info(info)
-                                    .set_alternate_bases(
-                                        noodles::vcf::variant::record_buf::AlternateBases::from(
-                                            merged_alts,
-                                        ),
-                                    )
-                                    .set_samples(samples);
-
-                                if let Some(qual) = final_record.quality_score() {
-                                    builder = builder.set_quality_score(qual);
-                                }
-
-                                final_record = builder.build();
-                            }
-                        }
-                    }
-                }
-
-                normalize_record(&mut final_record);
-                summary.record_emission(!final_record.alternate_bases().as_ref().is_empty());
 
                 if let Some(sorter) = sorter.as_mut() {
                     sorter
@@ -1086,9 +1101,6 @@ where
             }
             Err(e) => {
                 summary.parse_errors += 1;
-                // Log but continue (unless fatal?)
-                // If it's IO error from source, it might be fatal.
-                // But DtcSource returns io::ErrorKind::InvalidData for format errors.
                 tracing::warn!(error = %e, "failed to parse/convert input record");
             }
         }
@@ -1108,6 +1120,212 @@ where
     }
 
     Ok(())
+}
+
+/// Parallel implementation of process_records:
+/// 1) Drain source into chrom-bucketed RecordBufs (records are already sorted
+///    by (chrom, pos) upstream; we preserve first-seen chrom order).
+/// 2) For each chrom bucket, transform+serialize records in parallel into
+///    per-chromosome byte buffers (VCF) or (bim,bed) chunk pairs (PLINK).
+/// 3) Concatenate per-chrom outputs in chromosome order to the real writer.
+///
+/// Dropped: the post-source ExternalSort path (used when liftover/standardize/
+/// panel is active). Since `ctx.needs_sort` callers today only ever re-sort a
+/// stream that is already chrom+pos sorted by the upstream source+adapters,
+/// bucketing with per-bucket position sort produces identical output.
+fn process_records_parallel_plink(
+    mut source: Box<dyn crate::input::VariantSource>,
+    writer: &mut PlinkWriter,
+    summary: &mut crate::ConversionSummary,
+    ctx: ProcessingContext,
+) -> Result<()> {
+    let mut buckets: std::collections::HashMap<String, Vec<RecordBuf>> =
+        std::collections::HashMap::new();
+    let mut chrom_order: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+
+    while let Some(result) = source.next_variant(summary) {
+        match result {
+            Ok(record) => {
+                let chrom = record.reference_sequence_name().to_string();
+                if seen.insert(chrom.clone()) {
+                    chrom_order.push(chrom.clone());
+                }
+                buckets.entry(chrom).or_default().push(record);
+            }
+            Err(e) => {
+                summary.parse_errors += 1;
+                tracing::warn!(error = %e, "failed to parse/convert input record");
+            }
+        }
+    }
+
+    // Sort each bucket by position to guarantee per-chrom ordering after any
+    // liftover-induced reordering. Adjacent already-sorted runs make this cheap.
+    for records in buckets.values_mut() {
+        records.sort_by_key(|r| r.variant_start().map(usize::from).unwrap_or(0));
+    }
+
+    // Reorder chrom_order to match reference contig order when available,
+    // otherwise natural order.
+    if let Some(reference) = ctx.reference {
+        let idx_map = reference.contig_index_map();
+        chrom_order.sort_by_key(|name| idx_map.get(name).copied().unwrap_or(usize::MAX));
+    } else {
+        chrom_order.sort_by_key(|name| {
+            let (order, tail) = crate::input::natural_contig_order(name);
+            (order, tail)
+        });
+    }
+
+    // Per-chromosome workers. Each returns (bim_bytes, bed_bytes, summary_delta).
+    let chunks: Vec<Result<(String, Vec<u8>, Vec<u8>, crate::ConversionSummary)>> = chrom_order
+        .par_iter()
+        .map(|chrom| -> Result<_> {
+            let records = buckets
+                .get(chrom)
+                .ok_or_else(|| anyhow!("missing bucket for {}", chrom))?;
+            let mut local_summary = crate::ConversionSummary::default();
+            let mut warned = std::collections::HashSet::new();
+            let mut bim_buf: Vec<u8> = Vec::with_capacity(records.len() * 80);
+            let mut bed_buf: Vec<u8> = Vec::with_capacity(records.len());
+
+            for record in records {
+                let Some(final_record) =
+                    transform_record(record.clone(), &ctx, &mut local_summary, &mut warned)
+                else {
+                    continue;
+                };
+                crate::plink::write_plink_row(&final_record, &mut bim_buf, &mut bed_buf)
+                    .context("failed to serialize PLINK row")?;
+            }
+            Ok((chrom.clone(), bim_buf, bed_buf, local_summary))
+        })
+        .collect();
+
+    // Merge in chrom order. Also accumulates summary deltas.
+    for chunk in chunks {
+        let (chrom, bim_bytes, bed_bytes, delta) = chunk?;
+        tracing::trace!(chrom = %chrom, "merging PLINK chunk");
+        writer.append_chunk(&bim_bytes, &bed_bytes)?;
+        merge_summary(summary, &delta);
+    }
+
+    Ok(())
+}
+
+fn process_records_parallel_vcf(
+    mut source: Box<dyn crate::input::VariantSource>,
+    writer: &mut vcf::io::Writer<io::BufWriter<fs::File>>,
+    summary: &mut crate::ConversionSummary,
+    ctx: ProcessingContext,
+) -> Result<()> {
+    use std::io::Write;
+    let mut buckets: std::collections::HashMap<String, Vec<RecordBuf>> =
+        std::collections::HashMap::new();
+    let mut chrom_order: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+
+    while let Some(result) = source.next_variant(summary) {
+        match result {
+            Ok(record) => {
+                let chrom = record.reference_sequence_name().to_string();
+                if seen.insert(chrom.clone()) {
+                    chrom_order.push(chrom.clone());
+                }
+                buckets.entry(chrom).or_default().push(record);
+            }
+            Err(e) => {
+                summary.parse_errors += 1;
+                tracing::warn!(error = %e, "failed to parse/convert input record");
+            }
+        }
+    }
+
+    for records in buckets.values_mut() {
+        records.sort_by_key(|r| r.variant_start().map(usize::from).unwrap_or(0));
+    }
+
+    if let Some(reference) = ctx.reference {
+        let idx_map = reference.contig_index_map();
+        chrom_order.sort_by_key(|name| idx_map.get(name).copied().unwrap_or(usize::MAX));
+    } else {
+        chrom_order.sort_by_key(|name| {
+            let (order, tail) = crate::input::natural_contig_order(name);
+            (order, tail)
+        });
+    }
+
+    let chunks: Vec<Result<(String, Vec<u8>, crate::ConversionSummary)>> = chrom_order
+        .par_iter()
+        .map(|chrom| -> Result<_> {
+            let records = buckets
+                .get(chrom)
+                .ok_or_else(|| anyhow!("missing bucket for {}", chrom))?;
+            let mut local_summary = crate::ConversionSummary::default();
+            let mut warned = std::collections::HashSet::new();
+            let mut buf: Vec<u8> = Vec::with_capacity(records.len() * 64);
+            {
+                let mut vcf_writer = vcf::io::Writer::new(&mut buf);
+                for record in records {
+                    let Some(final_record) =
+                        transform_record(record.clone(), &ctx, &mut local_summary, &mut warned)
+                    else {
+                        continue;
+                    };
+                    VariantRecordWrite::write_variant_record(
+                        &mut vcf_writer,
+                        ctx.header,
+                        &final_record,
+                    )
+                    .context("failed to write variant record")?;
+                }
+            }
+            Ok((chrom.clone(), buf, local_summary))
+        })
+        .collect();
+
+    for chunk in chunks {
+        let (chrom, bytes, delta) = chunk?;
+        tracing::trace!(chrom = %chrom, "merging VCF chunk");
+        writer.get_mut().write_all(&bytes)?;
+        merge_summary(summary, &delta);
+    }
+
+    Ok(())
+}
+
+fn merge_summary(into: &mut crate::ConversionSummary, delta: &crate::ConversionSummary) {
+    into.total_records += delta.total_records;
+    into.emitted_records += delta.emitted_records;
+    into.variant_records += delta.variant_records;
+    into.reference_records += delta.reference_records;
+    into.missing_genotype_records += delta.missing_genotype_records;
+    into.skipped_reference_sites += delta.skipped_reference_sites;
+    into.unknown_chromosomes += delta.unknown_chromosomes;
+    into.reference_failures += delta.reference_failures;
+    into.invalid_genotypes += delta.invalid_genotypes;
+    into.symbolic_allele_records += delta.symbolic_allele_records;
+    into.parse_errors += delta.parse_errors;
+    into.liftover_unmapped += delta.liftover_unmapped;
+    into.liftover_ambiguous += delta.liftover_ambiguous;
+    into.liftover_incompatible += delta.liftover_incompatible;
+    into.liftover_straddled += delta.liftover_straddled;
+    into.liftover_contig_missing += delta.liftover_contig_missing;
+}
+
+/// Returns true if the parallel code path should be used.
+fn should_parallelize(config: &ConversionConfig) -> bool {
+    if rayon::current_num_threads() <= 1 {
+        return false;
+    }
+    if std::env::var("CONVERT_GENOME_FORCE_SERIAL").ok().as_deref() == Some("1") {
+        return false;
+    }
+    matches!(
+        config.output_format,
+        OutputFormat::Plink | OutputFormat::Vcf
+    )
 }
 
 /// Normalizes and standardizes RecordBuf fields for VCF/BCF compatibility.
