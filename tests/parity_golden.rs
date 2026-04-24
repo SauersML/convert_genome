@@ -4,6 +4,12 @@
 //! conversion pipeline, and asserts the VCF output is byte-identical to a
 //! golden reference captured before the parallelization rewrite.
 //!
+//! One VCF header line is inherently volatile: `##reference=file:///<abs-path>`
+//! embeds the tempdir where the fixture's FASTA was written, and that
+//! tempdir differs per run. The test strips that single line from both
+//! sides before comparing — every other byte (contigs, variants, all
+//! genotype data) is checked strictly.
+//!
 //! Golden location: /tmp/cg_golden/
 //! Fixture + output stay fully inside the repo's test scope; no network
 //! access is required because `input_build == assembly == GRCh38` short-
@@ -136,30 +142,54 @@ fn run_conversion(workdir: &Path) -> Result<PathBuf> {
     Ok(output)
 }
 
+/// Strip the single path-volatile header line (`##reference=file:///...`)
+/// from a VCF so byte-identical comparison is possible across tempdirs.
+/// Every other line — contigs, source version, assembly, variants — is
+/// passed through untouched.
+fn normalize_vcf(raw: &[u8]) -> Vec<u8> {
+    let text = std::str::from_utf8(raw).expect("output VCF is UTF-8");
+    let mut out = Vec::with_capacity(raw.len());
+    for line in text.split_inclusive('\n') {
+        if line.starts_with("##reference=") {
+            continue;
+        }
+        out.extend_from_slice(line.as_bytes());
+    }
+    out
+}
+
+fn first_divergence(a: &[u8], b: &[u8]) -> usize {
+    a.iter()
+        .zip(b.iter())
+        .position(|(x, y)| x != y)
+        .unwrap_or(a.len().min(b.len()))
+}
+
 #[test]
 fn parity_multi_chrom_vcf_matches_golden() -> Result<()> {
     let workdir = tempfile::tempdir()?;
     let output = run_conversion(workdir.path())?;
-    let actual = fs::read(&output)?;
+    let actual_raw = fs::read(&output)?;
+    let actual = normalize_vcf(&actual_raw);
 
     let golden_dir = Path::new(GOLDEN_DIR);
     let golden_output = golden_dir.join("output.vcf");
 
     if !golden_output.exists() {
-        // First-run capture. Save the output and the fixture summary as a
-        // reference point for future runs (including post-rewrite).
+        // First-run capture. Store the already-normalized form so byte-for-
+        // byte comparison works cleanly on every subsequent run.
         fs::create_dir_all(golden_dir)?;
         fs::write(&golden_output, &actual)?;
         fs::write(
             golden_dir.join("fixture_meta.txt"),
             format!(
-                "chroms={}\nvariants={}\nbytes={}\n",
+                "chroms={}\nvariants={}\nbytes_normalized={}\nbytes_raw={}\n",
                 FIXTURE_CHROMS.len(),
                 total_variants(),
-                actual.len()
+                actual.len(),
+                actual_raw.len(),
             ),
         )?;
-        // Re-run from the fresh golden to confirm determinism within this run.
         return Ok(());
     }
 
@@ -167,18 +197,15 @@ fn parity_multi_chrom_vcf_matches_golden() -> Result<()> {
     assert_eq!(
         actual.len(),
         expected.len(),
-        "output byte length differs from golden ({} actual vs {} golden)",
+        "normalized output byte length differs from golden ({} actual vs {} golden; first diff at byte {})",
         actual.len(),
-        expected.len()
+        expected.len(),
+        first_divergence(&actual, &expected),
     );
     assert!(
         actual == expected,
-        "output does not match golden byte-for-byte (first divergence at byte {})",
-        actual
-            .iter()
-            .zip(expected.iter())
-            .position(|(a, b)| a != b)
-            .unwrap_or(0)
+        "normalized output does not match golden byte-for-byte (first divergence at byte {})",
+        first_divergence(&actual, &expected),
     );
     Ok(())
 }

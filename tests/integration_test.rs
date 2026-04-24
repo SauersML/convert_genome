@@ -223,7 +223,6 @@ fn reports_unknown_chromosomes() -> Result<()> {
 fn parallel_matches_single_thread() -> Result<()> {
     let temp = TempDir::new()?;
     let reference = write_reference(&temp)?;
-    // Ensure concordant input
     let input = write_dtc(
         &temp,
         "rs1\t1\t2\tCC\nrs2\t1\t3\tAG\nrs3\t2\t4\tTT\nrs4\t2\t5\tCT\n",
@@ -232,12 +231,17 @@ fn parallel_matches_single_thread() -> Result<()> {
     let single_output = temp.child("single.vcf");
     let parallel_output = temp.child("parallel.vcf");
 
-    let single_config = base_config(
+    let mut single_config = base_config(
         input.clone(),
         reference.clone(),
         single_output.path().to_path_buf(),
     );
-    let parallel_config = base_config(input, reference, parallel_output.path().to_path_buf());
+    // DTC input with default CLI settings runs hg19/hg38 build detection which
+    // touches the network. Declare the build to short-circuit it for this test.
+    single_config.input_build = Some("GRCh38".into());
+    let mut parallel_config =
+        base_config(input, reference, parallel_output.path().to_path_buf());
+    parallel_config.input_build = Some("GRCh38".into());
 
     let (single_summary, single_bytes) = run_conversion_with_threads(single_config, 1)?;
     let (parallel_summary, parallel_bytes) = run_conversion_with_threads(parallel_config, 4)?;

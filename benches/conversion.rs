@@ -257,6 +257,50 @@ fn benchmark_multichrom_vcf_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+/// Same fixture but with `standardize = true`, which adds a FASTA lookup +
+/// allele polarization per record. This is representative of the pgsEngine
+/// hot path (VCF + --standardize [+ --panel]); the plain throughput bench
+/// above has too little per-record work for parallelism to win against
+/// thread-spawn and bucketing overhead.
+fn benchmark_multichrom_vcf_standardize(c: &mut Criterion) {
+    let chroms: &[(&str, usize)] = &[
+        ("1", 8_000),
+        ("2", 6_000),
+        ("3", 5_000),
+        ("4", 4_000),
+        ("5", 3_000),
+        ("X", 2_000),
+    ];
+    let fixtures = MultiChromVcfFixtures::new(chroms);
+
+    let mut group = c.benchmark_group("multichrom_vcf_standardize");
+    group.throughput(Throughput::Elements(fixtures.total_variants));
+    group.sample_size(15);
+
+    let mk = |output: PathBuf| -> ConversionConfig {
+        let mut c = fixtures.config(output);
+        c.standardize = true;
+        c
+    };
+
+    group.bench_function(BenchmarkId::new("default_pool", fixtures.total_variants), |b| {
+        b.iter(|| {
+            let output = fixtures.dir.path().join("default_std.vcf");
+            convert_dtc_file(mk(output)).expect("convert")
+        })
+    });
+
+    group.bench_function(BenchmarkId::new("single_thread", fixtures.total_variants), |b| {
+        b.iter(|| {
+            let output = fixtures.dir.path().join("single_std.vcf");
+            let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+            pool.install(|| convert_dtc_file(mk(output))).expect("convert")
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(20);
@@ -264,6 +308,7 @@ criterion_group!(
         benchmark_reference_lookup,
         benchmark_dtc_parsing,
         benchmark_conversion,
-        benchmark_multichrom_vcf_throughput
+        benchmark_multichrom_vcf_throughput,
+        benchmark_multichrom_vcf_standardize
 );
 criterion_main!(benches);

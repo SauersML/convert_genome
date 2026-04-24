@@ -1133,24 +1133,24 @@ where
 /// panel is active). Since `ctx.needs_sort` callers today only ever re-sort a
 /// stream that is already chrom+pos sorted by the upstream source+adapters,
 /// bucketing with per-bucket position sort produces identical output.
-/// Drain the source, bucketing records by chromosome. When a reference genome
-/// is available, buckets are keyed by canonical contig name so that input files
-/// with mixed naming (e.g. `1` and `chr1`) collapse into a single sorted bucket
-/// — matching what the serial `RecordExternalSorter` path produces. Records
-/// that reference unknown contigs are bucketed under their original name so
-/// they still reach `transform_record` for proper error accounting.
+/// Drain the source, bucketing records by canonical chromosome name, and
+/// return the buckets as a Vec ordered by reference/natural chromosome order.
+/// Records are moved (not cloned) so workers can own their slice without
+/// deep-copying each RecordBuf.
+///
+/// When a reference genome is available, buckets are keyed by canonical contig
+/// name so that input files with mixed naming (e.g. `1` and `chr1`) collapse
+/// into a single sorted bucket — matching what the serial
+/// `RecordExternalSorter` path produces. Records that reference unknown
+/// contigs are bucketed under their original name so they still reach
+/// `transform_record` for proper error accounting.
 fn drain_and_bucket(
     source: &mut Box<dyn crate::input::VariantSource>,
     ctx: &ProcessingContext,
     summary: &mut crate::ConversionSummary,
-) -> Result<(
-    std::collections::HashMap<String, Vec<RecordBuf>>,
-    Vec<String>,
-)> {
+) -> Result<Vec<(String, Vec<RecordBuf>)>> {
     let mut buckets: std::collections::HashMap<String, Vec<RecordBuf>> =
         std::collections::HashMap::new();
-    let mut chrom_order: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::<String>::new();
 
     while let Some(result) = source.next_variant(summary) {
         match result {
@@ -1163,9 +1163,6 @@ fn drain_and_bucket(
                         .unwrap_or_else(|| input_name.to_string()),
                     None => input_name.to_string(),
                 };
-                if seen.insert(key.clone()) {
-                    chrom_order.push(key.clone());
-                }
                 buckets.entry(key).or_default().push(record);
             }
             Err(e) => {
@@ -1179,17 +1176,18 @@ fn drain_and_bucket(
         records.sort_by_key(|r| r.variant_start().map(usize::from).unwrap_or(0));
     }
 
+    let mut ordered: Vec<(String, Vec<RecordBuf>)> = buckets.into_iter().collect();
     if let Some(reference) = ctx.reference {
         let idx_map = reference.contig_index_map();
-        chrom_order.sort_by_key(|name| idx_map.get(name).copied().unwrap_or(usize::MAX));
+        ordered.sort_by_key(|(name, _)| idx_map.get(name).copied().unwrap_or(usize::MAX));
     } else {
-        chrom_order.sort_by_key(|name| {
+        ordered.sort_by_key(|(name, _)| {
             let (order, tail) = crate::input::natural_contig_order(name);
             (order, tail)
         });
     }
 
-    Ok((buckets, chrom_order))
+    Ok(ordered)
 }
 
 fn process_records_parallel_plink(
@@ -1198,15 +1196,11 @@ fn process_records_parallel_plink(
     summary: &mut crate::ConversionSummary,
     ctx: ProcessingContext,
 ) -> Result<()> {
-    let (buckets, chrom_order) = drain_and_bucket(&mut source, &ctx, summary)?;
+    let ordered = drain_and_bucket(&mut source, &ctx, summary)?;
 
-    // Per-chromosome workers. Each returns (bim_bytes, bed_bytes, summary_delta).
-    let chunks: Vec<Result<(String, Vec<u8>, Vec<u8>, crate::ConversionSummary)>> = chrom_order
-        .par_iter()
-        .map(|chrom| -> Result<_> {
-            let records = buckets
-                .get(chrom)
-                .ok_or_else(|| anyhow!("missing bucket for {}", chrom))?;
+    let chunks: Vec<Result<(String, Vec<u8>, Vec<u8>, crate::ConversionSummary)>> = ordered
+        .into_par_iter()
+        .map(|(chrom, records)| -> Result<_> {
             let mut local_summary = crate::ConversionSummary::default();
             let mut warned = std::collections::HashSet::new();
             let mut bim_buf: Vec<u8> = Vec::with_capacity(records.len() * 80);
@@ -1214,18 +1208,17 @@ fn process_records_parallel_plink(
 
             for record in records {
                 let Some(final_record) =
-                    transform_record(record.clone(), &ctx, &mut local_summary, &mut warned)
+                    transform_record(record, &ctx, &mut local_summary, &mut warned)
                 else {
                     continue;
                 };
                 crate::plink::write_plink_row(&final_record, &mut bim_buf, &mut bed_buf)
                     .context("failed to serialize PLINK row")?;
             }
-            Ok((chrom.clone(), bim_buf, bed_buf, local_summary))
+            Ok((chrom, bim_buf, bed_buf, local_summary))
         })
         .collect();
 
-    // Merge in chrom order. Also accumulates summary deltas.
     for chunk in chunks {
         let (chrom, bim_bytes, bed_bytes, delta) = chunk?;
         tracing::trace!(chrom = %chrom, "merging PLINK chunk");
@@ -1243,14 +1236,11 @@ fn process_records_parallel_vcf(
     ctx: ProcessingContext,
 ) -> Result<()> {
     use std::io::Write;
-    let (buckets, chrom_order) = drain_and_bucket(&mut source, &ctx, summary)?;
+    let ordered = drain_and_bucket(&mut source, &ctx, summary)?;
 
-    let chunks: Vec<Result<(String, Vec<u8>, crate::ConversionSummary)>> = chrom_order
-        .par_iter()
-        .map(|chrom| -> Result<_> {
-            let records = buckets
-                .get(chrom)
-                .ok_or_else(|| anyhow!("missing bucket for {}", chrom))?;
+    let chunks: Vec<Result<(String, Vec<u8>, crate::ConversionSummary)>> = ordered
+        .into_par_iter()
+        .map(|(chrom, records)| -> Result<_> {
             let mut local_summary = crate::ConversionSummary::default();
             let mut warned = std::collections::HashSet::new();
             let mut buf: Vec<u8> = Vec::with_capacity(records.len() * 64);
@@ -1258,7 +1248,7 @@ fn process_records_parallel_vcf(
                 let mut vcf_writer = vcf::io::Writer::new(&mut buf);
                 for record in records {
                     let Some(final_record) =
-                        transform_record(record.clone(), &ctx, &mut local_summary, &mut warned)
+                        transform_record(record, &ctx, &mut local_summary, &mut warned)
                     else {
                         continue;
                     };
@@ -1270,7 +1260,7 @@ fn process_records_parallel_vcf(
                     .context("failed to write variant record")?;
                 }
             }
-            Ok((chrom.clone(), buf, local_summary))
+            Ok((chrom, buf, local_summary))
         })
         .collect();
 
