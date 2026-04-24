@@ -1133,12 +1133,20 @@ where
 /// panel is active). Since `ctx.needs_sort` callers today only ever re-sort a
 /// stream that is already chrom+pos sorted by the upstream source+adapters,
 /// bucketing with per-bucket position sort produces identical output.
-fn process_records_parallel_plink(
-    mut source: Box<dyn crate::input::VariantSource>,
-    writer: &mut PlinkWriter,
+/// Drain the source, bucketing records by chromosome. When a reference genome
+/// is available, buckets are keyed by canonical contig name so that input files
+/// with mixed naming (e.g. `1` and `chr1`) collapse into a single sorted bucket
+/// — matching what the serial `RecordExternalSorter` path produces. Records
+/// that reference unknown contigs are bucketed under their original name so
+/// they still reach `transform_record` for proper error accounting.
+fn drain_and_bucket(
+    source: &mut Box<dyn crate::input::VariantSource>,
+    ctx: &ProcessingContext,
     summary: &mut crate::ConversionSummary,
-    ctx: ProcessingContext,
-) -> Result<()> {
+) -> Result<(
+    std::collections::HashMap<String, Vec<RecordBuf>>,
+    Vec<String>,
+)> {
     let mut buckets: std::collections::HashMap<String, Vec<RecordBuf>> =
         std::collections::HashMap::new();
     let mut chrom_order: Vec<String> = Vec::new();
@@ -1147,11 +1155,18 @@ fn process_records_parallel_plink(
     while let Some(result) = source.next_variant(summary) {
         match result {
             Ok(record) => {
-                let chrom = record.reference_sequence_name().to_string();
-                if seen.insert(chrom.clone()) {
-                    chrom_order.push(chrom.clone());
+                let input_name = record.reference_sequence_name();
+                let key = match ctx.reference {
+                    Some(reference) => reference
+                        .resolve_contig_name(input_name)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| input_name.to_string()),
+                    None => input_name.to_string(),
+                };
+                if seen.insert(key.clone()) {
+                    chrom_order.push(key.clone());
                 }
-                buckets.entry(chrom).or_default().push(record);
+                buckets.entry(key).or_default().push(record);
             }
             Err(e) => {
                 summary.parse_errors += 1;
@@ -1160,14 +1175,10 @@ fn process_records_parallel_plink(
         }
     }
 
-    // Sort each bucket by position to guarantee per-chrom ordering after any
-    // liftover-induced reordering. Adjacent already-sorted runs make this cheap.
     for records in buckets.values_mut() {
         records.sort_by_key(|r| r.variant_start().map(usize::from).unwrap_or(0));
     }
 
-    // Reorder chrom_order to match reference contig order when available,
-    // otherwise natural order.
     if let Some(reference) = ctx.reference {
         let idx_map = reference.contig_index_map();
         chrom_order.sort_by_key(|name| idx_map.get(name).copied().unwrap_or(usize::MAX));
@@ -1177,6 +1188,17 @@ fn process_records_parallel_plink(
             (order, tail)
         });
     }
+
+    Ok((buckets, chrom_order))
+}
+
+fn process_records_parallel_plink(
+    mut source: Box<dyn crate::input::VariantSource>,
+    writer: &mut PlinkWriter,
+    summary: &mut crate::ConversionSummary,
+    ctx: ProcessingContext,
+) -> Result<()> {
+    let (buckets, chrom_order) = drain_and_bucket(&mut source, &ctx, summary)?;
 
     // Per-chromosome workers. Each returns (bim_bytes, bed_bytes, summary_delta).
     let chunks: Vec<Result<(String, Vec<u8>, Vec<u8>, crate::ConversionSummary)>> = chrom_order
@@ -1221,40 +1243,7 @@ fn process_records_parallel_vcf(
     ctx: ProcessingContext,
 ) -> Result<()> {
     use std::io::Write;
-    let mut buckets: std::collections::HashMap<String, Vec<RecordBuf>> =
-        std::collections::HashMap::new();
-    let mut chrom_order: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::<String>::new();
-
-    while let Some(result) = source.next_variant(summary) {
-        match result {
-            Ok(record) => {
-                let chrom = record.reference_sequence_name().to_string();
-                if seen.insert(chrom.clone()) {
-                    chrom_order.push(chrom.clone());
-                }
-                buckets.entry(chrom).or_default().push(record);
-            }
-            Err(e) => {
-                summary.parse_errors += 1;
-                tracing::warn!(error = %e, "failed to parse/convert input record");
-            }
-        }
-    }
-
-    for records in buckets.values_mut() {
-        records.sort_by_key(|r| r.variant_start().map(usize::from).unwrap_or(0));
-    }
-
-    if let Some(reference) = ctx.reference {
-        let idx_map = reference.contig_index_map();
-        chrom_order.sort_by_key(|name| idx_map.get(name).copied().unwrap_or(usize::MAX));
-    } else {
-        chrom_order.sort_by_key(|name| {
-            let (order, tail) = crate::input::natural_contig_order(name);
-            (order, tail)
-        });
-    }
+    let (buckets, chrom_order) = drain_and_bucket(&mut source, &ctx, summary)?;
 
     let chunks: Vec<Result<(String, Vec<u8>, crate::ConversionSummary)>> = chrom_order
         .par_iter()
