@@ -39,6 +39,30 @@ wrapper loads that JSON and returns a typed `ConversionResult` whose
 `statistics`, `sample`, `build_detection`, and friends are immutable
 dataclasses.
 
+## Shortcuts: avoid downloads and inference
+
+If you already have the reference, panel, target build, or sex on hand,
+pass them in — convert_genome will skip every corresponding
+auto-discovery step.
+
+```python
+convert(
+    input="raw.txt",
+    output="out.vcf",
+    reference="/cache/hg38.fa",         # skip FASTA download
+    reference_fai="/cache/hg38.fa.fai", # skip .fai indexing
+    input_build="hg19",                  # skip build detection
+    assembly="GRCh38",                   # target build (still does liftover)
+    panel="/cache/1kg_panel.vcf",        # supply harmonisation panel
+    sex="female",                        # skip sex inference
+    standardize=True,
+)
+```
+
+Every flag the upstream CLI accepts (`--input-format`, `--variants-only`,
+`--log-level`, ...) is also reachable as a kwarg or via the `Converter`
+builder's `with_*` methods.
+
 ## Builder
 
 ```python
