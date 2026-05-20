@@ -462,6 +462,21 @@ def convert(
     capture: bool = True,
 ) -> ConversionResult:
     """Run one conversion. Returns the parsed run report."""
+    # Lenient sex coercion: callers chaining results out of infer_sex
+    # may pass `InferredSex.INDETERMINATE.value` ("indeterminate") or
+    # `gnomon`'s "unknown". Neither is a valid convert_genome --sex
+    # value, but the most useful behaviour is "no override — let the
+    # CLI run its own inference", which is the same as `sex=None`.
+    sex_coerced: Optional[Sex]
+    if sex is None:
+        sex_coerced = None
+    elif isinstance(sex, str) and sex.strip().lower() in {"unknown", "indeterminate", ""}:
+        sex_coerced = None
+    elif isinstance(sex, Sex):
+        sex_coerced = sex
+    else:
+        sex_coerced = _coerce_enum(sex, Sex)
+
     converter = Converter(
         input=Path(input),
         output=Path(output) if output else None,
@@ -474,7 +489,7 @@ def convert(
         reference_fai=Path(reference_fai) if reference_fai else None,
         panel=Path(panel) if panel else None,
         sample=sample,
-        sex=_coerce_enum(sex, Sex) if sex is not None else None,
+        sex=sex_coerced,
         standardize=standardize,
         variants_only=variants_only,
         log_level=log_level,

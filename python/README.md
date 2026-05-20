@@ -1,21 +1,11 @@
 # convert_genome (Python)
 
-Python wrapper for the [`SauersML/convert_genome`](https://github.com/SauersML/convert_genome)
-CLI: convert direct-to-consumer genotype dumps (23andMe, AncestryDNA, ...)
-and standard VCF/BCF inputs into compliant VCF, BCF, or PLINK 1.9 binary.
-
-## Install
-
-```bash
-pip install convert_genome
-# you also need the Rust binary:
-cargo install convert_genome
-```
-
-The wrapper finds the binary on `PATH`, via `$CONVERT_GENOME_BIN`, or
-through the `binary=` keyword argument.
-
-## Quick start
+Python wrapper for the
+[`SauersML/convert_genome`](https://github.com/SauersML/convert_genome) CLI.
+Convert direct-to-consumer dumps (23andMe, AncestryDNA, MyHeritage,
+deCODEme) and standard VCF/BCF into compliant VCF, BCF, or PLINK 1.9
+binary — with build detection, sex inference, liftover, and panel
+harmonisation, all controllable from kwargs.
 
 ```python
 from convert_genome import convert, OutputFormat
@@ -28,22 +18,34 @@ result = convert(
     standardize=True,
 )
 
-print(result.statistics.emitted_records)
-print(result.sample.sex_inferred)
-print(result.build_detection.detected_build)
-print(result.report_path)
+result.statistics.emitted_records       # int
+result.sample.sex_inferred              # bool
+result.build_detection.detected_build   # 'GRCh37' / 'GRCh38' / ...
+result.report_path                      # path to <stem>_report.json
+result.output_paths                     # files that actually exist on disk
+result.yield_rate                       # emitted / total
 ```
 
-The Rust tool writes `<stem>_report.json` next to each output. The
-wrapper loads that JSON and returns a typed `ConversionResult` whose
-`statistics`, `sample`, `build_detection`, and friends are immutable
-dataclasses.
+The wrapper runs the Rust binary, parses the sidecar
+`<stem>_report.json` into typed frozen dataclasses, and returns a
+single `ConversionResult`.
 
-## Shortcuts: avoid downloads and inference
+## Install
 
-If you already have the reference, panel, target build, or sex on hand,
-pass them in — convert_genome will skip every corresponding
-auto-discovery step.
+```bash
+pip install convert_genome
+# the Rust binary:
+cargo install convert_genome
+```
+
+Binary located via `binary=`, `$CONVERT_GENOME_BIN`, or `PATH` (in that
+order). Missing binary → `ConvertGenomeBinaryNotFound` with the
+suggested install command.
+
+## Shortcuts: skip every auto-discovery step
+
+The CLI will download/auto-detect things it doesn't need to. Pass them
+in directly:
 
 ```python
 convert(
@@ -59,11 +61,14 @@ convert(
 )
 ```
 
-Every flag the upstream CLI accepts (`--input-format`, `--variants-only`,
-`--log-level`, ...) is also reachable as a kwarg or via the `Converter`
-builder's `with_*` methods.
+`sex` is lenient: passing `"unknown"` or `"indeterminate"` (e.g. when
+chaining out of `infer_sex`) silently omits the `--sex` flag and lets
+the CLI run its own inference.
 
 ## Builder
+
+`Converter` is a frozen dataclass; every `with_*` returns a new
+instance, so branching is safe.
 
 ```python
 from convert_genome import Converter, Sex, OutputFormat
@@ -77,18 +82,49 @@ plan = (
         .with_sex(Sex.MALE)
 )
 
+print(plan.argv())   # exact argv that would be passed to the CLI
 result = plan.run()
-print(plan.argv())  # everything the wrapper would pass to the CLI
 ```
 
-`Converter` is a frozen dataclass; every `with_*` method returns a new
-instance, so branching off of a partially-built plan is safe.
+## Enums
+
+```python
+InputFormat.AUTO / .DTC / .VCF / .BCF
+OutputFormat.VCF / .BCF / .PLINK
+Sex.MALE / .FEMALE
+Assembly.GRCH37 / .GRCH38     # plus a `.parse()` classmethod that
+                              # accepts 'hg19' / 'hg38' / 'build38' / ...
+```
+
+## Output
+
+The Rust tool writes `<stem>_report.json` alongside the main output.
+The wrapper loads it into `ConversionResult`, with sub-dataclasses for
+each section:
+
+```python
+result.input         # InputInfo (path, format, origin)
+result.output        # OutputInfo (path, format)
+result.reference     # ReferenceInfo (path, origin, assembly)
+result.panel         # PanelInfo | None
+result.sample        # SampleInfo (id, sex, sex_inferred)
+result.build_detection  # BuildDetection | None (detected_build, match rates)
+result.statistics    # Statistics (total / emitted / variant / ... records)
+result.report_path   # path to the JSON sidecar
+result.output_paths  # tuple[Path] — files that actually exist on disk
+```
+
+For PLINK output, `output_paths` includes the `.bed/.bim/.fam` trio. For
+`output_dir` with a panel, it includes `panel.vcf`. Non-existent paths
+are filtered out automatically.
 
 ## Errors
 
 * `ConvertGenomeBinaryNotFound` — CLI not installed / not on PATH.
-* `InvalidConfig` — argument combination rejected before launching.
-* `ConvertGenomeFailed` — CLI exited non-zero (stdout/stderr available).
-* `ReportNotFound` — CLI ran clean but didn't produce a JSON report.
+* `InvalidConfig` — argument combination rejected before launching
+  (e.g. missing input file, conflicting output/output_dir).
+* `ConvertGenomeFailed` — CLI exited non-zero. The exception carries
+  `stdout`, `stderr`, `returncode`.
+* `ReportNotFound` — CLI ran clean but didn't write a JSON sidecar.
 
 All subclass `ConvertGenomeError`.

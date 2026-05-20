@@ -388,6 +388,19 @@ def test_error_hierarchy():
     assert issubclass(ReportNotFound, ConvertGenomeError)
 
 
+def test_sex_indeterminate_maps_to_no_flag(tmp_path, monkeypatch):
+    """Regression: callers chaining through infer_sex may pass
+    'indeterminate' or 'unknown'. Neither is a valid --sex value, but
+    omitting the flag and letting the CLI infer is the right behaviour."""
+    in_ = _make_input(tmp_path)
+    fake = _make_fake(tmp_path, _good_fake_body(_minimal_report()))
+    monkeypatch.setenv("CG_ARGV_LOG", str(tmp_path / "argv.json"))
+    for value in ("indeterminate", "unknown", "INDETERMINATE", "  unknown  ", ""):
+        convert(input=in_, output=tmp_path / "o.vcf", binary=fake, sex=value)
+        argv = json.loads((tmp_path / "argv.json").read_text())
+        assert "--sex" not in argv, f"sex={value!r} should not produce --sex flag"
+
+
 def test_converter_is_immutable(tmp_path):
     in_ = _make_input(tmp_path)
     base = Converter(input=in_, output=tmp_path / "o.vcf")
