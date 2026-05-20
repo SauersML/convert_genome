@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "convert_genome"
+version = "0.1.0"
+description = "Python wrapper for SauersML/convert_genome (DTC → VCF/BCF/PLINK conversion)."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "SauersML" }]
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["genomics", "bioinformatics", "vcf", "bcf", "plink", "23andme", "ancestry", "dtc"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+[project.urls]
+Homepage = "https://github.com/SauersML/convert_genome"
+Issues = "https://github.com/SauersML/convert_genome/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["convert_genome"]
