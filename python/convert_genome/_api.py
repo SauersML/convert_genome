@@ -216,25 +216,20 @@ class ConversionResult:
 def locate_binary(override: Optional[PathLike] = None) -> Path:
     """Locate `convert_genome` or raise `ConvertGenomeBinaryNotFound`.
 
-    Resolution: explicit ``override`` → ``$CONVERT_GENOME_BIN`` →
-    ``convert_genome`` on PATH.
+    Resolution: explicit ``override`` → ``convert_genome`` on PATH.
+    No environment-variable indirection.
     """
     if override is not None:
         p = Path(override)
         if not p.exists():
             raise ConvertGenomeBinaryNotFound(f"convert_genome binary not at {p}")
         return p
-    env = os.environ.get("CONVERT_GENOME_BIN")
-    if env:
-        p = Path(env)
-        if not p.exists():
-            raise ConvertGenomeBinaryNotFound(f"$CONVERT_GENOME_BIN -> nonexistent {p}")
-        return p
     which = shutil.which("convert_genome")
     if which:
         return Path(which)
     raise ConvertGenomeBinaryNotFound(
-        "convert_genome not found. Install with: cargo install convert_genome"
+        "convert_genome not found. Install with: cargo install convert_genome, "
+        "or pass binary=... explicitly."
     )
 
 

@@ -38,9 +38,9 @@ pip install convert_genome
 cargo install convert_genome
 ```
 
-Binary located via `binary=`, `$CONVERT_GENOME_BIN`, or `PATH` (in that
-order). Missing binary → `ConvertGenomeBinaryNotFound` with the
-suggested install command.
+Binary located via `binary=` or PATH. No env-var indirection — if
+the binary isn't on PATH, pass `binary=` explicitly. Missing binary
+→ `ConvertGenomeBinaryNotFound` with the suggested install command.
 
 ## Shortcuts: skip every auto-discovery step
 

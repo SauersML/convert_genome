@@ -68,10 +68,10 @@ def _good_fake_body(report: dict, *, log_line: str = "") -> str:
     return textwrap.dedent(
         f"""\
         #!/usr/bin/env python3
-        import json, sys, os, pathlib
+        import json, sys, pathlib
 
         argv = sys.argv[1:]
-        log_argv = pathlib.Path(os.environ['CG_ARGV_LOG'])
+        log_argv = pathlib.Path(sys.argv[0]).parent / 'argv.json'
         log_argv.write_text(json.dumps(argv))
 
         # Figure out where the wrapper expects the report.
@@ -140,17 +140,20 @@ def _minimal_report() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_locate_binary_missing(monkeypatch, tmp_path):
-    monkeypatch.delenv("CONVERT_GENOME_BIN", raising=False)
+def test_locate_binary_not_on_path(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path))  # empty PATH
     with pytest.raises(ConvertGenomeBinaryNotFound):
         locate_binary()
 
 
-def test_locate_binary_env(monkeypatch, tmp_path):
+def test_locate_binary_override(tmp_path):
     fake = _make_fake(tmp_path, "#!/usr/bin/env python3\nprint('x')\n")
-    monkeypatch.setenv("CONVERT_GENOME_BIN", str(fake))
-    assert locate_binary() == fake
+    assert locate_binary(fake) == fake
+
+
+def test_locate_binary_override_missing_raises(tmp_path):
+    with pytest.raises(ConvertGenomeBinaryNotFound):
+        locate_binary(tmp_path / "no-such-binary")
 
 
 # ---------------------------------------------------------------------------
@@ -272,11 +275,10 @@ def test_argv_includes_reference_and_panel(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_run_parses_report(tmp_path, monkeypatch):
+def test_run_parses_report(tmp_path):
     in_ = _make_input(tmp_path)
     out = tmp_path / "out.vcf"
     fake = _make_fake(tmp_path, _good_fake_body(_minimal_report()))
-    monkeypatch.setenv("CG_ARGV_LOG", str(tmp_path / "argv.json"))
 
     result = convert(
         input=in_,
@@ -298,11 +300,10 @@ def test_run_parses_report(tmp_path, monkeypatch):
     assert any(p.suffix == ".vcf" for p in result.output_paths)
 
 
-def test_run_with_output_dir(tmp_path, monkeypatch):
+def test_run_with_output_dir(tmp_path):
     in_ = _make_input(tmp_path)
     out_dir = tmp_path / "outdir"
     fake = _make_fake(tmp_path, _good_fake_body(_minimal_report()))
-    monkeypatch.setenv("CG_ARGV_LOG", str(tmp_path / "argv.json"))
 
     result = convert(
         input=in_,
@@ -314,7 +315,7 @@ def test_run_with_output_dir(tmp_path, monkeypatch):
     assert (out_dir / "genotypes.vcf") in result.output_paths
 
 
-def test_run_locates_report_via_log_line(tmp_path, monkeypatch):
+def test_run_locates_report_via_log_line(tmp_path):
     """The CLI logs 'Wrote run report to <path>' — prefer that over guessing."""
     in_ = _make_input(tmp_path)
     out = tmp_path / "out.vcf"
@@ -330,7 +331,6 @@ def test_run_locates_report_via_log_line(tmp_path, monkeypatch):
         """
     )
     fake = _make_fake(tmp_path, body)
-    monkeypatch.setenv("CG_ARGV_LOG", str(tmp_path / "argv.json"))
     result = convert(input=in_, output=out, binary=fake)
     assert result.report_path == alt
 
@@ -351,9 +351,8 @@ def test_missing_report_raises(tmp_path):
         convert(input=in_, output=tmp_path / "o.vcf", binary=fake)
 
 
-def test_unexpected_schema_raises(tmp_path, monkeypatch):
+def test_unexpected_schema_raises(tmp_path):
     in_ = _make_input(tmp_path)
-    monkeypatch.setenv("CG_ARGV_LOG", str(tmp_path / "argv.json"))
     bad = _minimal_report()
     bad["statistics"]["mystery_new_field"] = 42
     fake = _make_fake(tmp_path, _good_fake_body(bad))
@@ -361,10 +360,9 @@ def test_unexpected_schema_raises(tmp_path, monkeypatch):
         convert(input=in_, output=tmp_path / "o.vcf", binary=fake)
 
 
-def test_argv_log_actually_reflects_invocation(tmp_path, monkeypatch):
+def test_argv_log_actually_reflects_invocation(tmp_path):
     in_ = _make_input(tmp_path)
     fake = _make_fake(tmp_path, _good_fake_body(_minimal_report()))
-    monkeypatch.setenv("CG_ARGV_LOG", str(tmp_path / "argv.json"))
     convert(
         input=in_,
         output=tmp_path / "o.vcf",
@@ -388,13 +386,12 @@ def test_error_hierarchy():
     assert issubclass(ReportNotFound, ConvertGenomeError)
 
 
-def test_sex_indeterminate_maps_to_no_flag(tmp_path, monkeypatch):
+def test_sex_indeterminate_maps_to_no_flag(tmp_path):
     """Regression: callers chaining through infer_sex may pass
     'indeterminate' or 'unknown'. Neither is a valid --sex value, but
     omitting the flag and letting the CLI infer is the right behaviour."""
     in_ = _make_input(tmp_path)
     fake = _make_fake(tmp_path, _good_fake_body(_minimal_report()))
-    monkeypatch.setenv("CG_ARGV_LOG", str(tmp_path / "argv.json"))
     for value in ("indeterminate", "unknown", "INDETERMINATE", "  unknown  ", ""):
         convert(input=in_, output=tmp_path / "o.vcf", binary=fake, sex=value)
         argv = json.loads((tmp_path / "argv.json").read_text())
