@@ -767,7 +767,6 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
     let mut summary = crate::ConversionSummary::default();
 
-    let use_parallel = should_parallelize(&config);
     match config.output_format {
         OutputFormat::Vcf => {
             let output = fs::File::create(&config.output)
@@ -783,11 +782,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 panel: padded_panel.as_ref(),
                 needs_sort,
             };
-            if use_parallel {
-                process_records_parallel_vcf(source, &mut writer, &mut summary, ctx)?;
-            } else {
-                process_records(source, &mut writer, &mut summary, ctx)?;
-            }
+            process_records(source, &mut writer, &mut summary, ctx)?;
         }
         OutputFormat::Bcf => {
             let mut writer = bcf::io::writer::Builder::default()
@@ -820,11 +815,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 panel: padded_panel.as_ref(),
                 needs_sort,
             };
-            if use_parallel {
-                process_records_parallel_plink(source, &mut writer, &mut summary, ctx)?;
-            } else {
-                process_records(source, &mut writer, &mut summary, ctx)?;
-            }
+            process_records(source, &mut writer, &mut summary, ctx)?;
         }
     }
 
@@ -1053,6 +1044,14 @@ fn transform_record(
     Some(final_record)
 }
 
+/// Upper bound on the number of raw input records pulled into RAM at once for
+/// a parallel transform batch. This — together with the external sorter's
+/// `RECORDBUF_CHUNK_SIZE` spill threshold — caps live `RecordBuf` residency to
+/// a constant independent of genome size, so a dense WGS genome (~4M variants)
+/// no longer materializes wholesale in RAM. Tuned so each rayon worker still
+/// gets a meaty slice while keeping peak memory modest.
+const TRANSFORM_BATCH_SIZE: usize = 16_384;
+
 fn process_records<S, W>(
     mut source: S,
     writer: &mut W,
@@ -1080,28 +1079,94 @@ where
         None
     };
 
-    while let Some(result) = source.next_variant(summary) {
-        match result {
-            Ok(record) => {
-                let Some(final_record) =
-                    transform_record(record, &ctx, summary, &mut warned_unknown_chroms)
-                else {
-                    continue;
-                };
+    // Transform records in parallel batches only when it is provably
+    // order-independent: no panel (the panel path mutates shared state whose
+    // mutation order is load-bearing) and a sorter is active (so the external
+    // sort re-establishes emitted order regardless of transform order).
+    // Otherwise transform serially in stream order. Either way memory stays
+    // bounded — the sorter spills to disk every RECORDBUF_CHUNK_SIZE records,
+    // and at most TRANSFORM_BATCH_SIZE raw records are held in RAM at a time.
+    let parallel_transform =
+        should_parallelize(ctx.config) && ctx.panel.is_none() && sorter.is_some();
 
-                if let Some(sorter) = sorter.as_mut() {
-                    sorter
-                        .push(final_record)
-                        .context("failed to spill sorted records")?;
-                } else {
-                    writer
-                        .write_variant(ctx.header, &final_record)
-                        .context("failed to write variant record")?;
+    if parallel_transform {
+        let mut batch: Vec<RecordBuf> = Vec::with_capacity(TRANSFORM_BATCH_SIZE);
+        loop {
+            batch.clear();
+            let mut exhausted = false;
+            while batch.len() < TRANSFORM_BATCH_SIZE {
+                match source.next_variant(summary) {
+                    Some(Ok(record)) => batch.push(record),
+                    Some(Err(e)) => {
+                        summary.parse_errors += 1;
+                        tracing::warn!(error = %e, "failed to parse/convert input record");
+                    }
+                    None => {
+                        exhausted = true;
+                        break;
+                    }
                 }
             }
-            Err(e) => {
-                summary.parse_errors += 1;
-                tracing::warn!(error = %e, "failed to parse/convert input record");
+
+            if !batch.is_empty() {
+                // Transform the batch in parallel; each record carries its own
+                // summary delta and warned-chrom set so the merge below is
+                // deterministic in input order (byte-identical to serial).
+                let transformed: Vec<(
+                    Option<RecordBuf>,
+                    crate::ConversionSummary,
+                    std::collections::HashSet<String>,
+                )> = batch
+                    .par_drain(..)
+                    .map(|record| {
+                        let mut local_summary = crate::ConversionSummary::default();
+                        let mut local_warned = std::collections::HashSet::new();
+                        let out =
+                            transform_record(record, &ctx, &mut local_summary, &mut local_warned);
+                        (out, local_summary, local_warned)
+                    })
+                    .collect();
+
+                let sorter = sorter.as_mut().expect("sorter present for parallel path");
+                for (final_record, delta, warned) in transformed {
+                    merge_summary(summary, &delta);
+                    warned_unknown_chroms.extend(warned);
+                    if let Some(final_record) = final_record {
+                        sorter
+                            .push(final_record)
+                            .context("failed to spill sorted records")?;
+                    }
+                }
+            }
+
+            if exhausted {
+                break;
+            }
+        }
+    } else {
+        while let Some(result) = source.next_variant(summary) {
+            match result {
+                Ok(record) => {
+                    let Some(final_record) =
+                        transform_record(record, &ctx, summary, &mut warned_unknown_chroms)
+                    else {
+                        continue;
+                    };
+
+                    if let Some(sorter) = sorter.as_mut() {
+                        sorter
+                            .push(final_record)
+                            .context("failed to spill sorted records")?;
+                    } else {
+                        writer
+                            .write_variant(ctx.header, &final_record)
+                            .context("failed to write variant record")?;
+                    }
+                }
+                Err(e) => {
+                    summary.parse_errors += 1;
+                    tracing::warn!(error = %e, "failed to parse/convert input record");
+                }
             }
         }
     }
@@ -1117,158 +1182,6 @@ where
                 .write_variant(ctx.header, &record)
                 .context("failed to write variant record")?;
         }
-    }
-
-    Ok(())
-}
-
-/// Parallel implementation of process_records:
-/// 1) Drain source into chrom-bucketed RecordBufs (records are already sorted
-///    by (chrom, pos) upstream; we preserve first-seen chrom order).
-/// 2) For each chrom bucket, transform+serialize records in parallel into
-///    per-chromosome byte buffers (VCF) or (bim,bed) chunk pairs (PLINK).
-/// 3) Concatenate per-chrom outputs in chromosome order to the real writer.
-///
-/// Dropped: the post-source ExternalSort path (used when liftover/standardize/
-/// panel is active). Since `ctx.needs_sort` callers today only ever re-sort a
-/// stream that is already chrom+pos sorted by the upstream source+adapters,
-/// bucketing with per-bucket position sort produces identical output.
-/// Drain the source, bucketing records by canonical chromosome name, and
-/// return the buckets as a Vec ordered by reference/natural chromosome order.
-/// Records are moved (not cloned) so workers can own their slice without
-/// deep-copying each RecordBuf.
-///
-/// When a reference genome is available, buckets are keyed by canonical contig
-/// name so that input files with mixed naming (e.g. `1` and `chr1`) collapse
-/// into a single sorted bucket — matching what the serial
-/// `RecordExternalSorter` path produces. Records that reference unknown
-/// contigs are bucketed under their original name so they still reach
-/// `transform_record` for proper error accounting.
-fn drain_and_bucket(
-    source: &mut Box<dyn crate::input::VariantSource>,
-    ctx: &ProcessingContext,
-    summary: &mut crate::ConversionSummary,
-) -> Result<Vec<(String, Vec<RecordBuf>)>> {
-    let mut buckets: std::collections::HashMap<String, Vec<RecordBuf>> =
-        std::collections::HashMap::new();
-
-    while let Some(result) = source.next_variant(summary) {
-        match result {
-            Ok(record) => {
-                let input_name = record.reference_sequence_name();
-                let key = match ctx.reference {
-                    Some(reference) => reference
-                        .resolve_contig_name(input_name)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| input_name.to_string()),
-                    None => input_name.to_string(),
-                };
-                buckets.entry(key).or_default().push(record);
-            }
-            Err(e) => {
-                summary.parse_errors += 1;
-                tracing::warn!(error = %e, "failed to parse/convert input record");
-            }
-        }
-    }
-
-    for records in buckets.values_mut() {
-        records.sort_by_key(|r| r.variant_start().map(usize::from).unwrap_or(0));
-    }
-
-    let mut ordered: Vec<(String, Vec<RecordBuf>)> = buckets.into_iter().collect();
-    if let Some(reference) = ctx.reference {
-        let idx_map = reference.contig_index_map();
-        ordered.sort_by_key(|(name, _)| idx_map.get(name).copied().unwrap_or(usize::MAX));
-    } else {
-        ordered.sort_by_key(|(name, _)| {
-            let (order, tail) = crate::input::natural_contig_order(name);
-            (order, tail)
-        });
-    }
-
-    Ok(ordered)
-}
-
-fn process_records_parallel_plink(
-    mut source: Box<dyn crate::input::VariantSource>,
-    writer: &mut PlinkWriter,
-    summary: &mut crate::ConversionSummary,
-    ctx: ProcessingContext,
-) -> Result<()> {
-    let ordered = drain_and_bucket(&mut source, &ctx, summary)?;
-
-    let chunks: Vec<Result<(String, Vec<u8>, Vec<u8>, crate::ConversionSummary)>> = ordered
-        .into_par_iter()
-        .map(|(chrom, records)| -> Result<_> {
-            let mut local_summary = crate::ConversionSummary::default();
-            let mut warned = std::collections::HashSet::new();
-            let mut bim_buf: Vec<u8> = Vec::with_capacity(records.len() * 80);
-            let mut bed_buf: Vec<u8> = Vec::with_capacity(records.len());
-
-            for record in records {
-                let Some(final_record) =
-                    transform_record(record, &ctx, &mut local_summary, &mut warned)
-                else {
-                    continue;
-                };
-                crate::plink::write_plink_row(&final_record, &mut bim_buf, &mut bed_buf)
-                    .context("failed to serialize PLINK row")?;
-            }
-            Ok((chrom, bim_buf, bed_buf, local_summary))
-        })
-        .collect();
-
-    for chunk in chunks {
-        let (chrom, bim_bytes, bed_bytes, delta) = chunk?;
-        tracing::trace!(chrom = %chrom, "merging PLINK chunk");
-        writer.append_chunk(&bim_bytes, &bed_bytes)?;
-        merge_summary(summary, &delta);
-    }
-
-    Ok(())
-}
-
-fn process_records_parallel_vcf(
-    mut source: Box<dyn crate::input::VariantSource>,
-    writer: &mut vcf::io::Writer<io::BufWriter<fs::File>>,
-    summary: &mut crate::ConversionSummary,
-    ctx: ProcessingContext,
-) -> Result<()> {
-    use std::io::Write;
-    let ordered = drain_and_bucket(&mut source, &ctx, summary)?;
-
-    let chunks: Vec<Result<(String, Vec<u8>, crate::ConversionSummary)>> = ordered
-        .into_par_iter()
-        .map(|(chrom, records)| -> Result<_> {
-            let mut local_summary = crate::ConversionSummary::default();
-            let mut warned = std::collections::HashSet::new();
-            let mut buf: Vec<u8> = Vec::with_capacity(records.len() * 64);
-            {
-                let mut vcf_writer = vcf::io::Writer::new(&mut buf);
-                for record in records {
-                    let Some(final_record) =
-                        transform_record(record, &ctx, &mut local_summary, &mut warned)
-                    else {
-                        continue;
-                    };
-                    VariantRecordWrite::write_variant_record(
-                        &mut vcf_writer,
-                        ctx.header,
-                        &final_record,
-                    )
-                    .context("failed to write variant record")?;
-                }
-            }
-            Ok((chrom, buf, local_summary))
-        })
-        .collect();
-
-    for chunk in chunks {
-        let (chrom, bytes, delta) = chunk?;
-        tracing::trace!(chrom = %chrom, "merging VCF chunk");
-        writer.get_mut().write_all(&bytes)?;
-        merge_summary(summary, &delta);
     }
 
     Ok(())

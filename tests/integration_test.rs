@@ -254,6 +254,80 @@ fn parallel_matches_single_thread() -> Result<()> {
     Ok(())
 }
 
+/// Memory-bounded streaming regression for the `--standardize` path.
+///
+/// The dense-WGS OOM (NA12878, ~4M variants, SIGKILL at 14 GiB) came from the
+/// old parallel path draining the entire input into a `HashMap<chrom,
+/// Vec<RecordBuf>>` in RAM before transforming. The replacement transforms in
+/// bounded batches and spills to disk via the external sorter, so live record
+/// residency is a constant independent of genome size.
+///
+/// This test feeds far more records than the external sorter's per-spill
+/// `RECORDBUF_CHUNK_SIZE` (50_000) and more than several `TRANSFORM_BATCH_SIZE`
+/// (16_384) parallel batches, forcing the spill+merge and multi-batch paths to
+/// run. It asserts that the parallel (4-thread) output is byte-identical to the
+/// single-threaded output. Byte-identity across the spill/merge boundary is the
+/// observable proof that the bounded-memory rewrite preserves output exactly.
+#[test]
+fn large_standardize_parallel_matches_single_thread_with_spills() -> Result<()> {
+    // 120_000 records > 2x RECORDBUF_CHUNK_SIZE (so the sorter spills to
+    // multiple temp files and merges) and > 7x TRANSFORM_BATCH_SIZE (so the
+    // parallel batch loop iterates many times). Two chromosomes interleaved so
+    // the external sort genuinely reorders across chunk boundaries.
+    const N: u64 = 120_000;
+    let temp = TempDir::new()?;
+    // Two-contig reference (chr1 + chr2), each long enough for all positions.
+    // All-`A` so every `AA` call standardizes to a reference site deterministically.
+    let seq: String = std::iter::repeat('A').take((N as usize) + 16).collect();
+    let reference_child = temp.child("ref_large.fa");
+    reference_child.write_str(&format!(">1\n{seq}\n>2\n{seq}\n"))?;
+    let reference = reference_child.path().to_path_buf();
+
+    let mut dtc = String::new();
+    // Emit chr1 and chr2 in descending position order so the input is NOT
+    // pre-sorted — this exercises the external sort's reorder path, which is
+    // exactly what `--standardize` relies on.
+    for pos in (1..=N).rev() {
+        dtc.push_str(&format!("rs1_{pos}\t1\t{pos}\tAA\n"));
+        dtc.push_str(&format!("rs2_{pos}\t2\t{pos}\tAA\n"));
+    }
+    let input = write_dtc(&temp, &dtc)?;
+
+    let single_output = temp.child("single_large.vcf");
+    let parallel_output = temp.child("parallel_large.vcf");
+
+    let mut single_config = base_config(
+        input.clone(),
+        reference.clone(),
+        single_output.path().to_path_buf(),
+    );
+    single_config.standardize = true;
+    single_config.input_build = Some("GRCh38".into());
+
+    let mut parallel_config =
+        base_config(input, reference, parallel_output.path().to_path_buf());
+    parallel_config.standardize = true;
+    parallel_config.input_build = Some("GRCh38".into());
+
+    let (single_summary, single_bytes) = run_conversion_with_threads(single_config, 1)?;
+    let (parallel_summary, parallel_bytes) = run_conversion_with_threads(parallel_config, 4)?;
+
+    assert_eq!(
+        single_summary.emitted_records, parallel_summary.emitted_records,
+        "emitted record count diverged between serial and parallel"
+    );
+    assert!(
+        single_summary.emitted_records as u64 >= N,
+        "expected at least {N} emitted records, got {}",
+        single_summary.emitted_records
+    );
+    assert_eq!(
+        single_bytes, parallel_bytes,
+        "parallel bounded-batch output is not byte-identical to serial across spill/merge"
+    );
+    Ok(())
+}
+
 #[test]
 fn reference_cache_populates() -> Result<()> {
     let temp = TempDir::new()?;
