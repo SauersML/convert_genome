@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "convert-genome-native"
+version = "0.0.0"
+description = "SPIKE: native pyo3 in-process bindings for convert_genome"
+requires-python = ">=3.9"
+classifiers = ["Private :: Do Not Upload"]
+
+[tool.maturin]
+# Rust extension module compiled into the `convert_genome_native` package,
+# importable as `convert_genome_native._native`.
+module-name = "convert_genome_native._native"
+python-source = "python"

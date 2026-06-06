@@ -1,0 +1,20 @@
+[package]
+name = "convert_genome_native"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "SPIKE: native pyo3 in-process bindings for convert_genome (do not ship from this branch)"
+publish = false
+
+# Detach from the parent crate so the CLI binary build is untouched.
+[workspace]
+
+[lib]
+name = "convert_genome_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Reuse the library exactly as-is; no reimplementation.
+convert_genome = { path = ".." }
+pyo3 = { version = "0.26", features = ["extension-module", "abi3-py39"] }
+anyhow = "1.0"

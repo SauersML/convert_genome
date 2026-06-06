@@ -295,7 +295,30 @@ pub fn detect_build_from_variant_file(
     }
 }
 
+/// Detailed sex-inference result: the final call plus the underlying
+/// evidence metrics that the `infer_sex` algorithm produced. The plain
+/// [`infer_sex_from_variant_file`] discards these; callers that want the
+/// confidence-bearing metrics (e.g. native Python bindings) use the
+/// `_detailed` variant.
+#[derive(Debug, Clone)]
+pub struct SexInference {
+    pub sex: Sex,
+    pub y_genome_density: Option<f64>,
+    pub x_autosome_het_ratio: Option<f64>,
+    pub composite_sex_index: Option<f64>,
+    pub n_autosomes: u64,
+    pub n_y_nonpar: u64,
+}
+
 pub fn infer_sex_from_variant_file(path: &Path, format: InputFormat, build: &str) -> Result<Sex> {
+    Ok(infer_sex_detailed_from_variant_file(path, format, build)?.sex)
+}
+
+pub fn infer_sex_detailed_from_variant_file(
+    path: &Path,
+    format: InputFormat,
+    build: &str,
+) -> Result<SexInference> {
     use infer_sex::{DecisionThresholds, GenomeBuild, InferenceConfig, PlatformDefinition, SexInferenceAccumulator, VariantInfo};
 
     let genome_build = if build.contains("37") || build.to_lowercase().contains("hg19") {
@@ -394,11 +417,20 @@ pub fn infer_sex_from_variant_file(path: &Path, format: InputFormat, build: &str
         result.report.x_autosome_het_ratio
     );
 
-    match result.final_call {
-        infer_sex::InferredSex::Male => Ok(Sex::Male),
-        infer_sex::InferredSex::Female => Ok(Sex::Female),
-        infer_sex::InferredSex::Indeterminate => Ok(Sex::Unknown),
-    }
+    let sex = match result.final_call {
+        infer_sex::InferredSex::Male => Sex::Male,
+        infer_sex::InferredSex::Female => Sex::Female,
+        infer_sex::InferredSex::Indeterminate => Sex::Unknown,
+    };
+
+    Ok(SexInference {
+        sex,
+        y_genome_density: result.report.y_genome_density,
+        x_autosome_het_ratio: result.report.x_autosome_het_ratio,
+        composite_sex_index: result.report.composite_sex_index,
+        n_autosomes,
+        n_y_nonpar,
+    })
 }
 
 /// Detect build from DTC records using check_build.
