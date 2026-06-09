@@ -185,6 +185,39 @@ fn converts_to_vcf_and_bcf() -> Result<()> {
 }
 
 #[test]
+fn malformed_variant_id_is_skipped_not_crash() -> Result<()> {
+    // Regression test for the "failed to spill sorted records / invalid ID"
+    // crash: a DTC record whose ID contains a ';' (forbidden in the VCF ID
+    // field) used to survive parsing and abort the entire conversion deep in
+    // the external-sort spill writer with a bare, unactionable "invalid ID".
+    // It must now be rejected at parse time and skipped with a counted parse
+    // error, so the surrounding good records still convert cleanly.
+    let temp = TempDir::new()?;
+    let reference = write_reference(&temp)?;
+    // rs2 carries an ID with a ';' -> must be skipped; rs1 and rs3 are good.
+    let input = write_dtc(
+        &temp,
+        "rs1\t1\t2\tCC\nrs2;bad\t1\t3\tAG\nrs3\t2\t4\tTT\n",
+    )?;
+
+    let vcf_path = temp.child("malformed_id.vcf");
+    let config = base_config(input, reference, vcf_path.path().to_path_buf());
+    // Must NOT error (previously: Err "failed to spill sorted records").
+    let summary = convert_dtc_file(config)?;
+
+    // The two good records are emitted; the malformed one is counted+skipped.
+    assert_eq!(summary.emitted_records, 2);
+    assert_eq!(summary.parse_errors, 1);
+
+    let vcf_data = fs::read_to_string(vcf_path.path())?;
+    assert!(vcf_data.contains("#CHROM\tPOS"));
+    // The forbidden ID never reaches the output.
+    assert!(!vcf_data.contains("rs2;bad"));
+
+    Ok(())
+}
+
+#[test]
 fn handles_empty_input() -> Result<()> {
     let temp = TempDir::new()?;
     let reference = write_reference(&temp)?;
