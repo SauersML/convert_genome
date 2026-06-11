@@ -4,3 +4,6 @@ build
 fuzz/target/
 Cargo.lock
 *.rmeta
+
+# maturin-built native extension (build artifact)
+python/convert_genome/_convert_genome*.so

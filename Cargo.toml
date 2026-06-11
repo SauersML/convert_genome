@@ -9,6 +9,18 @@ repository = "https://docs.rs/crate/convert_genome/latest"
 documentation = "https://docs.rs/crate/convert_genome/latest"
 exclude = ["data", "build"]
 
+[lib]
+# `rlib` keeps the `convert_genome` binary target and any Rust consumers building
+# against the library; `cdylib` produces the loadable Python extension module
+# built by maturin/PyO3 when the `python` feature is enabled.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# In-process Python bindings (PyO3). Gates the `python_ext` `#[pymodule]` and the
+# `pyo3` dependency so the default CLI binary build is unaffected. Built by
+# maturin into the `cdylib` to give `import convert_genome` a native core.
+python = ["dep:pyo3", "pyo3/extension-module", "pyo3/abi3-py39"]
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
@@ -31,6 +43,13 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rust-lapper = "1.2.0"
 directories = "6.0.0"
+
+# PyO3 backs the in-process Python extension module (the `python` feature).
+# `extension-module` keeps the cdylib from linking libpython (manylinux/abi3),
+# and `abi3-py39` builds a single stable-ABI wheel usable on Python >= 3.9.
+# Both features are enabled via the `python` feature, not here, so a default
+# `cargo build` never pulls pyo3 in.
+pyo3 = { version = "0.26", optional = true }
 
 [build-dependencies]
 grep = "0.4"

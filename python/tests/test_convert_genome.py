@@ -30,9 +30,14 @@ from convert_genome import (
     OutputFormat,
     ReportNotFound,
     Sex,
-    convert,
     locate_binary,
 )
+
+# These tests exercise the typed *subprocess* wrapper (they drive a fake
+# `convert_genome` binary via the `binary=` kwarg). The top-level
+# ``convert_genome.convert`` name now binds to the native in-process extension
+# when it is built, so target the subprocess implementation explicitly here.
+from convert_genome._api import convert
 
 
 # ---------------------------------------------------------------------------

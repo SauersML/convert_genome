@@ -147,7 +147,7 @@ impl VariantWriter for PlinkWriter {
 ///
 /// `format` selects the line parser: GenomeStudio Final Reports use the
 /// [`crate::genomestudio`] reader; everything else uses the plain DTC reader.
-fn prescan_dtc_records(
+pub fn prescan_dtc_records(
     input: &std::path::Path,
     format: crate::input::InputFormat,
 ) -> Result<Vec<dtc::Record>> {
