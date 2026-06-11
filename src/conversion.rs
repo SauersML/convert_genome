@@ -142,31 +142,107 @@ impl VariantWriter for PlinkWriter {
     }
 }
 
-/// Pre-scan a DTC file to collect records for inference.
+/// Pre-scan a DTC-like file to collect records for inference.
 /// This reads the file once and returns records for both build and sex inference.
-fn prescan_dtc_records(input: &std::path::Path) -> Result<Vec<dtc::Record>> {
+///
+/// `format` selects the line parser: GenomeStudio Final Reports use the
+/// [`crate::genomestudio`] reader; everything else uses the plain DTC reader.
+fn prescan_dtc_records(
+    input: &std::path::Path,
+    format: crate::input::InputFormat,
+) -> Result<Vec<dtc::Record>> {
     let reader = crate::smart_reader::open_input(input)
         .with_context(|| format!("failed to open input for inference: {}", input.display()))?;
-    let dtc_reader = dtc::Reader::new(reader);
 
     // Collect records (using same max_records limit for safety)
     let max_records = crate::input::get_max_records_limit();
     let mut records = Vec::new();
     let mut records_read = 0;
 
-    for res in dtc_reader {
+    let mut collect = |res: Option<dtc::Record>| -> bool {
         if let Some(limit) = max_records
             && records_read >= limit
         {
-            break;
+            return false;
         }
-        if let Ok(rec) = res {
+        if let Some(rec) = res {
             records.push(rec);
             records_read += 1;
+        }
+        true
+    };
+
+    if matches!(format, crate::input::InputFormat::GenomeStudio) {
+        let gs_reader = crate::genomestudio::Reader::new(reader)
+            .map_err(|e| anyhow!("failed to read GenomeStudio Final Report: {e}"))?;
+        // convert_genome emits a single sample. A Final Report covering several
+        // samples is converted for its FIRST Sample ID only; warn loudly so the
+        // caller isn't surprised by missing samples.
+        if let Some(n) = gs_reader.metadata().num_samples
+            && n > 1
+        {
+            tracing::warn!(
+                num_samples = n,
+                "GenomeStudio report contains {n} samples; converting only the first. \
+                 Split the report per-sample to convert the others.",
+            );
+        }
+        for res in gs_reader {
+            if !collect(res.ok()) {
+                break;
+            }
+        }
+    } else {
+        let dtc_reader = dtc::Reader::new(reader);
+        for res in dtc_reader {
+            if !collect(res.ok()) {
+                break;
+            }
         }
     }
 
     Ok(records)
+}
+
+/// Build a [`DtcSource`] for a DTC-like input (plain DTC text or a GenomeStudio
+/// Final Report), applying the liftover-aware reference/PAR handling shared by
+/// both. Selects the GenomeStudio line parser when `format` is
+/// [`crate::input::InputFormat::GenomeStudio`], otherwise the plain DTC parser.
+fn build_dtc_like_source(
+    format: crate::input::InputFormat,
+    config: &ConversionConfig,
+    reference: &Option<ReferenceGenome>,
+    liftover_active: bool,
+    inferred_strand: Option<crate::source_ref::InferredStrand>,
+) -> Result<Box<dyn crate::input::VariantSource>> {
+    let reader = crate::smart_reader::open_input(&config.input)
+        .with_context(|| format!("failed to open input {}", config.input.display()))?;
+
+    // If liftover is active, we do NOT provide the reference to DtcSource
+    // (this prevents validation against the wrong genome; records emit an 'N'
+    // ref), and we skip PAR-boundary ploidy checks because config.par_boundaries
+    // are in target coordinates while the source operates in source coordinates.
+    let dtc_reference = if liftover_active {
+        None
+    } else {
+        reference.clone()
+    };
+    let mut source_config = config.clone();
+    if liftover_active {
+        source_config.par_boundaries = None;
+    }
+
+    let source = if matches!(format, crate::input::InputFormat::GenomeStudio) {
+        let gs_reader = crate::genomestudio::Reader::new(reader)
+            .map_err(|e| anyhow!("failed to read GenomeStudio Final Report: {e}"))?;
+        crate::input::DtcSource::new(gs_reader, dtc_reference, source_config, inferred_strand)
+            .with_context(|| "failed to initialize GenomeStudio source")?
+    } else {
+        let dtc_reader = dtc::Reader::new(reader);
+        crate::input::DtcSource::new(dtc_reader, dtc_reference, source_config, inferred_strand)
+            .with_context(|| "failed to initialize DTC source")?
+    };
+    Ok(Box::new(source))
 }
 
 fn builds_match(detected_build: &str, target_build: &str) -> bool {
@@ -194,16 +270,28 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         "starting conversion",
     );
 
+    // Resolve `Auto` to a concrete format up front. The CLI already does this
+    // before calling us, but library callers may pass `Auto`; resolving it once
+    // here means every downstream decision — reference requirement, build/sex/
+    // strand inference, FORMAT-field declaration (header) and emission
+    // (DtcSource) — sees the real format and stays consistent.
+    let mut config = config;
+    if matches!(config.input_format, crate::input::InputFormat::Auto) {
+        config.input_format = crate::input::InputFormat::detect(&config.input);
+        tracing::info!(detected = ?config.input_format, "resolved Auto input format");
+    }
+
     // Determine if reference is required based on input format and options
-    let mut requires_reference = matches!(config.input_format, crate::input::InputFormat::Dtc)
-        || config.standardize
-        || config.panel.is_some();
+    let mut requires_reference =
+        config.input_format.is_dtc_like() || config.standardize || config.panel.is_some();
 
     // Track inference results for the report
     let mut sex_inferred = false;
+    let mut sex_confidence: Option<f64> = None;
+    let mut sex_y_genome_density: Option<f64> = None;
+    let mut sex_x_autosome_het_ratio: Option<f64> = None;
 
     // Auto-detect build and sex if not provided (DTC format only)
-    let mut config = config;
     let mut liftover_chain: Option<Arc<crate::liftover::ChainMap>> = None;
     #[allow(unused_assignments)]
     let mut inferred_build_opt: Option<String> = None;
@@ -216,28 +304,30 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // build_detection variable is used in report_builder
     let mut build_detection: Option<crate::report::BuildDetection> = None;
 
-    fn set_auto_reference_metadata(
-        config: &mut ConversionConfig,
-        reference: &ReferenceGenome,
-    ) {
+    fn set_auto_reference_metadata(config: &mut ConversionConfig, reference: &ReferenceGenome) {
         config.reference_fasta = Some(reference.path().to_path_buf());
         config.reference_origin = Some(format!("auto({})", config.assembly));
     }
 
-    if matches!(config.input_format, crate::input::InputFormat::Dtc) {
-        // Pre-scan DTC file for inference (done once, used for both)
-        let prescan_records = prescan_dtc_records(&config.input)?;
+    if config.input_format.is_dtc_like() {
+        // Pre-scan the genotype file for inference (done once, used for both)
+        let prescan_records = prescan_dtc_records(&config.input, config.input_format)?;
 
         if prescan_records.is_empty() {
             tracing::warn!("No records available for build detection; skipping build inference");
         } else if let Some(declared) = config.input_build.clone() {
             // Caller asserted the source build; skip position-based detection.
-            tracing::info!("Build declared by caller: {}; skipping detection.", declared);
+            tracing::info!(
+                "Build declared by caller: {}; skipping detection.",
+                declared
+            );
             inferred_build_opt = Some(declared.clone());
             build_detection = Some(crate::report::BuildDetection {
                 detected_build: declared.clone(),
                 hg19_match_rate: f64::NAN,
                 hg38_match_rate: f64::NAN,
+                // Caller-declared build: no detection was run, so no confidence.
+                build_confidence: None,
             });
 
             if !builds_match(&declared, &config.assembly) {
@@ -277,6 +367,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                         detected_build: detection.detected_build.clone(),
                         hg19_match_rate: detection.hg19_match_rate,
                         hg38_match_rate: detection.hg38_match_rate,
+                        build_confidence: detection.build_confidence(),
                     });
 
                     if !builds_match(&detection.detected_build, &config.assembly) {
@@ -293,7 +384,9 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                         // Setup Liftover
                         match ChainRegistry::new() {
                             Ok(registry) => {
-                                match registry.get_chain(&detection.detected_build, &config.assembly) {
+                                match registry
+                                    .get_chain(&detection.detected_build, &config.assembly)
+                                {
                                     Ok(chain) => {
                                         println!("DEBUG: Chain loaded successfully.");
                                         let liftover_chain_local = Some(Arc::new(chain));
@@ -326,9 +419,22 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             }
         }
 
-        // Strand Inference (fail-closed)
-        // Use the detected source build and source reference to infer file-wide orientation.
-        if let Some(ref detected_build) = inferred_build_opt {
+        // Strand handling.
+        //
+        // Illumina GenomeStudio Final Reports give us the genotype on the
+        // genome's `+` strand directly (the `Allele1/2 - Plus` columns the
+        // reader requires). That is authoritative and per-marker correct, so we
+        // skip the file-wide strand heuristic entirely — it would be both
+        // redundant (an extra reference download + scan) and *less* accurate
+        // than the source-of-truth the array vendor already provides.
+        if matches!(config.input_format, crate::input::InputFormat::GenomeStudio) {
+            tracing::info!(
+                "GenomeStudio report: using authoritative Plus-strand alleles; skipping strand inference"
+            );
+            inferred_strand = Some(crate::source_ref::InferredStrand::Forward);
+        } else if let Some(ref detected_build) = inferred_build_opt {
+            // Strand Inference (fail-closed)
+            // Use the detected source build and source reference to infer file-wide orientation.
             tracing::info!(build = %detected_build, "Inferring strand orientation for DTC input");
             let source_ref = crate::source_ref::load_source_reference(detected_build)
                 .with_context(|| "failed to load source reference for strand inference")?;
@@ -394,6 +500,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 Could not load standard reference for target assembly '{}'. Please provide --reference.",
                 match config.input_format {
                     crate::input::InputFormat::Dtc => "DTC",
+                    crate::input::InputFormat::GenomeStudio => "GenomeStudio",
                     _ => "this",
                 },
                 config.assembly
@@ -407,11 +514,14 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 "Sex not specified, inferring from input data (assuming {})...",
                 build_for_sex
             );
-            match crate::inference::infer_sex_from_records(&prescan_records, build_for_sex) {
-                Ok(inferred) => {
-                    tracing::info!("Inferred sex: {:?}", inferred);
-                    config.sex = Some(inferred);
+            match crate::inference::infer_sex_detail_from_records(&prescan_records, build_for_sex) {
+                Ok(detail) => {
+                    tracing::info!("Inferred sex: {:?}", detail.sex);
+                    config.sex = Some(detail.sex);
                     sex_inferred = true;
+                    sex_confidence = detail.composite_sex_index;
+                    sex_y_genome_density = detail.y_genome_density;
+                    sex_x_autosome_het_ratio = detail.x_autosome_het_ratio;
                 }
                 Err(e) => {
                     tracing::warn!("Sex inference failed: {}. Defaulting to Unknown.", e);
@@ -428,11 +538,16 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     ) {
         if let Some(declared) = config.input_build.clone() {
             // Caller asserted the source build; skip position-based detection.
-            tracing::info!("Build declared by caller: {}; skipping detection.", declared);
+            tracing::info!(
+                "Build declared by caller: {}; skipping detection.",
+                declared
+            );
             build_detection = Some(crate::report::BuildDetection {
                 detected_build: declared.clone(),
                 hg19_match_rate: f64::NAN,
                 hg38_match_rate: f64::NAN,
+                // Caller-declared build: no detection was run, so no confidence.
+                build_confidence: None,
             });
 
             if !builds_match(&declared, &config.assembly) {
@@ -470,6 +585,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                         detected_build: detection.detected_build.clone(),
                         hg19_match_rate: detection.hg19_match_rate,
                         hg38_match_rate: detection.hg38_match_rate,
+                        build_confidence: detection.build_confidence(),
                     });
 
                     if !builds_match(&detection.detected_build, &config.assembly) {
@@ -481,7 +597,9 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
                         match ChainRegistry::new() {
                             Ok(registry) => {
-                                match registry.get_chain(&detection.detected_build, &config.assembly) {
+                                match registry
+                                    .get_chain(&detection.detected_build, &config.assembly)
+                                {
                                     Ok(chain) => {
                                         let liftover_chain_local = Some(Arc::new(chain));
                                         liftover_chain = liftover_chain_local;
@@ -502,7 +620,9 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                     }
                 }
                 Ok(None) => {
-                    tracing::warn!("No records available for build detection; skipping build inference");
+                    tracing::warn!(
+                        "No records available for build detection; skipping build inference"
+                    );
                 }
                 Err(e) => {
                     return Err(anyhow!(
@@ -523,15 +643,18 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 "Sex not specified, inferring from variant input (assuming {})...",
                 build_for_sex
             );
-            match crate::inference::infer_sex_from_variant_file(
+            match crate::inference::infer_sex_detail_from_variant_file(
                 &config.input,
                 config.input_format,
                 build_for_sex,
             ) {
-                Ok(inferred) => {
-                    tracing::info!("Inferred sex: {:?}", inferred);
-                    config.sex = Some(inferred);
+                Ok(detail) => {
+                    tracing::info!("Inferred sex: {:?}", detail.sex);
+                    config.sex = Some(detail.sex);
                     sex_inferred = true;
+                    sex_confidence = detail.composite_sex_index;
+                    sex_y_genome_density = detail.y_genome_density;
+                    sex_x_autosome_het_ratio = detail.x_autosome_het_ratio;
                 }
                 Err(e) => {
                     tracing::warn!("Sex inference failed: {}. Defaulting to Unknown.", e);
@@ -546,7 +669,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         requires_reference = true;
     }
 
-    if !matches!(config.input_format, crate::input::InputFormat::Dtc) {
+    if !config.input_format.is_dtc_like() {
         if reference.is_none() && (config.reference_fasta.is_some() || requires_reference) {
             if let Some(ref fasta_path) = config.reference_fasta {
                 reference = Some(
@@ -627,36 +750,14 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
 
     // Instantiate Source Iterator
     let mut source: Box<dyn crate::input::VariantSource> = match config.input_format {
-        crate::input::InputFormat::Dtc => {
-            let reader = crate::smart_reader::open_input(&config.input)
-                .with_context(|| format!("failed to open input {}", config.input.display()))?;
-            let dtc_reader = dtc::Reader::new(reader);
-
-            // If liftover is active, we do NOT provide the reference to DtcSource
-            // This prevents validation against the wrong genome.
-            // DtcSource will output raw records with 'N' ref.
-            let dtc_reference = if liftover_chain.is_some() {
-                None
-            } else {
-                reference.clone()
-            };
-
-            // If liftover is active, we should NOT check PAR boundaries for ploidy
-            // because DtcSource is operating on Source coordinates, but config.par_boundaries
-            // are for Target coordinates.
-            let mut source_config = config.clone();
-            if liftover_chain.is_some() {
-                source_config.par_boundaries = None;
-            }
-
-            let source = crate::input::DtcSource::new(
-                dtc_reader,
-                dtc_reference,
-                source_config,
+        crate::input::InputFormat::Dtc | crate::input::InputFormat::GenomeStudio => {
+            build_dtc_like_source(
+                config.input_format,
+                &config,
+                &reference,
+                liftover_chain.is_some(),
                 inferred_strand,
-            )
-            .with_context(|| "failed to initialize DTC source")?;
-            Box::new(source)
+            )?
         }
         crate::input::InputFormat::Vcf => {
             let reader = crate::smart_reader::open_input(&config.input)
@@ -688,32 +789,14 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             // This should have been resolved by CLI, but if used as library, we might need to resolve it.
             let format = crate::input::InputFormat::detect(&config.input);
             match format {
-                crate::input::InputFormat::Dtc => {
-                    let reader =
-                        crate::smart_reader::open_input(&config.input).with_context(|| {
-                            format!("failed to open input {}", config.input.display())
-                        })?;
-                    let dtc_reader = dtc::Reader::new(reader);
-
-                    let dtc_reference = if liftover_chain.is_some() {
-                        None
-                    } else {
-                        reference.clone()
-                    };
-
-                    let mut source_config = config.clone();
-                    if liftover_chain.is_some() {
-                        source_config.par_boundaries = None;
-                    }
-
-                    let source = crate::input::DtcSource::new(
-                        dtc_reader,
-                        dtc_reference,
-                        source_config,
+                crate::input::InputFormat::Dtc | crate::input::InputFormat::GenomeStudio => {
+                    build_dtc_like_source(
+                        format,
+                        &config,
+                        &reference,
+                        liftover_chain.is_some(),
                         inferred_strand,
-                    )
-                    .with_context(|| "failed to initialize DTC source")?;
-                    Box::new(source)
+                    )?
                 }
                 crate::input::InputFormat::Vcf => {
                     let reader =
@@ -880,6 +963,9 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         sample_id: config.sample_id.clone(),
         sex: config.sex,
         sex_inferred,
+        sex_confidence,
+        sex_y_genome_density,
+        sex_x_autosome_het_ratio,
         build_detection,
     };
     let report = report_builder.build(&summary);
@@ -976,9 +1062,8 @@ fn transform_record(
                     .iter()
                     .all(|alt| alt.len() == record_ref_len);
 
-                let should_inject_panel_alts = panel_ref_len == record_ref_len
-                    && panel_alts_same_len
-                    && record_alts_same_len;
+                let should_inject_panel_alts =
+                    panel_ref_len == record_ref_len && panel_alts_same_len && record_alts_same_len;
 
                 if should_inject_panel_alts {
                     let merged_alts = crate::harmonize::get_merged_alts(
@@ -1253,7 +1338,11 @@ fn normalize_record(record: &mut RecordBuf) {
         let mut filled = Vec::with_capacity(keys_len);
         for idx in 0..keys_len {
             let value = values.get(idx).cloned().unwrap_or(None);
-            let key_name = keys.as_ref().get_index(idx).map(|s| s.as_str()).unwrap_or("");
+            let key_name = keys
+                .as_ref()
+                .get_index(idx)
+                .map(|s| s.as_str())
+                .unwrap_or("");
 
             let cleaned = match value {
                 Some(Value::String(ref s)) if s.is_empty() => {
@@ -1449,9 +1538,7 @@ pub fn standardize_record(
                 if unique <= WARN_LIMIT {
                     tracing::warn!("chromosome not in reference: {}", chrom);
                     if unique == WARN_LIMIT {
-                        tracing::warn!(
-                            "additional unknown chromosomes will be suppressed"
-                        );
+                        tracing::warn!("additional unknown chromosomes will be suppressed");
                     }
                 }
             }
@@ -1663,37 +1750,76 @@ fn build_header(
             ),
         );
 
-    // Add symbolic alleles for Indels as per VCF spec
+    // GenomeStudio Final Reports carry per-sample array metrics; declare the
+    // FORMAT fields the DtcSource emits (see input::ARRAY_METRIC_KEYS) so the
+    // values it writes are valid. Descriptions follow Illumina's terminology.
+    if matches!(config.input_format, crate::input::InputFormat::GenomeStudio) {
         builder = builder
-            .add_alternative_allele("DEL", Map::<AlternativeAllele>::new("Deletion"))
-            .add_alternative_allele("INS", Map::<AlternativeAllele>::new("Insertion"))
-            .add_info(
-                "IMPRECISE",
-                Map::<InfoMap>::new(
-                    Number::Count(0),
-                    Type::Flag,
-                    "Imprecise structural variation",
-                ),
-            )
-            .add_info(
-                "SVTYPE",
-                Map::<InfoMap>::new(
-                    Number::Count(1),
-                    Type::String,
-                    "Type of structural variation",
-                ),
-            )
-            // Explicitly define MQ fields to ensure consistency with strict VCF/BCF writers.
-            // As of VCF 4.3, site-level INFO MQ is defined as Float.
-            .add_info(
-                "MQ",
-                Map::<InfoMap>::new(Number::Count(1), Type::Float, "RMS mapping quality"),
-            )
-            // Sample-level FORMAT MQ is defined as Integer in VCF 4.5.
             .add_format(
-                "MQ",
-                Map::<Format>::new(FmtNumber::Count(1), FmtType::Integer, "RMS mapping quality"),
+                "BAF",
+                Map::<Format>::new(
+                    FmtNumber::Count(1),
+                    FmtType::Float,
+                    "B Allele Frequency (Illumina GenomeStudio)",
+                ),
+            )
+            .add_format(
+                "LRR",
+                Map::<Format>::new(
+                    FmtNumber::Count(1),
+                    FmtType::Float,
+                    "Log R Ratio (Illumina GenomeStudio)",
+                ),
+            )
+            .add_format(
+                "IGC",
+                Map::<Format>::new(
+                    FmtNumber::Count(1),
+                    FmtType::Float,
+                    "Illumina GenCall confidence score",
+                ),
+            )
+            .add_format(
+                "GTS",
+                Map::<Format>::new(
+                    FmtNumber::Count(1),
+                    FmtType::Float,
+                    "Illumina GenTrain cluster-quality score",
+                ),
             );
+    }
+
+    // Add symbolic alleles for Indels as per VCF spec
+    builder = builder
+        .add_alternative_allele("DEL", Map::<AlternativeAllele>::new("Deletion"))
+        .add_alternative_allele("INS", Map::<AlternativeAllele>::new("Insertion"))
+        .add_info(
+            "IMPRECISE",
+            Map::<InfoMap>::new(
+                Number::Count(0),
+                Type::Flag,
+                "Imprecise structural variation",
+            ),
+        )
+        .add_info(
+            "SVTYPE",
+            Map::<InfoMap>::new(
+                Number::Count(1),
+                Type::String,
+                "Type of structural variation",
+            ),
+        )
+        // Explicitly define MQ fields to ensure consistency with strict VCF/BCF writers.
+        // As of VCF 4.3, site-level INFO MQ is defined as Float.
+        .add_info(
+            "MQ",
+            Map::<InfoMap>::new(Number::Count(1), Type::Float, "RMS mapping quality"),
+        )
+        // Sample-level FORMAT MQ is defined as Integer in VCF 4.5.
+        .add_format(
+            "MQ",
+            Map::<Format>::new(FmtNumber::Count(1), FmtType::Integer, "RMS mapping quality"),
+        );
 
     // Add contigs from reference if available
     if let Some(ref_genome) = reference {

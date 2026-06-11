@@ -9,7 +9,6 @@ use noodles::vcf::variant::io::Write as VariantRecordWrite;
 use noodles::{bcf, vcf};
 use tempfile::NamedTempFile;
 
-use crate::dtc;
 use crate::dtc::Record as DtcRecord;
 use crate::input::natural_contig_order;
 use crate::reference::ReferenceGenome;
@@ -332,9 +331,15 @@ impl DtcOrder {
     fn key(&self, record: &DtcRecord) -> DtcSortKey {
         match self {
             Self::Reference(map) => {
-                let idx = map.get(&record.chromosome).copied().unwrap_or(usize::MAX);
+                // Canonicalize the raw input chromosome the same way the alias
+                // map was keyed (e.g. "chr1" / "Chr1" -> "1"); a raw `get` would
+                // miss for chr-prefixed inputs, collapse to usize::MAX, and sort
+                // every such record by position only (chromosomes interleaved).
+                let key = crate::reference::canonical_key(&record.chromosome);
+                let idx = map.get(key.as_ref()).copied().unwrap_or(usize::MAX);
                 DtcSortKey::Reference {
                     idx,
+                    name: record.chromosome.clone(),
                     pos: record.position,
                 }
             }
@@ -352,16 +357,25 @@ impl DtcOrder {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DtcSortKey {
-    Reference { idx: usize, pos: u64 },
+    Reference { idx: usize, name: String, pos: u64 },
     Natural { order: u32, name: String, pos: u64 },
 }
 
 impl Ord for DtcSortKey {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
-            (Self::Reference { idx: a, pos: ap }, Self::Reference { idx: b, pos: bp }) => {
-                (a, ap).cmp(&(b, bp))
-            }
+            (
+                Self::Reference {
+                    idx: a,
+                    name: an,
+                    pos: ap,
+                },
+                Self::Reference {
+                    idx: b,
+                    name: bn,
+                    pos: bp,
+                },
+            ) => (a, an, ap).cmp(&(b, bn, bp)),
             (
                 Self::Natural {
                     order: a,
@@ -473,7 +487,7 @@ impl DtcExternalSorter {
         {
             let mut writer = BufWriter::new(spill.as_file_mut());
             for record in &self.buffer {
-                writeln!(writer, "{}", record)?;
+                writeln!(writer, "{}", record.to_spill_line())?;
             }
         }
 
@@ -484,7 +498,7 @@ impl DtcExternalSorter {
 }
 
 pub struct DtcMergeIter {
-    readers: Vec<dtc::Reader<BufReader<File>>>,
+    readers: Vec<BufReader<File>>,
     heap: BinaryHeap<std::cmp::Reverse<DtcHeapItem>>,
     order: DtcOrder,
 }
@@ -494,8 +508,7 @@ impl DtcMergeIter {
         let mut readers = Vec::with_capacity(spills.len());
         for spill in &spills {
             let file = spill.reopen()?;
-            let reader = BufReader::new(file);
-            readers.push(dtc::Reader::new(reader));
+            readers.push(BufReader::new(file));
         }
 
         let mut heap = BinaryHeap::new();
@@ -541,14 +554,29 @@ impl Iterator for DtcMergeIter {
     }
 }
 
-fn read_next_dtc(reader: &mut dtc::Reader<BufReader<File>>) -> Option<DtcRecord> {
-    for result in reader {
-        match result {
-            Ok(record) => return Some(record),
+fn read_next_dtc(reader: &mut BufReader<File>) -> Option<DtcRecord> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return None,
+            Ok(_) => {
+                let trimmed = line.trim_end_matches(['\n', '\r']);
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match DtcRecord::from_spill_line(trimmed) {
+                    Some(record) => return Some(record),
+                    None => {
+                        tracing::warn!("failed to parse spill record: {}", trimmed);
+                    }
+                }
+            }
             Err(e) => {
-                tracing::warn!("failed to read spill DTC record: {}", e);
+                tracing::warn!("failed to read spill line: {}", e);
+                return None;
             }
         }
     }
-    None
 }

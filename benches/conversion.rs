@@ -150,13 +150,7 @@ impl MultiChromVcfFixtures {
             let mut file = fs::File::create(&input).expect("create input");
             writeln!(file, "##fileformat=VCFv4.2").expect("header");
             for (chrom, count) in chroms {
-                writeln!(
-                    file,
-                    "##contig=<ID={},length={}>",
-                    chrom,
-                    count * 4 + 8
-                )
-                .expect("contig");
+                writeln!(file, "##contig=<ID={},length={}>", chrom, count * 4 + 8).expect("contig");
             }
             writeln!(
                 file,
@@ -237,22 +231,28 @@ fn benchmark_multichrom_vcf_throughput(c: &mut Criterion) {
     group.throughput(Throughput::Elements(fixtures.total_variants));
     group.sample_size(15);
 
-    group.bench_function(BenchmarkId::new("default_pool", fixtures.total_variants), |b| {
-        b.iter(|| {
-            let output = fixtures.dir.path().join("default.vcf");
-            let config = fixtures.config(output);
-            convert_dtc_file(config).expect("convert")
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("default_pool", fixtures.total_variants),
+        |b| {
+            b.iter(|| {
+                let output = fixtures.dir.path().join("default.vcf");
+                let config = fixtures.config(output);
+                convert_dtc_file(config).expect("convert")
+            })
+        },
+    );
 
-    group.bench_function(BenchmarkId::new("single_thread", fixtures.total_variants), |b| {
-        b.iter(|| {
-            let output = fixtures.dir.path().join("single.vcf");
-            let config = fixtures.config(output);
-            let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-            pool.install(|| convert_dtc_file(config)).expect("convert")
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("single_thread", fixtures.total_variants),
+        |b| {
+            b.iter(|| {
+                let output = fixtures.dir.path().join("single.vcf");
+                let config = fixtures.config(output);
+                let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+                pool.install(|| convert_dtc_file(config)).expect("convert")
+            })
+        },
+    );
 
     group.finish();
 }
@@ -283,20 +283,27 @@ fn benchmark_multichrom_vcf_standardize(c: &mut Criterion) {
         c
     };
 
-    group.bench_function(BenchmarkId::new("default_pool", fixtures.total_variants), |b| {
-        b.iter(|| {
-            let output = fixtures.dir.path().join("default_std.vcf");
-            convert_dtc_file(mk(output)).expect("convert")
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("default_pool", fixtures.total_variants),
+        |b| {
+            b.iter(|| {
+                let output = fixtures.dir.path().join("default_std.vcf");
+                convert_dtc_file(mk(output)).expect("convert")
+            })
+        },
+    );
 
-    group.bench_function(BenchmarkId::new("single_thread", fixtures.total_variants), |b| {
-        b.iter(|| {
-            let output = fixtures.dir.path().join("single_std.vcf");
-            let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-            pool.install(|| convert_dtc_file(mk(output))).expect("convert")
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("single_thread", fixtures.total_variants),
+        |b| {
+            b.iter(|| {
+                let output = fixtures.dir.path().join("single_std.vcf");
+                let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+                pool.install(|| convert_dtc_file(mk(output)))
+                    .expect("convert")
+            })
+        },
+    );
 
     group.finish();
 }

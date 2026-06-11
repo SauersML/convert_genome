@@ -239,8 +239,7 @@ fn parallel_matches_single_thread() -> Result<()> {
     // DTC input with default CLI settings runs hg19/hg38 build detection which
     // touches the network. Declare the build to short-circuit it for this test.
     single_config.input_build = Some("GRCh38".into());
-    let mut parallel_config =
-        base_config(input, reference, parallel_output.path().to_path_buf());
+    let mut parallel_config = base_config(input, reference, parallel_output.path().to_path_buf());
     parallel_config.input_build = Some("GRCh38".into());
 
     let (single_summary, single_bytes) = run_conversion_with_threads(single_config, 1)?;
@@ -304,8 +303,7 @@ fn large_standardize_parallel_matches_single_thread_with_spills() -> Result<()> 
     single_config.standardize = true;
     single_config.input_build = Some("GRCh38".into());
 
-    let mut parallel_config =
-        base_config(input, reference, parallel_output.path().to_path_buf());
+    let mut parallel_config = base_config(input, reference, parallel_output.path().to_path_buf());
     parallel_config.standardize = true;
     parallel_config.input_build = Some("GRCh38".into());
 

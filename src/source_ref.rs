@@ -65,8 +65,7 @@ fn candidate_refs_dirs() -> Vec<PathBuf> {
 }
 
 fn ensure_writable_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
 
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

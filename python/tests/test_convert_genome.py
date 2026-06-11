@@ -25,6 +25,7 @@ from convert_genome import (
     ConvertGenomeBinaryNotFound,
     ConvertGenomeError,
     ConvertGenomeFailed,
+    InputFormat,
     InvalidConfig,
     OutputFormat,
     ReportNotFound,
@@ -270,6 +271,42 @@ def test_argv_includes_reference_and_panel(tmp_path):
     assert argv[argv.index("--input-build") + 1] == "GRCh37"
 
 
+def test_argv_for_genome_studio_input(tmp_path):
+    in_ = _make_input(tmp_path)
+    fake = _make_fake(tmp_path, "")
+    argv = (
+        Converter(
+            input=in_,
+            output=tmp_path / "o.vcf",
+            input_format=InputFormat.GENOME_STUDIO,
+            binary=fake,
+        ).argv()
+    )
+    assert argv[argv.index("--input-format") + 1] == "genome-studio"
+
+
+def test_genome_studio_input_format_coercion():
+    # convert(...) coerces the string form, including the kebab-case value and
+    # the enum member name, to InputFormat.GENOME_STUDIO.
+    from convert_genome._api import _coerce_enum
+
+    assert _coerce_enum("genome-studio", InputFormat) is InputFormat.GENOME_STUDIO
+    assert _coerce_enum("GENOME_STUDIO", InputFormat) is InputFormat.GENOME_STUDIO
+    assert InputFormat.GENOME_STUDIO.value == "genome-studio"
+
+
+def test_run_parses_genome_studio_report(tmp_path):
+    # The report's input.format is surfaced verbatim, including "genome-studio".
+    in_ = _make_input(tmp_path)
+    out = tmp_path / "out.vcf"
+    report = _minimal_report()
+    report["input"] = {"path": "/in.csv", "format": "genome-studio", "origin": "local"}
+    fake = _make_fake(tmp_path, _good_fake_body(report))
+
+    result = convert(input=in_, output=out, binary=fake)
+    assert result.input.format == "genome-studio"
+
+
 # ---------------------------------------------------------------------------
 # Run + JSON parsing
 # ---------------------------------------------------------------------------
@@ -351,13 +388,19 @@ def test_missing_report_raises(tmp_path):
         convert(input=in_, output=tmp_path / "o.vcf", binary=fake)
 
 
-def test_unexpected_schema_raises(tmp_path):
+def test_unexpected_schema_field_is_tolerated(tmp_path):
+    # Forward-compatibility: a report from a newer CLI that grows extra fields
+    # is parsed by ignoring the unknown ones (see _api._only_known), not by
+    # raising. Known fields still populate correctly.
     in_ = _make_input(tmp_path)
-    bad = _minimal_report()
-    bad["statistics"]["mystery_new_field"] = 42
-    fake = _make_fake(tmp_path, _good_fake_body(bad))
-    with pytest.raises(ConvertGenomeFailed):
-        convert(input=in_, output=tmp_path / "o.vcf", binary=fake)
+    fwd = _minimal_report()
+    fwd["statistics"]["mystery_new_field"] = 42
+    fwd["mystery_top_level"] = {"anything": True}
+    fake = _make_fake(tmp_path, _good_fake_body(fwd))
+
+    result = convert(input=in_, output=tmp_path / "o.vcf", binary=fake)
+    assert result.statistics.emitted_records == 990
+    assert not hasattr(result.statistics, "mystery_new_field")
 
 
 def test_argv_log_actually_reflects_invocation(tmp_path):

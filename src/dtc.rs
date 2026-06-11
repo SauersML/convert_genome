@@ -6,13 +6,44 @@ use std::{
 
 use thiserror::Error;
 
-/// A single genotype entry from a direct-to-consumer text export.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Optional per-sample array metrics carried alongside a genotype.
+///
+/// Populated from an Illumina GenomeStudio Final Report (`Log R Ratio`,
+/// `B Allele Freq`, `GC Score`, `GT Score`); `None` for plain DTC text inputs
+/// that carry no such signal. These flow through to per-sample VCF FORMAT
+/// fields so the intensity/quality information the array produced is not lost.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ArrayMetrics {
+    /// B Allele Frequency (0..=1), normalized allelic intensity ratio.
+    pub baf: Option<f32>,
+    /// Log R Ratio, the copy-number intensity signal.
+    pub lrr: Option<f32>,
+    /// Illumina GenCall confidence score (the `GC Score` column, 0..=1).
+    pub gencall: Option<f32>,
+    /// Illumina GenTrain cluster-quality score (the `GT Score` column).
+    pub gentrain: Option<f32>,
+}
+
+impl ArrayMetrics {
+    /// True when every metric is absent (nothing worth carrying).
+    pub fn is_empty(&self) -> bool {
+        self.baf.is_none()
+            && self.lrr.is_none()
+            && self.gencall.is_none()
+            && self.gentrain.is_none()
+    }
+}
+
+/// A single genotype entry from a direct-to-consumer text export or a
+/// GenomeStudio Final Report.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Record {
     pub id: Option<String>,
     pub chromosome: String,
     pub position: u64,
     pub genotype: String,
+    /// Optional array metrics (GenomeStudio); `None` for DTC text inputs.
+    pub metrics: Option<ArrayMetrics>,
 }
 
 impl Record {
@@ -45,10 +76,13 @@ pub fn parse_genotype(raw: &str) -> Vec<Allele> {
     if trimmed.contains('/') {
         trimmed
             .split('/')
-            .map(|s| match s.trim() {
+            .map(|s| match s.trim().to_ascii_uppercase().as_str() {
                 "D" => Allele::Deletion,
                 "I" => Allele::Insertion,
-                "-" | "0" | "?" => Allele::Missing,
+                "-" | "0" | "?" | "" => Allele::Missing,
+                // Uppercase the base: downstream genotype formatting compares
+                // case-sensitively against the uppercase REF/ALT, so a lowercase
+                // call (e.g. "a/g") would otherwise be dropped as invalid.
                 val => Allele::Base(val.to_string()),
             })
             .collect()
@@ -261,6 +295,7 @@ fn parse_record(line: &str) -> Result<Record, ParseErrorKind> {
         chromosome: chromosome.to_string(),
         position,
         genotype: geno_val,
+        metrics: None,
     })
 }
 
@@ -293,6 +328,82 @@ impl fmt::Display for Record {
     }
 }
 
+/// Lossless on-disk spill codec for external sorting.
+///
+/// This is deliberately *separate* from the lenient input parser
+/// ([`parse_record`]): the spill format is a fixed, self-describing 8-column
+/// tab-delimited line that round-trips every field — including optional
+/// [`ArrayMetrics`] — exactly. Decoupling it means the external sorter never
+/// re-runs the field-count heuristics meant for heterogeneous DTC inputs, and
+/// metrics survive a spill to disk.
+///
+/// Columns: `id, chr, pos, genotype, baf, lrr, gencall, gentrain`. A missing
+/// id is `.`; a missing numeric metric is the empty string. When all four
+/// metric columns are empty the record's `metrics` is reconstituted as `None`.
+impl Record {
+    pub fn to_spill_line(&self) -> String {
+        fn num(v: Option<f32>) -> String {
+            v.map(|x| x.to_string()).unwrap_or_default()
+        }
+        let m = self.metrics.unwrap_or_default();
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            self.id.as_deref().unwrap_or("."),
+            self.chromosome,
+            self.position,
+            self.genotype,
+            num(m.baf),
+            num(m.lrr),
+            num(m.gencall),
+            num(m.gentrain),
+        )
+    }
+
+    pub fn from_spill_line(line: &str) -> Option<Record> {
+        // Strict: a spill line is exactly 8 tab-separated fields. Anything else
+        // means the internal spill file is corrupt; reject rather than silently
+        // reshaping the record (every field is tab-free by construction).
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() != 8 {
+            return None;
+        }
+        let id_str = cols[0];
+        let chromosome = cols[1];
+        let position: u64 = cols[2].parse().ok()?;
+        let genotype = cols[3];
+
+        fn num(s: &str) -> Option<f32> {
+            if s.is_empty() {
+                None
+            } else {
+                s.parse::<f32>().ok().filter(|v| v.is_finite())
+            }
+        }
+        let metrics = ArrayMetrics {
+            baf: num(cols[4]),
+            lrr: num(cols[5]),
+            gencall: num(cols[6]),
+            gentrain: num(cols[7]),
+        };
+
+        Some(Record {
+            id: if id_str == "." || id_str.is_empty() {
+                None
+            } else {
+                Some(id_str.to_string())
+            },
+            chromosome: chromosome.to_string(),
+            position,
+            genotype: genotype.to_string(),
+            metrics: if metrics.is_empty() {
+                None
+            } else {
+                Some(metrics)
+            },
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +415,65 @@ mod tests {
         assert_eq!(record.chromosome, "1");
         assert_eq!(record.position, 42);
         assert_eq!(record.genotype, "AG");
+        assert_eq!(record.metrics, None);
+    }
+
+    #[test]
+    fn spill_line_round_trips_without_metrics() {
+        let rec = Record {
+            id: Some("rs1".into()),
+            chromosome: "X".into(),
+            position: 12345,
+            genotype: "AG".into(),
+            metrics: None,
+        };
+        let back = Record::from_spill_line(&rec.to_spill_line()).expect("round-trip");
+        assert_eq!(back, rec);
+        // A missing id round-trips to None, too.
+        let anon = Record {
+            id: None,
+            chromosome: "1".into(),
+            position: 1,
+            genotype: "--".into(),
+            metrics: None,
+        };
+        assert_eq!(Record::from_spill_line(&anon.to_spill_line()), Some(anon));
+    }
+
+    #[test]
+    fn spill_line_round_trips_metrics() {
+        let rec = Record {
+            id: Some("rs9".into()),
+            chromosome: "12".into(),
+            position: 88675,
+            genotype: "CT".into(),
+            metrics: Some(ArrayMetrics {
+                baf: Some(0.4653),
+                lrr: Some(-0.0240),
+                gencall: Some(0.8985),
+                gentrain: Some(0.8622),
+            }),
+        };
+        let back = Record::from_spill_line(&rec.to_spill_line()).expect("round-trip");
+        assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn spill_line_round_trips_partial_metrics() {
+        let rec = Record {
+            id: Some("rs9".into()),
+            chromosome: "12".into(),
+            position: 88675,
+            genotype: "CT".into(),
+            metrics: Some(ArrayMetrics {
+                baf: Some(0.5),
+                lrr: None,
+                gencall: None,
+                gentrain: None,
+            }),
+        };
+        let back = Record::from_spill_line(&rec.to_spill_line()).expect("round-trip");
+        assert_eq!(back, rec);
     }
 
     #[test]

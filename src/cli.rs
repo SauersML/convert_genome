@@ -341,11 +341,7 @@ mod tests {
 
     #[test]
     fn input_build_is_optional_and_defaults_to_none() {
-        let cli = Cli::parse_from([
-            "convert_genome",
-            "input.vcf.gz",
-            "output.vcf",
-        ]);
+        let cli = Cli::parse_from(["convert_genome", "input.vcf.gz", "output.vcf"]);
         assert_eq!(cli.input_build, None);
     }
 

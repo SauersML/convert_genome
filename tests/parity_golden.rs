@@ -38,11 +38,7 @@ const FIXTURE_CHROMS: &[(&str, usize)] = &[
 fn write_fixture_reference(dir: &Path) -> Result<PathBuf> {
     // Build a deterministic ref: for each chromosome, repeat ACGT for 2x the
     // largest needed coordinate so reference lookups never OOB.
-    let max_pos = FIXTURE_CHROMS
-        .iter()
-        .map(|(_, n)| *n)
-        .max()
-        .unwrap_or(0);
+    let max_pos = FIXTURE_CHROMS.iter().map(|(_, n)| *n).max().unwrap_or(0);
     let seq_len = (max_pos * 4 + 8).max(32);
     let pattern = b"ACGT";
 

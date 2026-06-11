@@ -24,7 +24,7 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Iterable, List, Mapping, Optional, Tuple, Union
 
@@ -39,6 +39,7 @@ PathLike = Union[str, os.PathLike]
 class InputFormat(str, enum.Enum):
     AUTO = "auto"
     DTC = "dtc"
+    GENOME_STUDIO = "genome-studio"
     VCF = "vcf"
     BCF = "bcf"
 
@@ -146,6 +147,14 @@ class SampleInfo:
     id: str
     sex: str
     sex_inferred: bool
+    # Sex-inference metrics. Present (non-None) only when the sex was *inferred*
+    # by the tool and it had enough informative loci. ``sex_confidence`` is
+    # infer_sex's composite discriminant index (its single confidence-like
+    # statistic). All three are absent from the report.json when the sex was
+    # caller-supplied, so they default to None for backward compatibility.
+    sex_confidence: Optional[float] = None
+    y_genome_density: Optional[float] = None
+    x_autosome_het_ratio: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +162,9 @@ class BuildDetection:
     detected_build: str
     hg19_match_rate: float
     hg38_match_rate: float
+    # 0..=1 confidence in detected_build (winning rate / sum). Absent when the
+    # build was caller-declared or both rates were uninformative.
+    build_confidence: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -495,6 +507,156 @@ def convert(
     return converter.run(capture=capture)
 
 
+# ---------------------------------------------------------------------------
+# Standalone inference convenience entrypoints
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SexCall:
+    """Result of :func:`infer_sex` — the sample's sex plus inference metrics."""
+
+    sex: str
+    """``"male"`` | ``"female"`` | ``"indeterminate"``."""
+    inferred: bool
+    """True if the tool inferred it (always True from :func:`infer_sex`)."""
+    confidence: Optional[float] = None
+    """infer_sex's composite discriminant index, or ``None`` if uncomputable."""
+    y_genome_density: Optional[float] = None
+    x_autosome_het_ratio: Optional[float] = None
+
+    @classmethod
+    def _from_sample(cls, s: SampleInfo) -> "SexCall":
+        return cls(
+            sex=s.sex,
+            inferred=s.sex_inferred,
+            confidence=s.sex_confidence,
+            y_genome_density=s.y_genome_density,
+            x_autosome_het_ratio=s.x_autosome_het_ratio,
+        )
+
+
+@dataclass(frozen=True)
+class BuildCall:
+    """Result of :func:`detect_build` — the detected assembly plus match rates."""
+
+    detected_build: str
+    hg19_match_rate: float
+    hg38_match_rate: float
+    confidence: Optional[float] = None
+
+    @classmethod
+    def _from_detection(cls, d: BuildDetection) -> "BuildCall":
+        return cls(
+            detected_build=d.detected_build,
+            hg19_match_rate=d.hg19_match_rate,
+            hg38_match_rate=d.hg38_match_rate,
+            confidence=d.build_confidence,
+        )
+
+
+def _scratch_convert(
+    input: PathLike,
+    *,
+    reference: Optional[PathLike],
+    reference_fai: Optional[PathLike],
+    input_format: Union[InputFormat, str],
+    assembly: str,
+    input_build: Optional[str],
+    binary: Optional[PathLike],
+    timeout: Optional[float],
+) -> ConversionResult:
+    """Run a throwaway conversion into a temp dir purely to populate the report.
+
+    convert_genome performs sex/build inference as part of a conversion and
+    records the results in ``report.json``; there is no inference-only CLI
+    mode. These helpers therefore do a minimal conversion to a temporary
+    directory (cleaned up on return) and read the report. The output VCF is
+    discarded — we only want ``result.sample`` / ``result.build_detection``.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="cg_infer_") as td:
+        return convert(
+            input=input,
+            output_dir=td,
+            format=OutputFormat.VCF,
+            input_format=input_format,
+            assembly=assembly,
+            input_build=input_build,
+            reference=reference,
+            reference_fai=reference_fai,
+            binary=binary,
+            timeout=timeout,
+        )
+
+
+def infer_sex(
+    input: PathLike,
+    *,
+    reference: Optional[PathLike] = None,
+    reference_fai: Optional[PathLike] = None,
+    input_format: Union[InputFormat, str] = InputFormat.AUTO,
+    assembly: str = "GRCh38",
+    input_build: Optional[str] = None,
+    binary: Optional[PathLike] = None,
+    timeout: Optional[float] = None,
+) -> SexCall:
+    """Infer the biological sex of a genome without a full, persisted conversion.
+
+    Thin convenience over :func:`convert`: runs a throwaway conversion into a
+    temp dir (which is where convert_genome computes sex) and returns just the
+    typed :class:`SexCall` (sex + confidence + metrics). pgsEngine can ask
+    "what sex?" without managing output files itself.
+
+    A ``reference`` (and optionally ``reference_fai``) may be required by the
+    underlying conversion for VCF/BCF inputs; pass them through if so.
+    """
+    result = _scratch_convert(
+        input,
+        reference=reference,
+        reference_fai=reference_fai,
+        input_format=input_format,
+        assembly=assembly,
+        input_build=input_build,
+        binary=binary,
+        timeout=timeout,
+    )
+    return SexCall._from_sample(result.sample)
+
+
+def detect_build(
+    input: PathLike,
+    *,
+    reference: Optional[PathLike] = None,
+    reference_fai: Optional[PathLike] = None,
+    input_format: Union[InputFormat, str] = InputFormat.AUTO,
+    assembly: str = "GRCh38",
+    binary: Optional[PathLike] = None,
+    timeout: Optional[float] = None,
+) -> Optional[BuildCall]:
+    """Detect a genome's reference build without a full, persisted conversion.
+
+    Thin convenience over :func:`convert`. Returns ``None`` if the conversion
+    produced no build-detection block (e.g. the build was declared, or there
+    were no informative sites). Do **not** pass ``input_build`` here — that
+    would suppress detection.
+    """
+    result = _scratch_convert(
+        input,
+        reference=reference,
+        reference_fai=reference_fai,
+        input_format=input_format,
+        assembly=assembly,
+        input_build=None,
+        binary=binary,
+        timeout=timeout,
+    )
+    if result.build_detection is None:
+        return None
+    return BuildCall._from_detection(result.build_detection)
+
+
 def _coerce_enum(value, enum_cls):
     if isinstance(value, enum_cls):
         return value
@@ -514,6 +676,18 @@ def _coerce_enum(value, enum_cls):
 # ---------------------------------------------------------------------------
 
 
+def _only_known(cls, mapping: Mapping[str, Any]) -> dict:
+    """Filter ``mapping`` to the fields ``cls`` actually declares.
+
+    Lets the wrapper tolerate a CLI that grows *new* report fields the
+    installed wrapper version doesn't know about yet — they're ignored rather
+    than raising ``TypeError`` (forward-compatibility). Missing optional fields
+    fall back to their dataclass defaults.
+    """
+    field_names = {f.name for f in fields(cls)}
+    return {k: v for k, v in mapping.items() if k in field_names}
+
+
 def _result_from_report(
     data: Mapping[str, Any],
     *,
@@ -523,13 +697,19 @@ def _result_from_report(
     stderr: str,
 ) -> ConversionResult:
     try:
-        stats = Statistics(**data["statistics"])
-        input_info = InputInfo(**data["input"])
-        output_info = OutputInfo(**data["output"])
-        reference_info = ReferenceInfo(**data["reference"])
-        sample_info = SampleInfo(**data["sample"])
-        panel_info = PanelInfo(**data["panel"]) if data.get("panel") else None
-        build = BuildDetection(**data["build_detection"]) if data.get("build_detection") else None
+        stats = Statistics(**_only_known(Statistics, data["statistics"]))
+        input_info = InputInfo(**_only_known(InputInfo, data["input"]))
+        output_info = OutputInfo(**_only_known(OutputInfo, data["output"]))
+        reference_info = ReferenceInfo(**_only_known(ReferenceInfo, data["reference"]))
+        sample_info = SampleInfo(**_only_known(SampleInfo, data["sample"]))
+        panel_info = (
+            PanelInfo(**_only_known(PanelInfo, data["panel"])) if data.get("panel") else None
+        )
+        build = (
+            BuildDetection(**_only_known(BuildDetection, data["build_detection"]))
+            if data.get("build_detection")
+            else None
+        )
         return ConversionResult(
             version=data["version"],
             timestamp=data["timestamp"],

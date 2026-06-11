@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use noodles::{bcf, vcf};
 use noodles::vcf::variant::record_buf::samples::sample::Value;
+use noodles::{bcf, vcf};
 
 use crate::cli::Sex;
 use crate::dtc::{self, Allele, Record as DtcRecord};
@@ -22,11 +22,53 @@ pub struct BuildDetectionResult {
     pub hg38_match_rate: f64,
 }
 
+impl BuildDetectionResult {
+    /// A 0..=1 confidence in the `detected_build` call: the winning match rate
+    /// divided by the sum of both, i.e. how decisively one build beats the
+    /// other. Returns `None` when both rates are zero or non-finite (no
+    /// informative sites), so callers can distinguish "no signal" from "tie".
+    pub fn build_confidence(&self) -> Option<f64> {
+        let hg19 = self.hg19_match_rate;
+        let hg38 = self.hg38_match_rate;
+        if !hg19.is_finite() || !hg38.is_finite() {
+            return None;
+        }
+        let total = hg19 + hg38;
+        if total <= 0.0 {
+            return None;
+        }
+        Some(hg19.max(hg38) / total)
+    }
+}
+
+/// Sex call plus the metrics the `infer_sex` library computed to make it.
+///
+/// The thresholded `sex` was previously the *only* thing returned from sex
+/// inference; the underlying density/ratio/composite metrics were logged and
+/// then discarded. This struct surfaces them so the conversion report can
+/// carry a confidence and the raw evidence.
+#[derive(Debug, Clone)]
+pub struct SexInference {
+    pub sex: Sex,
+    /// `infer_sex`'s combined male/female discriminant (its single
+    /// confidence-like statistic). `None` when there were too few informative
+    /// loci to compute it.
+    pub composite_sex_index: Option<f64>,
+    pub y_genome_density: Option<f64>,
+    pub x_autosome_het_ratio: Option<f64>,
+}
+
 /// Infer sex from DTC records.
 ///
 /// This function processes DTC records and uses the infer_sex library
 /// to determine biological sex based on X/Y chromosome variant patterns.
 pub fn infer_sex_from_records(records: &[DtcRecord], build: &str) -> Result<Sex> {
+    Ok(infer_sex_detail_from_records(records, build)?.sex)
+}
+
+/// Like [`infer_sex_from_records`] but returns the full [`SexInference`]
+/// (call + composite index + density/ratio metrics) instead of just the call.
+pub fn infer_sex_detail_from_records(records: &[DtcRecord], build: &str) -> Result<SexInference> {
     use infer_sex::{
         Chromosome, DecisionThresholds, GenomeBuild, InferenceConfig, InferredSex,
         PlatformDefinition, SexInferenceAccumulator, VariantInfo,
@@ -99,11 +141,17 @@ pub fn infer_sex_from_records(records: &[DtcRecord], build: &str) -> Result<Sex>
         result.report.x_autosome_het_ratio
     );
 
-    match result.final_call {
-        InferredSex::Male => Ok(Sex::Male),
-        InferredSex::Female => Ok(Sex::Female),
-        InferredSex::Indeterminate => Ok(Sex::Unknown),
-    }
+    let sex = match result.final_call {
+        InferredSex::Male => Sex::Male,
+        InferredSex::Female => Sex::Female,
+        InferredSex::Indeterminate => Sex::Unknown,
+    };
+    Ok(SexInference {
+        sex,
+        composite_sex_index: result.report.composite_sex_index,
+        y_genome_density: result.report.y_genome_density,
+        x_autosome_het_ratio: result.report.x_autosome_het_ratio,
+    })
 }
 
 fn classify_build(detection: check_build::BuildResult) -> BuildDetectionResult {
@@ -182,10 +230,7 @@ pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<Option<BuildDetectionRes
         }
 
         let chrom = record.reference_sequence_name().to_uppercase();
-        if matches!(
-            chrom.as_str(),
-            "X" | "Y" | "CHRX" | "CHRY" | "MT" | "CHRM"
-        ) {
+        if matches!(chrom.as_str(), "X" | "Y" | "CHRX" | "CHRY" | "MT" | "CHRM") {
             continue;
         }
 
@@ -245,10 +290,7 @@ pub fn detect_build_from_bcf(bcf_path: &Path) -> Result<Option<BuildDetectionRes
         }
 
         let chrom = record.reference_sequence_name().to_uppercase();
-        if matches!(
-            chrom.as_str(),
-            "X" | "Y" | "CHRX" | "CHRY" | "MT" | "CHRM"
-        ) {
+        if matches!(chrom.as_str(), "X" | "Y" | "CHRX" | "CHRY" | "MT" | "CHRM") {
             continue;
         }
 
@@ -296,7 +338,19 @@ pub fn detect_build_from_variant_file(
 }
 
 pub fn infer_sex_from_variant_file(path: &Path, format: InputFormat, build: &str) -> Result<Sex> {
-    use infer_sex::{DecisionThresholds, GenomeBuild, InferenceConfig, PlatformDefinition, SexInferenceAccumulator, VariantInfo};
+    Ok(infer_sex_detail_from_variant_file(path, format, build)?.sex)
+}
+
+/// Like [`infer_sex_from_variant_file`] but returns the full [`SexInference`].
+pub fn infer_sex_detail_from_variant_file(
+    path: &Path,
+    format: InputFormat,
+    build: &str,
+) -> Result<SexInference> {
+    use infer_sex::{
+        DecisionThresholds, GenomeBuild, InferenceConfig, PlatformDefinition,
+        SexInferenceAccumulator, VariantInfo,
+    };
 
     let genome_build = if build.contains("37") || build.to_lowercase().contains("hg19") {
         GenomeBuild::Build37
@@ -394,11 +448,17 @@ pub fn infer_sex_from_variant_file(path: &Path, format: InputFormat, build: &str
         result.report.x_autosome_het_ratio
     );
 
-    match result.final_call {
-        infer_sex::InferredSex::Male => Ok(Sex::Male),
-        infer_sex::InferredSex::Female => Ok(Sex::Female),
-        infer_sex::InferredSex::Indeterminate => Ok(Sex::Unknown),
-    }
+    let sex = match result.final_call {
+        infer_sex::InferredSex::Male => Sex::Male,
+        infer_sex::InferredSex::Female => Sex::Female,
+        infer_sex::InferredSex::Indeterminate => Sex::Unknown,
+    };
+    Ok(SexInference {
+        sex,
+        composite_sex_index: result.report.composite_sex_index,
+        y_genome_density: result.report.y_genome_density,
+        x_autosome_het_ratio: result.report.x_autosome_het_ratio,
+    })
 }
 
 /// Detect build from DTC records using check_build.
@@ -448,9 +508,8 @@ pub fn detect_build_from_dtc(records: &[DtcRecord]) -> Result<BuildDetectionResu
         tracing::warn!("Only {} variants for build detection", variants.len());
     }
 
-    detect_build_from_variants(&variants)?.ok_or_else(|| {
-        anyhow::anyhow!("No variants available for build detection")
-    })
+    detect_build_from_variants(&variants)?
+        .ok_or_else(|| anyhow::anyhow!("No variants available for build detection"))
 }
 
 /// Classify chromosome string into Chromosome enum for infer_sex.
@@ -560,18 +619,21 @@ mod tests {
                 chromosome: "1".to_string(),
                 position: 100,
                 genotype: "AA".to_string(),
+                metrics: None,
             },
             DtcRecord {
                 id: Some("rs2".to_string()),
                 chromosome: "2".to_string(),
                 position: 200,
                 genotype: "GG".to_string(),
+                metrics: None,
             },
             DtcRecord {
                 id: Some("rs3".to_string()),
                 chromosome: "3".to_string(),
                 position: 300,
                 genotype: "TT".to_string(),
+                metrics: None,
             },
         ];
 

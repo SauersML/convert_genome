@@ -207,9 +207,11 @@ fn contig_rank(chrom: &str, chrom_rank: &std::collections::HashMap<String, usize
     usize::MAX
 }
 
-fn build_missing_samples(header: &vcf::Header) -> Result<Option<vcf::variant::record_buf::Samples>> {
-    use vcf::variant::record_buf::samples::{sample::Value, Keys};
+fn build_missing_samples(
+    header: &vcf::Header,
+) -> Result<Option<vcf::variant::record_buf::Samples>> {
     use vcf::variant::record_buf::Samples;
+    use vcf::variant::record_buf::samples::{Keys, sample::Value};
 
     let sample_count = header.sample_names().len();
     if sample_count == 0 {
@@ -406,7 +408,10 @@ mod tests {
             encoder.finish().unwrap();
         }
         {
-            let file = OpenOptions::new().append(true).open(&original_path).unwrap();
+            let file = OpenOptions::new()
+                .append(true)
+                .open(&original_path)
+                .unwrap();
             let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
             encoder.write_all(second.as_bytes()).unwrap();
             encoder.finish().unwrap();

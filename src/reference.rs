@@ -227,7 +227,7 @@ fn build_and_write_index(path: &Path, index_path: &Path) -> Result<fai::Index, R
     Ok(index)
 }
 
-fn canonical_key(raw: &str) -> Cow<'_, str> {
+pub(crate) fn canonical_key(raw: &str) -> Cow<'_, str> {
     let trimmed = raw.trim();
     let stripped = trimmed.strip_prefix("chr").unwrap_or(trimmed);
 

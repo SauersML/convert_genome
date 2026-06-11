@@ -76,6 +76,17 @@ pub struct SampleInfo {
     pub id: String,
     pub sex: String,
     pub sex_inferred: bool,
+    /// Confidence in the sex call: `infer_sex`'s composite discriminant index.
+    /// Only present when the sex was *inferred* (not caller-supplied) and the
+    /// library had enough informative loci to compute it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sex_confidence: Option<f64>,
+    /// Y-chromosome variant density used in the sex call (present iff inferred).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y_genome_density: Option<f64>,
+    /// X/autosome heterozygosity ratio used in the sex call (present iff inferred).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_autosome_het_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,6 +94,11 @@ pub struct BuildDetection {
     pub detected_build: String,
     pub hg19_match_rate: f64,
     pub hg38_match_rate: f64,
+    /// 0..=1 confidence in `detected_build` (winning rate / sum of both rates).
+    /// Absent when the build was caller-declared or both rates were
+    /// uninformative.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +170,10 @@ pub struct RunReportBuilder {
     pub sample_id: String,
     pub sex: Option<Sex>,
     pub sex_inferred: bool,
+    /// Sex-inference metrics, set only when the sex was inferred by the tool.
+    pub sex_confidence: Option<f64>,
+    pub sex_y_genome_density: Option<f64>,
+    pub sex_x_autosome_het_ratio: Option<f64>,
     pub build_detection: Option<BuildDetection>,
 }
 
@@ -191,6 +211,9 @@ impl RunReportBuilder {
                 id: self.sample_id,
                 sex: sex_name(self.sex),
                 sex_inferred: self.sex_inferred,
+                sex_confidence: self.sex_confidence,
+                y_genome_density: self.sex_y_genome_density,
+                x_autosome_het_ratio: self.sex_x_autosome_het_ratio,
             },
             build_detection: self.build_detection,
             statistics: Statistics::from(summary),
@@ -201,6 +224,7 @@ impl RunReportBuilder {
 fn format_name(f: Option<InputFormat>) -> String {
     match f {
         Some(InputFormat::Dtc) => "dtc".to_string(),
+        Some(InputFormat::GenomeStudio) => "genome-studio".to_string(),
         Some(InputFormat::Vcf) => "vcf".to_string(),
         Some(InputFormat::Bcf) => "bcf".to_string(),
         Some(InputFormat::Auto) | None => "auto".to_string(),

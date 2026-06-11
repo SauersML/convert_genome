@@ -4,7 +4,7 @@ use std::io;
 use tracing;
 
 use crate::conversion::{ConversionConfig, Ploidy, determine_ploidy, format_genotype};
-use crate::dtc::{self, Allele as DtcAllele, Record as DtcRecord};
+use crate::dtc::{Allele as DtcAllele, Record as DtcRecord};
 use crate::external_sort::{
     DtcExternalSorter, DtcOrder, RecordExternalSorter, RecordOrder, SortFormat, SortedRecordIter,
 };
@@ -23,6 +23,8 @@ pub fn get_max_records_limit() -> Option<usize> {
 pub enum InputFormat {
     /// Direct-to-consumer text output (23andMe, etc.)
     Dtc,
+    /// Illumina GenomeStudio Genotyping ("GSGT") Final Report.
+    GenomeStudio,
     /// Variant Call Format
     Vcf,
     /// Binary Call Format
@@ -32,6 +34,14 @@ pub enum InputFormat {
 }
 
 impl InputFormat {
+    /// Whether this format flows through the DTC conversion pipeline
+    /// (record-oriented genotype text that needs build/sex inference and
+    /// reference-based REF/ALT resolution). Both 23andMe-style DTC files and
+    /// Illumina GenomeStudio Final Reports qualify.
+    pub fn is_dtc_like(self) -> bool {
+        matches!(self, Self::Dtc | Self::GenomeStudio)
+    }
+
     pub fn detect(path: &std::path::Path) -> Self {
         use std::io::BufRead;
 
@@ -41,6 +51,11 @@ impl InputFormat {
             if let Ok(buf) = reader.fill_buf() {
                 if buf.len() >= 3 && &buf[..3] == b"BCF" {
                     return Self::Bcf;
+                }
+                // Illumina GenomeStudio Final Report: starts with a [Header]
+                // (or [Data]) section marker, or a "GSGT Version" line.
+                if crate::genomestudio::looks_like_genome_studio(buf) {
+                    return Self::GenomeStudio;
                 }
                 // VCF files typically start with '#' (0x23) for header
                 if !buf.is_empty() && buf[0] == b'#' {
@@ -94,19 +109,46 @@ pub struct DtcSource {
     reference: Option<ReferenceGenome>,
     config: ConversionConfig,
     header_keys: Keys,
+    /// When true, per-sample [`crate::dtc::ArrayMetrics`] are emitted as the
+    /// BAF/LRR/IGC/GTS FORMAT fields (GenomeStudio inputs). The key order here
+    /// must match [`DtcSource::header_keys`] and the FORMAT lines in the header.
+    emit_metrics: bool,
     initial_parse_errors: usize,
     initial_stats_synced: bool,
     inferred_strand: crate::source_ref::InferredStrand,
 }
 
+/// FORMAT field IDs for the GenomeStudio array metrics, in the order they are
+/// written into each sample (after `GT`). Shared with the VCF header builder so
+/// the declared FORMAT lines and the emitted values never drift apart.
+pub const ARRAY_METRIC_KEYS: [&str; 4] = ["BAF", "LRR", "IGC", "GTS"];
+
 impl DtcSource {
-    pub fn new<R: std::io::BufRead>(
-        reader: dtc::Reader<R>,
+    /// Build a source from any iterator of parsed [`DtcRecord`]s.
+    ///
+    /// Generic over the record iterator so it can consume both the 23andMe-style
+    /// [`crate::dtc::Reader`] and the Illumina [`crate::genomestudio::Reader`]; both
+    /// yield `Result<DtcRecord, _>` with a `Display`able error.
+    pub fn new<I, E>(
+        records: I,
         reference: Option<ReferenceGenome>,
         config: ConversionConfig,
         inferred_strand: Option<crate::source_ref::InferredStrand>,
-    ) -> io::Result<Self> {
-        let keys: Keys = vec![String::from("GT")].into_iter().collect();
+    ) -> io::Result<Self>
+    where
+        I: IntoIterator<Item = Result<DtcRecord, E>>,
+        E: std::fmt::Display,
+    {
+        // GenomeStudio inputs carry per-sample array metrics; declare them as
+        // FORMAT fields after GT. Other DTC inputs emit GT only.
+        let emit_metrics = matches!(config.input_format, crate::input::InputFormat::GenomeStudio);
+        let keys: Keys = if emit_metrics {
+            std::iter::once("GT".to_string())
+                .chain(ARRAY_METRIC_KEYS.iter().map(|s| s.to_string()))
+                .collect()
+        } else {
+            vec![String::from("GT")].into_iter().collect()
+        };
 
         // Get optional limit from environment
         let max_records = get_max_records_limit();
@@ -122,7 +164,7 @@ impl DtcSource {
         let mut parse_errors = 0;
         let mut records_read = 0;
 
-        for res in reader {
+        for res in records {
             if let Some(limit) = max_records
                 && records_read >= limit
             {
@@ -148,6 +190,7 @@ impl DtcSource {
             reference,
             config,
             header_keys: keys,
+            emit_metrics,
             initial_parse_errors: parse_errors,
             initial_stats_synced: false,
             inferred_strand: inferred_strand.unwrap_or(crate::source_ref::InferredStrand::Forward),
@@ -323,10 +366,18 @@ impl DtcSource {
                 .collect::<noodles::vcf::variant::record_buf::Ids>()
         });
 
-        let samples = Samples::new(
-            self.header_keys.clone(),
-            vec![vec![Some(Value::String(genotype_string))]],
-        );
+        // Genotype first, then the array metrics (when this is a GenomeStudio
+        // source). Order must match `header_keys` / `ARRAY_METRIC_KEYS`.
+        let mut sample_values: Vec<Option<Value>> = Vec::with_capacity(1 + ARRAY_METRIC_KEYS.len());
+        sample_values.push(Some(Value::String(genotype_string)));
+        if self.emit_metrics {
+            let m = record.metrics.unwrap_or_default();
+            sample_values.push(m.baf.map(Value::Float));
+            sample_values.push(m.lrr.map(Value::Float));
+            sample_values.push(m.gencall.map(Value::Float));
+            sample_values.push(m.gentrain.map(Value::Float));
+        }
+        let samples = Samples::new(self.header_keys.clone(), vec![sample_values]);
 
         // Build info section
         let mut info_map: noodles::vcf::variant::record_buf::Info = Default::default();

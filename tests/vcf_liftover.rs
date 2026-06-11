@@ -114,10 +114,7 @@ fn base_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> Conversio
     }
 }
 
-fn find_record_by_id(
-    data: &str,
-    id: &str,
-) -> Option<(String, u64)> {
+fn find_record_by_id(data: &str, id: &str) -> Option<(String, u64)> {
     for line in data.lines() {
         if line.starts_with('#') {
             continue;

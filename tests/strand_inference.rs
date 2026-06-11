@@ -47,12 +47,14 @@ fn test_infer_forward_strand() {
             position: 100,
             genotype: "AA".to_string(), // Matches Ref A
             id: None,
+            metrics: None,
         });
         records.push(DtcRecord {
             chromosome: "1".to_string(),
             position: 200,
             genotype: "GG".to_string(), // Matches Ref G
             id: None,
+            metrics: None,
         });
     }
 
@@ -77,12 +79,14 @@ fn test_infer_reverse_strand() {
             position: 100,
             genotype: "TT".to_string(), // Matches RC(A)
             id: None,
+            metrics: None,
         });
         records.push(DtcRecord {
             chromosome: "1".to_string(),
             position: 200,
             genotype: "CC".to_string(), // Matches RC(G)
             id: None,
+            metrics: None,
         });
     }
 
@@ -103,6 +107,7 @@ fn test_infer_ambiguous_skips() {
         position: 100,
         genotype: "AT".to_string(), // Transversion check should return false
         id: None,
+        metrics: None,
     }];
 
     // If all skipped, strand inference is fail-closed (tested < 50)

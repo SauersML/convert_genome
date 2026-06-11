@@ -149,8 +149,7 @@ impl PanelIndex {
                 .map(|p| usize::from(p) as u64)
                 .unwrap_or(0);
 
-            let ref_allele = std::str::from_utf8(record.reference_bases().as_ref())?
-                .to_string();
+            let ref_allele = std::str::from_utf8(record.reference_bases().as_ref())?.to_string();
             let alt_alleles: Vec<String> = record
                 .alternate_bases()
                 .iter()
