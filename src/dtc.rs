@@ -230,6 +230,23 @@ pub enum ParseErrorKind {
     InvalidPosition(ParseIntError),
     #[error("missing genotype field")]
     MissingGenotype,
+    #[error(
+        "invalid variant ID {0:?}: must not contain whitespace or ';' (forbidden in the VCF ID field)"
+    )]
+    InvalidId(String),
+}
+
+/// Returns true if `id` is usable as a VCF ID field value.
+///
+/// Per the VCF spec (§1.6.1.3 "Fixed fields: ID"), the ID field must not
+/// contain whitespace or semicolons. noodles enforces this at serialization
+/// time and, when violated, fails deep in the external-sort spill writer with
+/// a bare "invalid ID" error that does not name the offending line. We mirror
+/// the check here so a malformed ID is rejected cleanly at parse time and the
+/// offending record is skipped with a counted warning, consistent with the
+/// other field-level parse errors.
+fn is_valid_vcf_id(id: &str) -> bool {
+    id.chars().all(|c| !c.is_whitespace() && c != ';')
 }
 
 fn parse_record(line: &str) -> Result<Record, ParseErrorKind> {
@@ -286,8 +303,14 @@ fn parse_record(line: &str) -> Result<Record, ParseErrorKind> {
 
     let id = if id_str.is_empty() || id_str == "0" || id_str == "." {
         None
-    } else {
+    } else if is_valid_vcf_id(id_str) {
         Some(id_str.to_string())
+    } else {
+        // The ID carries characters the VCF ID field forbids (whitespace or
+        // ';'). If we kept it, noodles would later abort the whole conversion
+        // with a bare "invalid ID" from inside the spill writer. Reject the
+        // record here so it is skipped with a counted warning instead.
+        return Err(ParseErrorKind::InvalidId(id_str.to_string()));
     };
 
     Ok(Record {
@@ -503,6 +526,49 @@ mod tests {
         let line = "rs123\t1\t100\tA\tG";
         let record = parse_record(line).unwrap();
         assert_eq!(record.genotype, "A/G");
+    }
+
+    #[test]
+    fn rejects_id_with_semicolon() {
+        // An ID carrying a ';' is forbidden in the VCF ID field. Previously
+        // this survived parsing and crashed the whole conversion deep in the
+        // external-sort spill writer with a bare "invalid ID". It must now be
+        // rejected cleanly at parse time so the record is skipped with a
+        // counted warning (like the other field-level parse errors).
+        let err = parse_record("rs1;weird\t1\t100\tAA").unwrap_err();
+        match &err {
+            ParseErrorKind::InvalidId(id) => assert_eq!(id, "rs1;weird"),
+            other => panic!("expected InvalidId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_id_with_embedded_whitespace() {
+        // Tab/newline-split fields can't carry spaces, but other Unicode
+        // whitespace (e.g. a no-break space) can sneak through a CSV field and
+        // is equally rejected by the VCF ID grammar.
+        let err = parse_record("rs1\u{00a0}x,1,100,AA").unwrap_err();
+        assert!(matches!(err, ParseErrorKind::InvalidId(_)));
+    }
+
+    #[test]
+    fn accepts_normal_rsid() {
+        // Regression guard: ordinary IDs (and the missing-ID sentinels) must
+        // still parse fine after adding ID validation.
+        assert_eq!(
+            parse_record("rs123\t1\t100\tAA").unwrap().id.as_deref(),
+            Some("rs123")
+        );
+        assert_eq!(parse_record(".\t1\t100\tAA").unwrap().id, None);
+        // Colons and other punctuation that the VCF ID grammar allows are kept
+        // (synthetic IDs use ':' as a separator).
+        assert_eq!(
+            parse_record("1:100:A:G\t1\t100\tAA")
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("1:100:A:G")
+        );
     }
 
     #[test]
