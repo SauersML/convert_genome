@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use noodles::bcf;
 use noodles::vcf::{
@@ -887,8 +887,11 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
             let mut writer =
                 PlinkWriter::new(&config.output).context("failed to create PLINK writer")?;
 
+            // Sex is normally filled by inference (which itself defaults to
+            // Unknown on failure); default here too rather than panicking, so a
+            // caller path that skipped inference still produces a valid FAM.
             writer
-                .write_fam(&config.sample_id, config.sex.expect("sex should be set"))
+                .write_fam(&config.sample_id, config.sex.unwrap_or(Sex::Unknown))
                 .context("failed to write FAM file")?;
 
             let ctx = ProcessingContext {
@@ -996,7 +999,10 @@ fn transform_record(
     let mut final_record = if ctx.config.standardize {
         match standardize_record(
             &record,
-            ctx.reference.expect("reference required for standardize"),
+            // Guaranteed Some: process_records bails up front when
+            // standardize is set without a reference.
+            ctx.reference
+                .expect("reference presence is enforced up front in process_records"),
             ctx.config,
             summary,
             warned_unknown_chroms,
@@ -1148,6 +1154,19 @@ where
     W: VariantWriter,
 {
     let mut warned_unknown_chroms = std::collections::HashSet::new();
+
+    // Standardization polarizes alleles against the reference, so it cannot run
+    // without one. This is a configuration invariant (liftover, for instance,
+    // forces standardize=true and is expected to have loaded a target
+    // reference). Fail fast with an actionable message here rather than letting
+    // `transform_record` panic once per record deep inside the hot loop.
+    if ctx.config.standardize && ctx.reference.is_none() {
+        bail!(
+            "standardization is enabled but no reference genome is loaded; cannot \
+             polarize alleles. If liftover was requested, the target-build reference \
+             failed to load — supply it explicitly with --reference."
+        );
+    }
 
     let mut sorter = if ctx.needs_sort {
         let order = if let Some(reference) = ctx.reference {

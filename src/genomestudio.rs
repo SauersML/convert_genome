@@ -68,6 +68,11 @@ pub enum GsError {
     NoPlusAlleles,
     #[error("line {line}: invalid position '{value}'")]
     InvalidPosition { line: u64, value: String },
+    #[error(
+        "line {line}: invalid variant ID {value:?}: must not contain whitespace or ';' \
+         (forbidden in the VCF ID field)"
+    )]
+    InvalidId { line: u64, value: String },
     #[error("line {line}: wrong field count (expected {expected}, found {found})")]
     FieldCount {
         line: u64,
@@ -291,8 +296,18 @@ where
         let snp_name = fields[self.columns.snp_name].trim();
         let id = if snp_name.is_empty() || snp_name == "." {
             None
-        } else {
+        } else if crate::dtc::is_valid_vcf_id(snp_name) {
             Some(snp_name.to_string())
+        } else {
+            // A SNP name carrying whitespace or ';' is forbidden in the VCF ID
+            // field. Left intact it would survive into the RecordBuf and later
+            // abort the whole conversion deep in the serializer with a bare
+            // "invalid ID". Reject it here so the row is skipped with a counted
+            // warning, mirroring the DTC parser.
+            return Err(GsError::InvalidId {
+                line: self.line,
+                value: snp_name.to_string(),
+            });
         };
 
         let num = |idx: Option<usize>| -> Option<f32> {
@@ -506,6 +521,28 @@ rs1,1,100,-0.12,0.48,0.97,0.81,A,G
         assert_eq!(m.baf, Some(0.48));
         assert_eq!(m.gencall, Some(0.97));
         assert_eq!(m.gentrain, Some(0.81));
+    }
+
+    #[test]
+    fn rejects_snp_name_with_forbidden_chars() {
+        // A SNP name carrying a ';' (or whitespace) is forbidden in the VCF ID
+        // field. It must be rejected at parse time as GsError::InvalidId so the
+        // row is skipped with a counted warning, instead of surviving into the
+        // RecordBuf and crashing the whole conversion deep in the serializer.
+        let report = "\
+[Data]
+SNP Name,Chr,Position,Allele1 - Plus,Allele2 - Plus
+rs1;weird,1,100,A,G
+rs2,1,200,C,T
+";
+        let results: Vec<_> = Reader::new(report.as_bytes()).unwrap().collect();
+        assert_eq!(results.len(), 2);
+        match &results[0] {
+            Err(GsError::InvalidId { value, .. }) => assert_eq!(value, "rs1;weird"),
+            other => panic!("expected InvalidId, got {other:?}"),
+        }
+        // The well-formed row still parses fine.
+        assert_eq!(results[1].as_ref().unwrap().id.as_deref(), Some("rs2"));
     }
 
     #[test]
