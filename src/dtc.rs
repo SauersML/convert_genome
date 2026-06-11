@@ -244,8 +244,9 @@ pub enum ParseErrorKind {
 /// a bare "invalid ID" error that does not name the offending line. We mirror
 /// the check here so a malformed ID is rejected cleanly at parse time and the
 /// offending record is skipped with a counted warning, consistent with the
-/// other field-level parse errors.
-fn is_valid_vcf_id(id: &str) -> bool {
+/// other field-level parse errors. Shared with the GenomeStudio parser, which
+/// validates SNP names the same way.
+pub(crate) fn is_valid_vcf_id(id: &str) -> bool {
     id.chars().all(|c| !c.is_whitespace() && c != ';')
 }
 

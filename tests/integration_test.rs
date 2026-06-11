@@ -73,6 +73,15 @@ fn write_dtc(dir: &TempDir, contents: &str) -> Result<PathBuf> {
     Ok(input.path().to_path_buf())
 }
 
+fn write_genomestudio(dir: &TempDir, data_rows: &str) -> Result<PathBuf> {
+    let input = dir.child("report.txt");
+    input.write_str(&format!(
+        "[Header]\nGSGT Version,2.0.5\nNum Samples,1\n[Data]\n\
+         Sample ID,SNP Name,Chr,Position,Allele1 - Plus,Allele2 - Plus\n{data_rows}"
+    ))?;
+    Ok(input.path().to_path_buf())
+}
+
 fn write_panel_vcf(dir: &TempDir) -> Result<PathBuf> {
     let vcf_path = dir.child("panel.vcf");
     vcf_path.write_str(
@@ -212,6 +221,37 @@ fn malformed_variant_id_is_skipped_not_crash() -> Result<()> {
     let vcf_data = fs::read_to_string(vcf_path.path())?;
     assert!(vcf_data.contains("#CHROM\tPOS"));
     // The forbidden ID never reaches the output.
+    assert!(!vcf_data.contains("rs2;bad"));
+
+    Ok(())
+}
+
+#[test]
+fn genomestudio_malformed_snp_name_is_skipped_not_crash() -> Result<()> {
+    // Same robustness guarantee as the DTC case, for Illumina GenomeStudio
+    // Final Reports: a row whose SNP Name carries a ';' (forbidden in the VCF
+    // ID field) must be skipped with a counted parse error rather than aborting
+    // the whole conversion in the serializer. Declaring input_build == target
+    // keeps this fast (no liftover/network path).
+    let temp = TempDir::new()?;
+    let reference = write_reference(&temp)?;
+    // rs1 (chr1:2 ref C) and rs3 (chr2:4 ref T) are good; rs2;bad is rejected.
+    let input = write_genomestudio(
+        &temp,
+        "S1,rs1,1,2,C,C\nS1,rs2;bad,1,3,A,G\nS1,rs3,2,4,T,T\n",
+    )?;
+
+    let vcf_path = temp.child("gs_malformed_id.vcf");
+    let mut config = base_config(input, reference, vcf_path.path().to_path_buf());
+    config.input_format = InputFormat::GenomeStudio;
+    config.input_build = Some("GRCh38".to_string());
+
+    let summary = convert_dtc_file(config)?;
+
+    assert_eq!(summary.emitted_records, 2);
+    assert_eq!(summary.parse_errors, 1);
+
+    let vcf_data = fs::read_to_string(vcf_path.path())?;
     assert!(!vcf_data.contains("rs2;bad"));
 
     Ok(())
