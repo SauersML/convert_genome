@@ -57,6 +57,12 @@ jobs:
           args: --release --strip --out dist
           working-directory: python
           manylinux: auto
+          # static-ssl builds OpenSSL from source -> needs perl IPC::Cmd in the
+          # manylinux container; and GNOMON_SKIP_LINT_CHECKS must be passed INTO
+          # the docker container (job env does not propagate there).
+          before-script-linux: |
+            yum install -y perl-IPC-Cmd perl-core || true
+          docker-options: -e GNOMON_SKIP_LINT_CHECKS=1
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.platform.target }}
