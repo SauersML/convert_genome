@@ -31,7 +31,7 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
-curl = "0.4"
+curl = { version = "0.4", features = ["static-curl", "static-ssl"] }
 flate2 = "1.1"
 lru = "0.16"
 tempfile = "3.23"

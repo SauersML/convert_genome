@@ -31,6 +31,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
+  # build.rs runs a "manual lint self-check" needing a `grep` extern artifact
+  # that fails in the maturin/cross build; release.yml skips it the same way.
+  GNOMON_SKIP_LINT_CHECKS: "1"
 
 jobs:
   linux:
