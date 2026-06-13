@@ -106,6 +106,11 @@ fn convert(
         standardize,
         panel,
         input_build,
+        // Clinical-safety gates use the same production defaults as the CLI so
+        // empty/malformed/wrong-build inputs fail loud here too.
+        min_emitted_variants: crate::conversion::DEFAULT_MIN_EMITTED_VARIANTS,
+        min_build_confidence: crate::conversion::DEFAULT_MIN_BUILD_CONFIDENCE,
+        max_parse_error_ratio: crate::conversion::DEFAULT_MAX_PARSE_ERROR_RATIO,
     };
 
     // Heavy work: release the GIL so other Python threads can run.
