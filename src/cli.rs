@@ -86,6 +86,26 @@ struct Cli {
     /// Sex of the sample (auto-detected if not specified)
     #[arg(long, value_enum)]
     sex: Option<Sex>,
+
+    /// Clinical-safety floor: fail (nonzero exit) if fewer than this many
+    /// variant records are emitted. Guards against empty / malformed /
+    /// unparseable inputs silently producing a near-empty result that flows
+    /// into downstream scoring. Lower it only if a small panel is expected.
+    #[arg(long, value_name = "N", default_value_t = crate::conversion::DEFAULT_MIN_EMITTED_VARIANTS)]
+    min_emitted_variants: usize,
+
+    /// Clinical-safety floor: minimum auto-detected build confidence (0..=1)
+    /// required to proceed. Below this the input matches neither GRCh37 nor
+    /// GRCh38 decisively and the run fails rather than silently assuming a
+    /// build. Bypass detection entirely with --input-build.
+    #[arg(long, value_name = "C", default_value_t = crate::conversion::DEFAULT_MIN_BUILD_CONFIDENCE)]
+    min_build_confidence: f64,
+
+    /// Clinical-safety ceiling: fail if more than this fraction (0..=1) of
+    /// input lines cannot be parsed. Guards against the wrong file format
+    /// (e.g. binary data or a non-genome CSV) being read as a sparse genome.
+    #[arg(long, value_name = "R", default_value_t = crate::conversion::DEFAULT_MAX_PARSE_ERROR_RATIO)]
+    max_parse_error_ratio: f64,
 }
 
 pub fn run() -> Result<()> {
@@ -169,6 +189,9 @@ pub fn run() -> Result<()> {
         standardize: cli.standardize,
         panel: resolved_panel,
         input_build: cli.input_build.clone(),
+        min_emitted_variants: cli.min_emitted_variants,
+        min_build_confidence: cli.min_build_confidence,
+        max_parse_error_ratio: cli.max_parse_error_ratio,
     };
 
     let summary = convert_dtc_file(config)?;

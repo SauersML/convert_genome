@@ -58,6 +58,27 @@ pub enum OutputFormat {
     Plink,
 }
 
+/// Default minimum number of emitted variant records below which a conversion
+/// is treated as a failure rather than a silent near-empty result. A genuine
+/// genotyping array or genome yields tens of thousands to millions of variant
+/// sites; a handful (or zero) almost always means the input was empty, the
+/// wrong file, or unparseable. Overridable via `--min-emitted-variants`.
+pub const DEFAULT_MIN_EMITTED_VARIANTS: usize = 1000;
+
+/// Default minimum build-detection confidence (0..=1, winning match rate over
+/// the sum of both builds) required to trust an auto-detected genome build.
+/// Below this the coordinates match neither build decisively and silently
+/// assuming GRCh38 would risk scoring a genome against the wrong coordinates.
+/// Overridable via `--min-build-confidence`; bypass detection entirely with
+/// `--input-build`.
+pub const DEFAULT_MIN_BUILD_CONFIDENCE: f64 = 0.55;
+
+/// Default maximum fraction of input lines that may fail to parse before the
+/// conversion is treated as a failure. Above this the input is almost
+/// certainly the wrong format (e.g. binary data or a non-genome CSV read as
+/// DTC). Overridable via `--max-parse-error-ratio`.
+pub const DEFAULT_MAX_PARSE_ERROR_RATIO: f64 = 0.5;
+
 /// Configuration required to drive a conversion.
 #[derive(Debug, Clone)]
 pub struct ConversionConfig {
@@ -83,6 +104,18 @@ pub struct ConversionConfig {
     /// and the asserted value is treated as the detected build. When
     /// `None` (default), behavior is unchanged from prior releases.
     pub input_build: Option<String>,
+    /// Clinical-safety floor: if the conversion emits fewer than this many
+    /// variant records, [`convert_dtc_file`] returns an `Err` instead of a
+    /// silent near-empty result. See the `DEFAULT_MIN_EMITTED_VARIANTS` const.
+    pub min_emitted_variants: usize,
+    /// Clinical-safety floor: minimum auto-detected build confidence (0..=1)
+    /// required to proceed without an explicit `--input-build`. See the
+    /// default const of the same name for the rationale.
+    pub min_build_confidence: f64,
+    /// Clinical-safety ceiling: maximum fraction of input lines that may fail
+    /// to parse before the conversion is rejected. See the default const of
+    /// the same name for the rationale.
+    pub max_parse_error_ratio: f64,
 }
 
 // ConversionSummary moved to crate root
@@ -948,6 +981,14 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // Ah, `let mut build_detection` was declared but not mutated in some paths?
     // Or maybe I just need to remove `mut`.
 
+    // Capture the build-detection confidence before `build_detection` is moved
+    // into the report builder, so the clinical-safety gate below can inspect it.
+    // `None` means either no detection ran (caller asserted `--input-build`) or
+    // there was no informative signal to compute a confidence from.
+    let detected_confidence = build_detection
+        .as_ref()
+        .and_then(|d| d.build_confidence);
+
     let report_builder = crate::report::RunReportBuilder {
         input_path: config.input.display().to_string(),
         input_format: Some(config.input_format),
@@ -976,7 +1017,81 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         tracing::warn!("Failed to write run report: {}", e);
     }
 
+    enforce_clinical_safety_gates(&config, &summary, detected_confidence)?;
+
     Ok(summary)
+}
+
+/// Fail loud (return `Err`, i.e. nonzero exit) when a conversion produced output
+/// that should not be trusted by a downstream clinical scorer.
+///
+/// Without these gates a malformed, empty, or wrong-build input exits `0` with
+/// an empty / sparse / mis-parsed result, so garbage can silently flow into
+/// clinical scoring with no error signal. Each gate is tunable via a CLI flag
+/// (never an env var, per repo convention) and has a defensible default.
+///
+/// The gates fire in order of how diagnostic they are:
+/// 1. **Parse-error ratio** — most of the input could not be parsed, so the
+///    file is almost certainly the wrong format (binary data, a non-genome CSV
+///    read as DTC, etc.).
+/// 2. **Build confidence** — the coordinates match neither reference build
+///    decisively, so silently assuming GRCh38 could score against the wrong
+///    coordinates. Skipped when the caller asserted `--input-build`.
+/// 3. **Minimum emitted variants** — a real genome/array yields tens of
+///    thousands of variant sites; a handful (or zero) means empty/malformed
+///    input or a mis-detected format.
+fn enforce_clinical_safety_gates(
+    config: &ConversionConfig,
+    summary: &ConversionSummary,
+    detected_confidence: Option<f64>,
+) -> Result<()> {
+    // Gate 1: parse-error ratio.
+    let considered = summary.total_records + summary.parse_errors;
+    if considered > 0 {
+        let parse_error_ratio = summary.parse_errors as f64 / considered as f64;
+        if parse_error_ratio > config.max_parse_error_ratio {
+            return Err(anyhow!(
+                "{:.1}% of input lines failed to parse ({} of {} considered), above the maximum \
+                 of {:.1}% — input appears to be the wrong format (e.g. binary data or a \
+                 non-genome CSV) and the output cannot be trusted. Pass --max-parse-error-ratio \
+                 to override, or correct the input.",
+                parse_error_ratio * 100.0,
+                summary.parse_errors,
+                considered,
+                config.max_parse_error_ratio * 100.0,
+            ));
+        }
+    }
+
+    // Gate 2: build confidence. Only meaningful when position-based detection
+    // actually ran; a caller-asserted `--input-build` yields `None` here and
+    // deliberately bypasses this gate (the caller took responsibility).
+    if config.input_build.is_none()
+        && let Some(confidence) = detected_confidence
+        && confidence < config.min_build_confidence
+    {
+        return Err(anyhow!(
+            "could not confidently determine genome build (confidence {:.2} < {:.2}); the \
+             coordinates match neither GRCh37 nor GRCh38 decisively. Refusing to silently \
+             assume a build for clinical scoring. Re-run with an explicit --input-build, or \
+             lower --min-build-confidence if you accept the risk.",
+            confidence,
+            config.min_build_confidence,
+        ));
+    }
+
+    // Gate 3: minimum emitted variant records.
+    if summary.variant_records < config.min_emitted_variants {
+        return Err(anyhow!(
+            "emitted {} variant records, below the minimum of {} — input appears \
+             empty/malformed/unparseable and the output is not safe for clinical scoring. \
+             Pass --min-emitted-variants to override if a small panel is expected.",
+            summary.variant_records,
+            config.min_emitted_variants,
+        ));
+    }
+
+    Ok(())
 }
 
 struct ProcessingContext<'a> {
@@ -2041,6 +2156,9 @@ mod tests {
             standardize: false,
             panel: None,
             input_build: None,
+            min_emitted_variants: 0,
+            min_build_confidence: 0.0,
+            max_parse_error_ratio: 1.0,
         };
 
         let header = build_header(&config, Some(&reference), None).unwrap();
@@ -2081,6 +2199,9 @@ mod tests {
             standardize: false,
             panel: None,
             input_build: None,
+            min_emitted_variants: 0,
+            min_build_confidence: 0.0,
+            max_parse_error_ratio: 1.0,
         };
 
         let header = build_header(&config, Some(&reference), None).unwrap();
@@ -2103,5 +2224,121 @@ mod tests {
             determine_ploidy("Y", 100, Sex::Unknown, None),
             Ploidy::Haploid
         );
+    }
+
+    /// A config whose safety gates are all set to the production defaults, so
+    /// the gate unit tests exercise the real thresholds rather than placeholder
+    /// values. Paths are dummies; `enforce_clinical_safety_gates` does no I/O.
+    fn config_with_default_gates() -> ConversionConfig {
+        ConversionConfig {
+            input: PathBuf::from("dummy.txt"),
+            input_format: crate::input::InputFormat::Dtc,
+            input_origin: "dummy".into(),
+            reference_fasta: None,
+            reference_origin: None,
+            reference_fai: None,
+            reference_fai_origin: None,
+            output: PathBuf::from("out.vcf"),
+            output_dir: None,
+            output_format: OutputFormat::Vcf,
+            sample_id: "SAMPLE".into(),
+            assembly: "GRCh38".into(),
+            include_reference_sites: true,
+            sex: Some(Sex::Female),
+            par_boundaries: None,
+            standardize: false,
+            panel: None,
+            input_build: None,
+            min_emitted_variants: DEFAULT_MIN_EMITTED_VARIANTS,
+            min_build_confidence: DEFAULT_MIN_BUILD_CONFIDENCE,
+            max_parse_error_ratio: DEFAULT_MAX_PARSE_ERROR_RATIO,
+        }
+    }
+
+    fn summary_with(variant_records: usize, total: usize, parse_errors: usize) -> ConversionSummary {
+        let mut s = ConversionSummary::default();
+        s.variant_records = variant_records;
+        s.total_records = total;
+        s.parse_errors = parse_errors;
+        s
+    }
+
+    #[test]
+    fn gate_passes_for_a_healthy_conversion() {
+        let config = config_with_default_gates();
+        // Plenty of variants, no parse errors, confident build.
+        let summary = summary_with(600_000, 600_000, 0);
+        assert!(enforce_clinical_safety_gates(&config, &summary, Some(0.98)).is_ok());
+    }
+
+    #[test]
+    fn gate_rejects_empty_output() {
+        let config = config_with_default_gates();
+        // Zero emitted variants (empty / header-only input).
+        let summary = summary_with(0, 0, 0);
+        let err = enforce_clinical_safety_gates(&config, &summary, Some(0.98)).unwrap_err();
+        assert!(
+            err.to_string().contains("below the minimum"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn gate_rejects_sparse_output() {
+        let config = config_with_default_gates();
+        // A handful of variants, well under the floor.
+        let summary = summary_with(12, 12, 0);
+        let err = enforce_clinical_safety_gates(&config, &summary, Some(0.98)).unwrap_err();
+        assert!(err.to_string().contains("emitted 12 variant records"));
+    }
+
+    #[test]
+    fn gate_rejects_high_parse_error_ratio() {
+        let config = config_with_default_gates();
+        // 900 of 1000 lines unparseable (binary garbage / wrong-format CSV).
+        // Even with enough variants, the parse-error gate must fire first.
+        let summary = summary_with(2_000, 100, 900);
+        let err = enforce_clinical_safety_gates(&config, &summary, Some(0.98)).unwrap_err();
+        assert!(err.to_string().contains("failed to parse"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn gate_rejects_low_build_confidence() {
+        let config = config_with_default_gates();
+        let summary = summary_with(600_000, 600_000, 0);
+        // Coordinates match neither build decisively (≈ tie).
+        let err = enforce_clinical_safety_gates(&config, &summary, Some(0.50)).unwrap_err();
+        assert!(
+            err.to_string().contains("could not confidently determine genome build"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn build_confidence_gate_is_bypassed_by_explicit_input_build() {
+        let mut config = config_with_default_gates();
+        config.input_build = Some("GRCh37".into());
+        let summary = summary_with(600_000, 600_000, 0);
+        // Low confidence is ignored because the caller asserted the build.
+        assert!(enforce_clinical_safety_gates(&config, &summary, Some(0.10)).is_ok());
+        // And None confidence (no detection ran) is also fine.
+        assert!(enforce_clinical_safety_gates(&config, &summary, None).is_ok());
+    }
+
+    #[test]
+    fn parse_error_gate_allows_a_few_bad_lines() {
+        let config = config_with_default_gates();
+        // 5 bad lines out of ~600k is well under the 50% ceiling.
+        let summary = summary_with(600_000, 600_000, 5);
+        assert!(enforce_clinical_safety_gates(&config, &summary, Some(0.98)).is_ok());
+    }
+
+    #[test]
+    fn gates_are_tunable_to_accept_a_small_panel() {
+        let mut config = config_with_default_gates();
+        config.min_emitted_variants = 10;
+        config.min_build_confidence = 0.0;
+        let summary = summary_with(50, 50, 0);
+        assert!(enforce_clinical_safety_gates(&config, &summary, Some(0.51)).is_ok());
     }
 }

@@ -121,6 +121,9 @@ fn build_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> Conversi
         // Declared build == target assembly: skips network build detection and
         // liftover entirely.
         input_build: Some("GRCh38".into()),
+        min_emitted_variants: 0,
+        min_build_confidence: 0.0,
+        max_parse_error_ratio: 1.0,
     }
 }
 

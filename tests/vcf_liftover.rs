@@ -111,6 +111,9 @@ fn base_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> Conversio
         standardize: false,
         panel: None,
         input_build: None,
+        min_emitted_variants: 0,
+        min_build_confidence: 0.0,
+        max_parse_error_ratio: 1.0,
     }
 }
 

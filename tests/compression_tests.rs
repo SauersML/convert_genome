@@ -9,11 +9,16 @@ fn test_dtc_with_comments() {
     input.write_str(dtc_content).unwrap();
 
     let output = temp.child("out.vcf");
-    let config = create_config(
+    let mut config = create_config(
         input.path().to_path_buf(),
         ref_path,
         output.path().to_path_buf(),
     );
+    // This synthetic single-record fixture exists to exercise comment-skipping
+    // on the DTC decode path, not build detection. Declare the input build so
+    // the (fail-closed) position-based detector is skipped: one heterozygous
+    // call yields zero homozygous candidate sites, which would otherwise abort.
+    config.input_build = Some("GRCh38".into());
 
     // Should detect as DTC (because it fails VCF check) and convert successfully
     let summary = convert_dtc_file(config).unwrap();
@@ -91,6 +96,9 @@ fn create_config(input: PathBuf, reference: PathBuf, output: PathBuf) -> Convers
         standardize: false,
         panel: None,
         input_build: None,
+        min_emitted_variants: 0,
+        min_build_confidence: 0.0,
+        max_parse_error_ratio: 1.0,
     }
 }
 
@@ -223,7 +231,12 @@ fn test_dtc_nested_compression() {
     let input = create_nested_file(&temp, dtc_content, &["gz", "zip"], "test.txt");
 
     let output = temp.child("out.vcf");
-    let config = create_config(input, ref_path, output.path().to_path_buf());
+    let mut config = create_config(input, ref_path, output.path().to_path_buf());
+    // Synthetic single-record DTC fixture for the nested-decompression path
+    // (test.txt.gz.zip), not build detection. Declare the input build so the
+    // fail-closed position detector is skipped (one het call => no homozygous
+    // candidates => "No variants available for build detection" abort).
+    config.input_build = Some("GRCh38".into());
 
     let summary = convert_dtc_file(config).unwrap();
     assert_eq!(summary.variant_records, 1);
