@@ -1,14 +1,13 @@
 [build-system]
-requires = ["hatchling>=1.18"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
 
 [project]
 name = "convert_genome"
-version = "0.2.0"
-description = "Python wrapper for SauersML/convert_genome (DTC → VCF/BCF/PLINK conversion)."
+version = "0.3.1"
+description = "Python bindings for SauersML/convert_genome (DTC → VCF/BCF/PLINK conversion)."
 readme = "README.md"
-license = "AGPL-3.0-or-later"
-license-files = ["LICENSE"]
+license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "SauersML" }]
 requires-python = ">=3.9"
 dependencies = []
@@ -28,5 +27,14 @@ Issues = "https://github.com/SauersML/convert_genome/issues"
 [project.optional-dependencies]
 test = ["pytest>=7"]
 
-[tool.hatch.build.targets.wheel]
-packages = ["convert_genome"]
+[tool.maturin]
+# The Rust crate lives at the repo root; build the `python` feature into the
+# `cdylib`, which produces the native in-process extension module imported as
+# `convert_genome._convert_genome`. `python-source = "."` makes the adjacent
+# `convert_genome/` directory the Python package, so the pure-Python wrapper
+# modules ship in the same wheel and the compiled extension is dropped in
+# alongside them.
+manifest-path = "../Cargo.toml"
+module-name = "convert_genome._convert_genome"
+python-source = "."
+features = ["python"]

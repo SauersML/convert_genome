@@ -17,6 +17,12 @@ pub mod smart_reader;
 pub mod source_ref;
 pub mod vcf_utils;
 
+// In-process Python bindings (PyO3). Gated by the `python` feature so the CLI
+// binary build is unaffected; built by maturin into the `cdylib` to give
+// `import convert_genome` a native, in-process core.
+#[cfg(feature = "python")]
+pub mod python_ext;
+
 pub use conversion::{ConversionConfig, OutputFormat, convert_dtc_file};
 
 /// Summary of the conversion process logic.
