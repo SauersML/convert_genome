@@ -182,12 +182,12 @@ impl SourceReferenceRegistry {
         // Use HTTPS to avoid UCSC HTTP 403 responses.
         if normalized.contains("37") || normalized.contains("hg19") {
             Some(
-                Url::parse("https://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz")
+                Url::parse("https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz")
                     .unwrap(),
             )
         } else if normalized.contains("38") || normalized.contains("hg38") {
             Some(
-                Url::parse("https://hgdownload.cse.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz")
+                Url::parse("https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz")
                     .unwrap(),
             )
         } else {
