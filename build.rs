@@ -1496,8 +1496,17 @@ fn main() {
 
     // Skip lint checks during release builds or cross-compilation
     // (the grep crate won't be available in target deps during cross-compile)
-    if std::env::var("GNOMON_SKIP_LINT_CHECKS").is_ok() || std::env::var("DOCS_RS").is_ok() {
-        update_stage("skipping lint checks (GNOMON_SKIP_LINT_CHECKS or DOCS_RS set)");
+    if std::env::var("DOCS_RS").is_ok() {
+        update_stage("skipping lint checks (DOCS_RS set)");
+        return;
+    }
+
+    // CARGO_PRIMARY_PACKAGE is set only for packages Cargo is building
+    // directly. As a dependency this crate's sources are already fixed, so
+    // linting them again inside a consumer's build adds no coverage while
+    // giving every consumer a way to fail.
+    if std::env::var("CARGO_PRIMARY_PACKAGE").is_err() {
+        update_stage("skipping lint checks (not primary package - built as dependency)");
         return;
     }
 
@@ -1717,18 +1726,14 @@ fn manually_check_for_unused_variables() {
         std::process::exit(1);
     }
 
-    let deps_dir = match build_dependencies_directory() {
-        Some(path) => path,
-        None => {
-            emit_stage_detail(
-                "manual lint self-check: could not determine build dependency directory",
-            );
-            eprintln!(
-                "manual lint self-check fatal error: unable to derive build dependency directory from OUT_DIR"
-            );
-            std::process::exit(1);
-        }
-    };
+    let deps_dirs = build_dependency_directories();
+    if deps_dirs.is_empty() {
+        emit_stage_detail("manual lint self-check: could not determine build dependency directory");
+        eprintln!(
+            "manual lint self-check fatal error: unable to derive build dependency directory from OUT_DIR"
+        );
+        std::process::exit(1);
+    }
 
     let mut manual_lint_args = manual_lint_arguments(&build_path);
     let source_path = match manual_lint_args.pop() {
@@ -1744,11 +1749,13 @@ fn manually_check_for_unused_variables() {
         }
     };
 
-    manual_lint_args.push(OsString::from("-L"));
-    manual_lint_args.push(OsString::from(format!("dependency={}", deps_dir.display())));
+    for deps_dir in &deps_dirs {
+        manual_lint_args.push(OsString::from("-L"));
+        manual_lint_args.push(OsString::from(format!("dependency={}", deps_dir.display())));
+    }
 
     for crate_name in ["grep", "walkdir"] {
-        match locate_build_dependency(&deps_dir, crate_name) {
+        match locate_build_dependency(&deps_dirs, crate_name) {
             Some(artifact_path) => {
                 manual_lint_args.push(OsString::from("--extern"));
                 manual_lint_args.push(OsString::from(format!(
@@ -1761,8 +1768,7 @@ fn manually_check_for_unused_variables() {
                     "manual lint self-check: missing extern artifact for dependency '{crate_name}'"
                 ));
                 eprintln!(
-                    "manual lint self-check fatal error: required dependency '{crate_name}' extern artifact not found in {:?}",
-                    deps_dir
+                    "manual lint self-check fatal error: required dependency '{crate_name}' extern artifact not found in {deps_dirs:?}"
                 );
                 std::process::exit(1);
             }
@@ -1916,19 +1922,64 @@ fn manual_lint_arguments(build_path: &Path) -> Vec<OsString> {
     args
 }
 
-fn build_dependencies_directory() -> Option<PathBuf> {
-    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR")?);
-    let profile_dir = out_dir.ancestors().nth(3)?;
-    Some(profile_dir.join("deps"))
+/// Directories that may hold compiled build-dependency artifacts.
+///
+/// Cargo's target layout is not stable across toolchains. Dependency artifacts
+/// used to land in `<profile>/deps`, while newer toolchains place them under
+/// `<profile>/build/<pkg>/<hash>/out`. OUT_DIR gained a directory level at the
+/// same time, so counting a fixed number of `ancestors()` hops no longer finds
+/// the profile directory either -- it lands on a path that does not exist, and
+/// the self-lint then aborts every build of every consumer of this crate.
+///
+/// Rather than encode any one layout, walk up from OUT_DIR and collect every
+/// plausible artifact directory at the first ancestor that has one.
+fn build_dependency_directories() -> Vec<PathBuf> {
+    let Some(out_dir) = std::env::var_os("OUT_DIR").map(PathBuf::from) else {
+        return Vec::new();
+    };
+
+    for ancestor in out_dir.ancestors() {
+        let mut found = Vec::new();
+
+        let deps = ancestor.join("deps");
+        if deps.is_dir() {
+            found.push(deps);
+        }
+
+        let build = ancestor.join("build");
+        if build.is_dir() {
+            if let Ok(packages) = std::fs::read_dir(&build) {
+                for package in packages.flatten() {
+                    if let Ok(hashes) = std::fs::read_dir(package.path()) {
+                        for hash in hashes.flatten() {
+                            let out = hash.path().join("out");
+                            if out.is_dir() {
+                                found.push(out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !found.is_empty() {
+            return found;
+        }
+    }
+
+    Vec::new()
 }
 
-fn locate_build_dependency(deps_dir: &Path, crate_name: &str) -> Option<PathBuf> {
+fn locate_build_dependency(deps_dirs: &[PathBuf], crate_name: &str) -> Option<PathBuf> {
     let prefix = format!("lib{crate_name}-");
     for extension in ["rmeta", "rlib"] {
         let mut candidate: Option<PathBuf> = None;
         let mut candidate_mtime = std::time::SystemTime::UNIX_EPOCH;
 
-        if let Ok(entries) = std::fs::read_dir(deps_dir) {
+        for deps_dir in deps_dirs {
+            let Ok(entries) = std::fs::read_dir(deps_dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|ext| ext.to_str()) != Some(extension) {
