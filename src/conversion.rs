@@ -779,6 +779,18 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         _ => None,
     };
 
+    // Conversion writes one genome. Merging a cohort's samples into it would give a
+    // plausible-looking wrong answer, so refuse instead.
+    if let Some(input_header) = &input_header {
+        let sample_count = input_header.sample_names().len();
+        if sample_count > 1 {
+            return Err(anyhow!(
+                "Input {} has {sample_count} samples, but conversion writes a single-sample genome and would merge them. Convert one sample at a time (for example with bcftools view -s), or read the multi-sample file natively instead of converting it.",
+                config.input.display()
+            ));
+        }
+    }
+
     let header = build_header(&config, reference.as_ref(), input_header.as_ref())?;
 
     // Instantiate Source Iterator

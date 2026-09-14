@@ -196,6 +196,56 @@ fn converts_to_vcf_and_bcf() -> Result<()> {
     Ok(())
 }
 
+/// Conversion writes one genome, so a VCF or BCF with more than one sample is
+/// refused with the sample count, never merged into a single sample.
+#[test]
+fn multi_sample_vcf_and_bcf_inputs_are_refused() -> Result<()> {
+    use noodles::bcf;
+    use noodles::vcf::variant::io::Write as _;
+
+    let temp = TempDir::new()?;
+    let reference = write_reference(&temp)?;
+    let vcf = temp.child("cohort.vcf").path().to_path_buf();
+    fs::write(
+        &vcf,
+        "##fileformat=VCFv4.2\n\
+         ##contig=<ID=chr1,length=8>\n\
+         ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+         chr1\t2\trs1\tC\tT\t.\tPASS\t.\tGT\t0/1\t1/1\n\
+         chr1\t3\trs2\tG\tA\t.\tPASS\t.\tGT\t0/0\t0/1\n",
+    )?;
+    let bcf_path = temp.child("cohort.bcf").path().to_path_buf();
+    {
+        let mut reader = vcf::io::Reader::new(std::io::BufReader::new(fs::File::open(&vcf)?));
+        let header = reader.read_header()?;
+        let mut writer = bcf::io::Writer::new(fs::File::create(&bcf_path)?);
+        writer.write_header(&header)?;
+        let mut record = vcf::variant::RecordBuf::default();
+        while reader.read_record_buf(&header, &mut record)? != 0 {
+            writer.write_variant_record(&header, &record)?;
+        }
+        writer.try_finish()?;
+    }
+
+    for (input, format) in [(&vcf, InputFormat::Vcf), (&bcf_path, InputFormat::Bcf)] {
+        let output = temp.child("out.vcf").path().to_path_buf();
+        let mut config = base_config(input.clone(), reference.clone(), output);
+        config.input_format = format;
+        config.input_build = Some("GRCh38".into());
+        let error = convert_dtc_file(config)
+            .expect_err("a two-sample input must be refused")
+            .to_string();
+        assert!(
+            error.contains("has 2 samples"),
+            "{}: {error}",
+            input.display()
+        );
+    }
+
+    Ok(())
+}
+
 /// `smart_reader::open_input` inflates a BCF's BGZF layer, so the BCF reader over
 /// it must not inflate again. A bgzipped BCF (as bcftools and plink2 write it) and
 /// an uncompressed one must convert, detect a build and infer sex exactly as the
