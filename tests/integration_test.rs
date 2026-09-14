@@ -196,6 +196,64 @@ fn converts_to_vcf_and_bcf() -> Result<()> {
     Ok(())
 }
 
+/// `smart_reader::open_input` inflates a BCF's BGZF layer, so the BCF reader over
+/// it must not inflate again. A bgzipped BCF (as bcftools and plink2 write it) and
+/// an uncompressed one must convert, detect a build and infer sex exactly as the
+/// same genotypes given as a VCF do.
+#[test]
+fn bcf_input_reads_like_the_same_vcf_bgzipped_or_uncompressed() -> Result<()> {
+    let temp = TempDir::new()?;
+    let reference = write_reference(&temp)?;
+    let dtc = write_dtc(&temp, "rs1\t1\t2\tCC\nrs2\t1\t3\tAG\nrs3\t2\t4\tTT\n")?;
+
+    let vcf = temp.child("in.vcf").path().to_path_buf();
+    convert_dtc_file(base_config(dtc.clone(), reference.clone(), vcf.clone()))?;
+    let bgzipped = temp.child("in.bcf").path().to_path_buf();
+    let mut config = base_config(dtc, reference.clone(), bgzipped.clone());
+    config.output_format = OutputFormat::Bcf;
+    convert_dtc_file(config)?;
+    assert_eq!(fs::read(&bgzipped)?[..2], [0x1f, 0x8b]);
+    let uncompressed = temp.child("in.u.bcf").path().to_path_buf();
+    std::io::copy(
+        &mut flate2::read::MultiGzDecoder::new(fs::File::open(&bgzipped)?),
+        &mut fs::File::create(&uncompressed)?,
+    )?;
+    assert_eq!(fs::read(&uncompressed)?[..3], *b"BCF");
+
+    let convert = |input: &PathBuf, format: InputFormat, name: &str| -> Result<Vec<String>> {
+        let output = temp.child(name).path().to_path_buf();
+        let mut config = base_config(input.clone(), reference.clone(), output.clone());
+        config.input_format = format;
+        config.input_build = Some("GRCh38".into());
+        convert_dtc_file(config)?;
+        Ok(fs::read_to_string(output)?
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(str::to_string)
+            .collect())
+    };
+    let detect = |input: &PathBuf, format: InputFormat| -> Result<String> {
+        Ok(format!(
+            "{:?} {:?}",
+            convert_genome::inference::detect_build_from_variant_file(input, format)?,
+            convert_genome::inference::infer_sex_detail_from_variant_file(input, format, "GRCh38")?
+        ))
+    };
+
+    let from_vcf = convert(&vcf, InputFormat::Vcf, "from_vcf.vcf")?;
+    assert!(!from_vcf.is_empty());
+    let vcf_inference = detect(&vcf, InputFormat::Vcf)?;
+    for (bcf, name) in [
+        (&bgzipped, "from_bcf.vcf"),
+        (&uncompressed, "from_u_bcf.vcf"),
+    ] {
+        assert_eq!(convert(bcf, InputFormat::Bcf, name)?, from_vcf);
+        assert_eq!(detect(bcf, InputFormat::Bcf)?, vcf_inference);
+    }
+
+    Ok(())
+}
+
 #[test]
 fn malformed_variant_id_is_skipped_not_crash() -> Result<()> {
     // Regression test for the "failed to spill sorted records / invalid ID"

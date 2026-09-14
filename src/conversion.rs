@@ -769,7 +769,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         crate::input::InputFormat::Bcf => {
             let reader = crate::smart_reader::open_input(&config.input)
                 .with_context(|| format!("failed to open input {}", config.input.display()))?;
-            let mut bcf_reader = bcf::io::Reader::new(reader);
+            let mut bcf_reader = bcf::io::Reader::from(reader);
             Some(
                 bcf_reader
                     .read_header()
@@ -808,7 +808,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         crate::input::InputFormat::Bcf => {
             let reader = crate::smart_reader::open_input(&config.input)
                 .with_context(|| format!("failed to open input {}", config.input.display()))?;
-            let bcf_reader = bcf::io::Reader::new(reader);
+            let bcf_reader = bcf::io::Reader::from(reader);
             let source = if let Some(ref ref_genome) = reference {
                 crate::input::BcfSource::new(bcf_reader, ref_genome)
                     .with_context(|| "failed to initialize BCF source")?
@@ -851,7 +851,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                         crate::smart_reader::open_input(&config.input).with_context(|| {
                             format!("failed to open input {}", config.input.display())
                         })?;
-                    let bcf_reader = bcf::io::Reader::new(reader);
+                    let bcf_reader = bcf::io::Reader::from(reader);
                     let source = if let Some(ref ref_genome) = reference {
                         crate::input::BcfSource::new(bcf_reader, ref_genome)
                             .with_context(|| "failed to initialize BCF source")?

@@ -8,6 +8,9 @@ use std::path::Path;
 ///
 /// Supports nested compression (e.g. .vcf.gz.zip).
 /// For ZIP files, it reads the first entry.
+///
+/// The stream is already inflated, so a BCF reader over it must be built with
+/// `bcf::io::Reader::from`: `bcf::io::Reader::new` would BGZF-decode it again.
 pub fn open_input(path: &Path) -> anyhow::Result<Box<dyn BufRead + Send>> {
     let file = File::open(path)?;
     let mut reader: Box<dyn BufRead + Send> = Box::new(BufReader::new(file));

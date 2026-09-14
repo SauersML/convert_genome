@@ -269,7 +269,7 @@ pub fn detect_build_from_vcf(vcf_path: &Path) -> Result<Option<BuildDetectionRes
 pub fn detect_build_from_bcf(bcf_path: &Path) -> Result<Option<BuildDetectionResult>> {
     let reader = smart_reader::open_input(bcf_path)
         .with_context(|| format!("failed to open input {}", bcf_path.display()))?;
-    let mut bcf_reader = bcf::io::Reader::new(reader);
+    let mut bcf_reader = bcf::io::Reader::from(reader);
     let header = bcf_reader.read_header()?;
 
     let mut variants = Vec::with_capacity(1000);
@@ -407,7 +407,7 @@ pub fn infer_sex_detail_from_variant_file(
         InputFormat::Bcf => {
             let reader = smart_reader::open_input(path)
                 .with_context(|| format!("failed to open input {}", path.display()))?;
-            let mut bcf_reader = bcf::io::Reader::new(reader);
+            let mut bcf_reader = bcf::io::Reader::from(reader);
             let header = bcf_reader.read_header()?;
             for result in bcf_reader.record_bufs(&header) {
                 match result {
