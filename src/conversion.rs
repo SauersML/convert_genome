@@ -2000,6 +2000,10 @@ fn build_header(
                 header.filters_mut().insert(id.clone(), filter.clone());
             }
         }
+
+        // The copied entries keep the input's IDX numbering, which a BCF writer would mix with
+        // the unnumbered entries above; number every entry in written order instead.
+        crate::vcf_utils::clear_dictionary_indices(&mut header);
     }
 
     insert_other_record(
@@ -2220,6 +2224,56 @@ mod tests {
         assert!(!header.contigs().is_empty());
         assert!(header.other_records().contains_key("source"));
         assert!(header.other_records().contains_key("reference"));
+    }
+
+    #[test]
+    fn build_header_encodes_input_entries_the_way_its_text_decodes() {
+        // bcftools numbers INFO/AC and INFO/AN after FORMAT/GT.
+        let input_header: vcf::Header = "\
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description=\"All filters passed\",IDX=0>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\",IDX=1>
+##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Allele count in genotypes\",IDX=2>
+##INFO=<ID=AN,Number=1,Type=Integer,Description=\"Total number of alleles in called genotypes\",IDX=3>
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+"
+        .parse()
+        .unwrap();
+        let config = ConversionConfig {
+            input: PathBuf::from("input.bcf"),
+            input_format: crate::input::InputFormat::Bcf,
+            input_origin: String::from("input.bcf"),
+            reference_fasta: None,
+            reference_origin: None,
+            reference_fai: None,
+            reference_fai_origin: None,
+            output: PathBuf::from("out.bcf"),
+            output_dir: None,
+            output_format: OutputFormat::Bcf,
+            sample_id: String::from("S1"),
+            assembly: String::from("GRCh38"),
+            include_reference_sites: true,
+            sex: Some(Sex::Female),
+            par_boundaries: None,
+            standardize: false,
+            panel: None,
+            input_build: None,
+            min_emitted_variants: 0,
+            min_build_confidence: 0.0,
+            max_parse_error_ratio: 1.0,
+        };
+
+        let header = build_header(&config, None, Some(&input_header)).unwrap();
+
+        // A BCF writer encodes with the dictionary built from the header; a reader decodes with
+        // the dictionary the written header text yields.
+        let mut writer = vcf::io::Writer::new(Vec::new());
+        writer.write_header(&header).unwrap();
+        let written = String::from_utf8(writer.into_inner()).unwrap();
+        assert_eq!(
+            vcf::header::StringMaps::try_from(&header).unwrap(),
+            written.parse::<vcf::header::StringMaps>().unwrap()
+        );
     }
 
     #[test]

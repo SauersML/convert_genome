@@ -1,7 +1,31 @@
+use noodles::vcf;
 use noodles::vcf::variant::record::samples::keys::key as format_key;
 use noodles::vcf::variant::record_buf::{Samples, samples::sample::Value};
 use std::collections::HashMap;
 use tracing;
+
+/// Clear the IDX of every contig, INFO, FILTER and FORMAT entry in `header`.
+///
+/// A noodles BCF writer numbers its dictionaries from each entry's IDX, but writes the header
+/// text without IDX, so a reader numbers the same entries in line order instead. The two
+/// disagree whenever the IDX order is not the written order: bcftools numbers INFO/AC and
+/// INFO/AN after FORMAT/GT, and noodles writes every INFO line before the FORMAT lines. Records
+/// then read back under the wrong keys ("missing info map entry"). Without IDX the writer numbers
+/// entries in the order it writes them, which is the order every reader rebuilds.
+pub fn clear_dictionary_indices(header: &mut vcf::Header) {
+    for contig in header.contigs_mut().values_mut() {
+        *contig.idx_mut() = None;
+    }
+    for info in header.infos_mut().values_mut() {
+        *info.idx_mut() = None;
+    }
+    for filter in header.filters_mut().values_mut() {
+        *filter.idx_mut() = None;
+    }
+    for format in header.formats_mut().values_mut() {
+        *format.idx_mut() = None;
+    }
+}
 
 /// Remap genotype indices in all samples based on mapping.
 ///

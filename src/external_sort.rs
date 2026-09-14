@@ -191,16 +191,30 @@ pub struct RecordExternalSorter {
     header: vcf::Header,
     format: SortFormat,
     order: RecordOrder,
+    chunk_size: usize,
     buffer: Vec<vcf::variant::record_buf::RecordBuf>,
     spills: Vec<NamedTempFile>,
 }
 
 impl RecordExternalSorter {
     pub fn new(header: vcf::Header, format: SortFormat, order: RecordOrder) -> Self {
+        Self::with_chunk_size(header, format, order, RECORDBUF_CHUNK_SIZE)
+    }
+
+    fn with_chunk_size(
+        mut header: vcf::Header,
+        format: SortFormat,
+        order: RecordOrder,
+        chunk_size: usize,
+    ) -> Self {
+        // Spills are read back through the header text they were written with, which carries
+        // no IDX; an input's IDX numbering would encode them under different keys.
+        crate::vcf_utils::clear_dictionary_indices(&mut header);
         Self {
             header,
             format,
             order,
+            chunk_size,
             buffer: Vec::new(),
             spills: Vec::new(),
         }
@@ -208,7 +222,7 @@ impl RecordExternalSorter {
 
     pub fn push(&mut self, record: vcf::variant::record_buf::RecordBuf) -> io::Result<()> {
         self.buffer.push(record);
-        if self.buffer.len() >= RECORDBUF_CHUNK_SIZE {
+        if self.buffer.len() >= self.chunk_size {
             self.spill()?;
         }
         Ok(())
@@ -577,6 +591,61 @@ fn read_next_dtc(reader: &mut BufReader<File>) -> Option<DtcRecord> {
                 tracing::warn!("failed to read spill line: {}", e);
                 return None;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The header `bcftools view -s` writes: it numbers INFO/AC and INFO/AN after FORMAT/GT,
+    /// while noodles writes every INFO line before the FORMAT lines.
+    const BCFTOOLS_SUBSET_VCF: &str = "\
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description=\"All filters passed\",IDX=0>
+##INFO=<ID=PR,Number=0,Type=Flag,Description=\"Provisional reference allele\",IDX=1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\",IDX=2>
+##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Allele count in genotypes\",IDX=3>
+##INFO=<ID=AN,Number=1,Type=Integer,Description=\"Total number of alleles in called genotypes\",IDX=4>
+##contig=<ID=1,length=1000,IDX=0>
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1
+1\t300\t.\tG\tA\t.\t.\tPR;AC=1;AN=2\tGT\t0/1
+1\t100\t.\tC\tT\t.\tPASS\tAC=2;AN=2\tGT\t1/1
+1\t200\t.\tA\tG\t.\t.\tAC=0;AN=2\tGT\t0/0
+";
+
+    fn sort_bcftools_subset(chunk_size: usize) -> Vec<vcf::variant::record_buf::RecordBuf> {
+        let mut reader = vcf::io::Reader::new(BCFTOOLS_SUBSET_VCF.as_bytes());
+        let header = reader.read_header().unwrap();
+        let mut sorter = RecordExternalSorter::with_chunk_size(
+            header.clone(),
+            SortFormat::Bcf,
+            RecordOrder::Natural,
+            chunk_size,
+        );
+        for record in reader.record_bufs(&header) {
+            sorter.push(record.unwrap()).unwrap();
+        }
+        sorter.finish().unwrap().collect::<io::Result<_>>().unwrap()
+    }
+
+    #[test]
+    fn bcf_spills_read_back_the_fields_of_a_bcftools_subset() {
+        let in_memory = sort_bcftools_subset(RECORDBUF_CHUNK_SIZE);
+        // Two records per chunk: three records make two BCF spills and a merge.
+        let spilled = sort_bcftools_subset(2);
+
+        let starts: Vec<_> = spilled
+            .iter()
+            .map(|record| record.variant_start().map(usize::from))
+            .collect();
+        assert_eq!(starts, [Some(100), Some(200), Some(300)]);
+        assert_eq!(spilled.len(), in_memory.len());
+        for (spilled, in_memory) in spilled.iter().zip(&in_memory) {
+            assert_eq!(spilled.variant_start(), in_memory.variant_start());
+            assert_eq!(spilled.info(), in_memory.info());
+            assert_eq!(spilled.samples(), in_memory.samples());
         }
     }
 }
