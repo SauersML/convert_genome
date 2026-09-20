@@ -12,8 +12,9 @@ use std::path::PathBuf;
 
 use assert_fs::{TempDir, prelude::*};
 use convert_genome::{
-    ConversionConfig, OutputFormat, convert_dtc_file,
+    ConversionConfig, OutputFormat,
     conversion::{DEFAULT_MAX_PARSE_ERROR_RATIO, DEFAULT_MIN_EMITTED_VARIANTS},
+    convert_dtc_file,
     input::InputFormat,
 };
 
@@ -22,7 +23,9 @@ use convert_genome::{
 fn write_reference(dir: &TempDir) -> PathBuf {
     let fasta = dir.child("ref.fa");
     // 32 bases on chr1 so positions 1..=32 resolve.
-    fasta.write_str(">1\nACGTACGTACGTACGTACGTACGTACGTACGT\n").unwrap();
+    fasta
+        .write_str(">1\nACGTACGTACGTACGTACGTACGTACGTACGT\n")
+        .unwrap();
     fasta.path().to_path_buf()
 }
 

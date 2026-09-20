@@ -34,7 +34,9 @@ fn parse_output_format(s: &str) -> PyResult<OutputFormat> {
         "vcf" => Ok(OutputFormat::Vcf),
         "bcf" => Ok(OutputFormat::Bcf),
         "plink" => Ok(OutputFormat::Plink),
-        other => Err(PyValueError::new_err(format!("unknown output format: {other}"))),
+        other => Err(PyValueError::new_err(format!(
+            "unknown output format: {other}"
+        ))),
     }
 }
 
@@ -45,7 +47,9 @@ fn resolve_input_format(path: &std::path::Path, hint: Option<&str>) -> PyResult<
         Some("vcf") => InputFormat::Vcf,
         Some("bcf") => InputFormat::Bcf,
         Some(other) => {
-            return Err(PyValueError::new_err(format!("unknown input format: {other}")));
+            return Err(PyValueError::new_err(format!(
+                "unknown input format: {other}"
+            )));
         }
     };
     Ok(fmt)
@@ -94,7 +98,9 @@ fn convert(
         reference_fasta: reference.clone(),
         reference_origin: reference.as_ref().map(|p| p.to_string_lossy().to_string()),
         reference_fai: reference_fai.clone(),
-        reference_fai_origin: reference_fai.as_ref().map(|p| p.to_string_lossy().to_string()),
+        reference_fai_origin: reference_fai
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
         output,
         output_dir: None,
         output_format: out_fmt,
@@ -114,9 +120,7 @@ fn convert(
     };
 
     // Heavy work: release the GIL so other Python threads can run.
-    let summary = py
-        .detach(|| convert_dtc_file(config))
-        .map_err(to_py_err)?;
+    let summary = py.detach(|| convert_dtc_file(config)).map_err(to_py_err)?;
 
     let d = PyDict::new(py);
     d.set_item("total_records", summary.total_records)?;

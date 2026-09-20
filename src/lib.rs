@@ -8,6 +8,7 @@ pub mod inference;
 pub mod input;
 pub mod liftover;
 pub mod panel;
+pub mod panel_apply;
 pub mod panel_writer;
 pub mod plink;
 pub mod reference;

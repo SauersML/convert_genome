@@ -288,11 +288,8 @@ mod tests {
     #[test]
     fn test_site_to_record() {
         let site = PanelSite {
-            chrom: "1".to_string(),
-            pos: 1000,
             id: Some("rs123".to_string()),
-            ref_allele: "A".to_string(),
-            alt_alleles: vec!["G".to_string()],
+            ..PanelSite::new("1", 1000, "A", &["G"])
         };
 
         let record = site_to_record(&site).unwrap();

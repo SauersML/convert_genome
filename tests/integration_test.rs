@@ -90,14 +90,6 @@ fn write_panel_vcf(dir: &TempDir) -> Result<PathBuf> {
     Ok(vcf_path.path().to_path_buf())
 }
 
-fn write_panel_vcf_single_alt(dir: &TempDir) -> Result<PathBuf> {
-    let vcf_path = dir.child("panel_single_alt.vcf");
-    vcf_path.write_str(
-        "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tP1\tP2\tP3\tP4\tP5\n1\t1500\t.\tT\tA\t.\t.\t.\tGT\t0/0\t0/0\t0/0\t0/0\t0/0\n",
-    )?;
-    Ok(vcf_path.path().to_path_buf())
-}
-
 fn write_reference_2000(dir: &TempDir) -> Result<PathBuf> {
     let fasta = dir.child("ref.fa");
     let seq: String = std::iter::repeat('T').take(2000).collect();
@@ -315,10 +307,7 @@ fn malformed_variant_id_is_skipped_not_crash() -> Result<()> {
     let temp = TempDir::new()?;
     let reference = write_reference(&temp)?;
     // rs2 carries an ID with a ';' -> must be skipped; rs1 and rs3 are good.
-    let input = write_dtc(
-        &temp,
-        "rs1\t1\t2\tCC\nrs2;bad\t1\t3\tAG\nrs3\t2\t4\tTT\n",
-    )?;
+    let input = write_dtc(&temp, "rs1\t1\t2\tCC\nrs2;bad\t1\t3\tAG\nrs3\t2\t4\tTT\n")?;
 
     let vcf_path = temp.child("malformed_id.vcf");
     let config = base_config(input, reference, vcf_path.path().to_path_buf());
@@ -580,60 +569,219 @@ fn preserves_private_multiallelic_site_with_panel() -> Result<()> {
 }
 
 #[test]
-fn preserves_one_panel_alt_and_one_private_alt_with_panel() -> Result<()> {
+fn a_call_that_fits_no_panel_allele_is_left_missing() -> Result<()> {
+    // Panel T>A (an A/T site); the array called A/G there. G is not a panel
+    // allele on either strand, so the call is emitted as missing for
+    // imputation to fill, never kept as a private tri-allelic genotype that
+    // the panel cannot represent.
     let temp = TempDir::new()?;
-    let reference = write_reference_2000(&temp)?;
-    let panel = write_panel_vcf_single_alt(&temp)?;
-
-    let mut dtc = String::new();
-    for pos in 1..=2000u64 {
-        if pos == 1500 {
-            dtc.push_str(&format!("rs{pos}\t1\t{pos}\tAG\n"));
-        } else {
-            dtc.push_str(&format!("rs{pos}\t1\t{pos}\tTT\n"));
-        }
-    }
-    let input = write_dtc(&temp, &dtc)?;
-
-    let vcf_path = temp.child("out_one_private.vcf");
-    let mut config = base_config(input, reference, vcf_path.path().to_path_buf());
+    let panel = write_panel(&temp, "1\t1500\t.\tT\tA\t.\tPASS\tAC=20;AN=100\tGT\t0/0\n")?;
+    let input = write_sample_vcf(&temp, "", "1\t1500\t.\tT\tA,G\t.\tPASS\t.\tGT\t1/2\n")?;
+    let reference = write_reference_with_base(&temp, 'T', 2000)?;
+    let out = temp.child("out_one_private.vcf");
+    let mut config = base_config(input, reference, out.path().to_path_buf());
+    config.input_format = InputFormat::Vcf;
+    config.input_build = Some("GRCh38".into());
     config.standardize = true;
     config.panel = Some(panel);
     convert_dtc_file(config)?;
 
-    let mut reader = vcf::io::reader::Builder::default().build_from_path(vcf_path.path())?;
+    let records = read_records(out.path())?;
+    let at = records_at(&records, 1500);
+    assert_eq!(at.len(), 1);
+    assert!(at[0].2.is_empty(), "GT is missing: {:?}", at[0]);
+    Ok(())
+}
+
+fn read_records(path: &std::path::Path) -> Result<Vec<(vcf::variant::RecordBuf, vcf::Header)>> {
+    let mut reader = vcf::io::reader::Builder::default().build_from_path(path)?;
     let header = reader.read_header()?;
-
-    let mut found = false;
+    let mut out = Vec::new();
     for result in reader.record_bufs(&header) {
-        let record = result?;
-        let chrom = record.reference_sequence_name().to_string();
-        let pos_raw = record.variant_start().expect("missing pos");
-        let pos = usize::from(pos_raw) as u64;
-        if chrom == "1" && pos == 1500 {
-            found = true;
+        out.push((result?, header.clone()));
+    }
+    Ok(out)
+}
 
-            assert_eq!(record.reference_bases().to_string().to_uppercase(), "T");
-
-            let alts: Vec<String> = record
+fn records_at(
+    records: &[(vcf::variant::RecordBuf, vcf::Header)],
+    pos: usize,
+) -> Vec<(String, Vec<String>, Vec<String>)> {
+    records
+        .iter()
+        .filter(|(r, _)| usize::from(r.variant_start().unwrap()) == pos)
+        .map(|(r, h)| {
+            let alts = r
                 .alternate_bases()
                 .as_ref()
                 .iter()
-                .map(|s| s.to_string().to_uppercase())
+                .map(|a| a.to_uppercase())
                 .collect();
-            assert_eq!(alts.len(), 2);
-            assert!(alts.contains(&"A".to_string()));
-            assert!(alts.contains(&"G".to_string()));
+            let mut gt = gt_alleles_for_record(r, h);
+            gt.sort();
+            (r.reference_bases().to_uppercase(), alts, gt)
+        })
+        .collect()
+}
 
-            let mut gt_alleles = gt_alleles_for_record(&record, &header);
-            gt_alleles.sort();
-            assert_eq!(gt_alleles, vec!["A".to_string(), "G".to_string()]);
+const PANEL_HEADER: &str = "##fileformat=VCFv4.2\n\
+##contig=<ID=1,length=2000>\n\
+##INFO=<ID=AC,Number=A,Type=Integer,Description=\"ALT count\">\n\
+##INFO=<ID=AN,Number=1,Type=Integer,Description=\"Allele number\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tP1\n";
 
-            break;
-        }
-    }
+fn write_panel(dir: &TempDir, body: &str) -> Result<PathBuf> {
+    let path = dir.child("panel_sites.vcf");
+    path.write_str(&format!("{PANEL_HEADER}{body}"))?;
+    Ok(path.path().to_path_buf())
+}
 
-    assert!(found, "did not find chr1:1500 in output VCF");
+fn write_sample_vcf(dir: &TempDir, meta: &str, body: &str) -> Result<PathBuf> {
+    let path = dir.child("sample.vcf");
+    path.write_str(&format!(
+        "##fileformat=VCFv4.2\n##contig=<ID=1,length=2000>\n{meta}\
+##INFO=<ID=END,Number=1,Type=Integer,Description=\"End\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS\n{body}"
+    ))?;
+    Ok(path.path().to_path_buf())
+}
+
+fn convert_vcf_against_panel(
+    temp: &TempDir,
+    input: PathBuf,
+    panel: PathBuf,
+) -> Result<Vec<(vcf::variant::RecordBuf, vcf::Header)>> {
+    let reference = write_reference_with_base(temp, 'A', 2000)?;
+    let out = temp.child("out_panel.vcf");
+    let mut config = base_config(input, reference, out.path().to_path_buf());
+    config.input_format = InputFormat::Vcf;
+    // Declared, as the pipeline's panel pass declares it: detection would
+    // download both assemblies.
+    config.input_build = Some("GRCh38".into());
+    config.standardize = true;
+    config.panel = Some(panel);
+    convert_dtc_file(config)?;
+    read_records(out.path())
+}
+
+#[test]
+fn a_true_a_c_het_at_a_split_a_c_a_g_panel_site_stays_a_c() -> Result<()> {
+    // The panel splits the tri-allelic site into A>C and A>G records. The
+    // index used to keep only the last one (A>G) and "rescue" the sample's C
+    // onto G by complementing it, turning a true A/C het into A/G.
+    let temp = TempDir::new()?;
+    let panel = write_panel(
+        &temp,
+        "1\t1500\t.\tA\tC\t.\tPASS\tAC=30;AN=100\tGT\t0/1\n\
+1\t1500\t.\tA\tG\t.\tPASS\tAC=5;AN=100\tGT\t0/0\n",
+    )?;
+    let input = write_sample_vcf(&temp, "", "1\t1500\t.\tA\tC\t.\tPASS\t.\tGT\t0/1\n")?;
+    let records = convert_vcf_against_panel(&temp, input, panel)?;
+    let at = records_at(&records, 1500);
+    assert_eq!(at.len(), 1, "one record, matched to the A>C panel record");
+    assert_eq!(at[0].1, vec!["C".to_string()]);
+    assert_eq!(at[0].2, vec!["A".to_string(), "C".to_string()]);
+    Ok(())
+}
+
+#[test]
+fn an_a_c_het_is_never_rescued_onto_the_only_panel_alt_g() -> Result<()> {
+    let temp = TempDir::new()?;
+    let panel = write_panel(&temp, "1\t1500\t.\tA\tG\t.\tPASS\tAC=5;AN=100\tGT\t0/0\n")?;
+    let input = write_sample_vcf(&temp, "", "1\t1500\t.\tA\tC\t.\tPASS\t.\tGT\t0/1\n")?;
+    let records = convert_vcf_against_panel(&temp, input, panel)?;
+    let at = records_at(&records, 1500);
+    assert_eq!(at.len(), 1);
+    assert!(at[0].2.is_empty(), "missing, not A/G: {:?}", at[0]);
+    Ok(())
+}
+
+#[test]
+fn the_input_header_strand_prior_drives_flips_and_palindromes() -> Result<()> {
+    let panel_body = "1\t100\t.\tA\tG\t.\tPASS\tAC=20;AN=100\tGT\t0/0\n\
+1\t200\t.\tA\tT\t.\tPASS\tAC=5;AN=100\tGT\t0/0\n";
+    // A reverse-strand hom-alt at the A>G site reads C/C; a rare A/T
+    // homozygote reads T/T.
+    let body = "1\t100\t.\tA\tC\t.\tPASS\t.\tGT\t1/1\n\
+1\t200\t.\tA\tT\t.\tPASS\t.\tGT\t1/1\n";
+
+    // Reference-oriented input (no prior): the C/C is left missing, the A/T
+    // homozygote is kept as called.
+    let temp = TempDir::new()?;
+    let panel = write_panel(&temp, panel_body)?;
+    let input = write_sample_vcf(&temp, "", body)?;
+    let records = convert_vcf_against_panel(&temp, input, panel)?;
+    assert!(records_at(&records, 100)[0].2.is_empty());
+    assert_eq!(
+        records_at(&records, 200)[0].2,
+        vec!["T".to_string(), "T".to_string()]
+    );
+
+    // Strand-uncertain input (8% of sites reversed): C/C is resolved to G/G,
+    // and the rare T/T is as likely a flipped A/A, so it is dropped.
+    let temp = TempDir::new()?;
+    let panel = write_panel(&temp, panel_body)?;
+    let input = write_sample_vcf(&temp, "##pgsStrandFlipPrior=0.08\n", body)?;
+    let records = convert_vcf_against_panel(&temp, input, panel)?;
+    let at100 = records_at(&records, 100);
+    assert_eq!(at100[0].1, vec!["G".to_string()]);
+    assert_eq!(at100[0].2, vec!["G".to_string(), "G".to_string()]);
+    assert!(records_at(&records, 200)[0].2.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_complete_call_set_gets_every_absent_panel_site_as_hom_ref() -> Result<()> {
+    let temp = TempDir::new()?;
+    let panel = write_panel(
+        &temp,
+        "1\t100\t.\tA\tG\t.\tPASS\tAC=20;AN=100\tGT\t0/0\n\
+1\t100\t.\tA\tC\t.\tPASS\tAC=2;AN=100\tGT\t0/0\n\
+1\t200\t.\tA\tC\t.\tPASS\tAC=20;AN=100\tGT\t0/0\n\
+1\t300\t.\tA\tT\t.\tPASS\tAC=20;AN=100\tGT\t0/0\n\
+1\t500\t.\tA\tG\t.\tPASS\tAC=20;AN=100\tGT\t0/0\n\
+1\t501\t.\tA\tG\t.\tPASS\tAC=20;AN=100\tGT\t0/0\n\
+1\t600\t.\tA\tG\t.\tPASS\tAC=20;AN=100\tGT\t0/0\n",
+    )?;
+    let input = write_sample_vcf(
+        &temp,
+        "##pgsAbsentGenotypes=HomRef\n",
+        // A het at a split site, a no-call block over 250-350, a deletion
+        // anchored at 500 that removes 501-502, and a no-call at 600.
+        "1\t100\t.\tA\tG\t.\tPASS\t.\tGT\t0/1\n\
+1\t250\t.\tA\t<*>\t.\tPASS\tEND=350\tGT\t./.\n\
+1\t500\t.\tAAA\tA\t.\tPASS\t.\tGT\t0/1\n\
+1\t600\t.\tA\tG\t.\tPASS\t.\tGT\t./.\n",
+    )?;
+    let records = convert_vcf_against_panel(&temp, input, panel)?;
+    let one = |pos: usize, alt: &str| -> Vec<String> {
+        records_at(&records, pos)
+            .into_iter()
+            .find(|(_, alts, _)| alts.len() == 1 && alts[0] == alt)
+            .unwrap_or_else(|| panic!("no {pos} A>{alt} record"))
+            .2
+    };
+    let aa = vec!["A".to_string(), "A".to_string()];
+    // The called het, and the other split record at the same position as 0/0.
+    assert_eq!(one(100, "G"), vec!["A".to_string(), "G".to_string()]);
+    assert_eq!(one(100, "C"), aa);
+    // Absent and outside every block: homozygous reference.
+    assert_eq!(one(200, "C"), aa);
+    // Inside the no-call block: missing.
+    assert!(one(300, "T").is_empty());
+    // The deletion's anchor base is intact; the base it deletes is not known.
+    assert_eq!(one(500, "G"), aa);
+    assert!(one(501, "G").is_empty());
+    // The input's own no-call stays missing.
+    assert!(one(600, "G").is_empty());
+    // The block record itself is not emitted.
+    assert!(
+        records
+            .iter()
+            .all(|(r, _)| !r.alternate_bases().as_ref().iter().any(|a| a == "<*>"))
+    );
     Ok(())
 }
 

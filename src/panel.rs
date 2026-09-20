@@ -20,9 +20,39 @@ pub struct PanelSite {
     pub id: Option<String>,
     pub ref_allele: String,
     pub alt_alleles: Vec<String>,
+    /// Panel ALT allele counts (INFO/AC, one per ALT), when the panel carries them.
+    pub alt_counts: Vec<Option<u32>>,
+    /// Panel allele number (INFO/AN), when the panel carries it.
+    pub allele_number: Option<u32>,
 }
 
 impl PanelSite {
+    /// A site with no allele-frequency information.
+    pub fn new(chrom: &str, pos: u64, ref_allele: &str, alt_alleles: &[&str]) -> Self {
+        Self {
+            chrom: chrom.to_string(),
+            pos,
+            id: None,
+            ref_allele: ref_allele.to_string(),
+            alt_alleles: alt_alleles.iter().map(|a| a.to_string()).collect(),
+            alt_counts: Vec::new(),
+            allele_number: None,
+        }
+    }
+
+    /// Frequency of ALT `alt_index` (0-based into `alt_alleles`) in the panel,
+    /// from INFO/AC and INFO/AN. `None` when the panel does not carry them.
+    pub fn alt_frequency(&self, alt_index: usize) -> Option<f64> {
+        let an = self.allele_number.filter(|&an| an > 0)?;
+        let ac = self.alt_counts.get(alt_index).copied().flatten()?;
+        Some(f64::from(ac) / f64::from(an))
+    }
+
+    /// True when every allele at the site is a single base (an SNV record).
+    pub fn is_snv(&self) -> bool {
+        self.ref_allele.len() == 1 && self.alt_alleles.iter().all(|a| a.len() == 1)
+    }
+
     /// Find the index of an allele (0 = REF, 1+ = ALT).
     /// Returns None if allele is not present.
     pub fn allele_index(&self, allele: &str) -> Option<usize> {
@@ -43,12 +73,22 @@ impl PanelSite {
     }
 }
 
-/// Index of panel sites for fast lookup by position.
+/// Index of panel records for lookup by position.
+///
+/// A position can hold several records: panels built with `bcftools norm -m-`
+/// split a multi-allelic site into one biallelic record per ALT (A>C and A>G at
+/// the same POS), and an SNV and an indel can share a POS. Every record is kept,
+/// in file order. Keying on position alone and letting the last record win lost
+/// the other ALTs, and harmonization then "rescued" a true A/C call onto the kept
+/// A>G record.
 #[derive(Default)]
 pub struct PanelIndex {
-    sites: HashMap<(String, u64), PanelSite>,
+    sites: HashMap<(String, u64), Vec<PanelSite>>,
+    /// Sorted, de-duplicated record positions per chromosome (panel naming).
+    positions: HashMap<String, Vec<u64>>,
     /// Chromosome order from the panel header for sorting output
     chrom_order: Vec<String>,
+    record_count: usize,
 }
 
 impl PanelIndex {
@@ -76,7 +116,11 @@ impl PanelIndex {
         // Extract chromosome order from header contigs
         let chrom_order: Vec<String> = header.contigs().keys().map(|k| k.to_string()).collect();
 
-        let mut sites = HashMap::with_capacity(estimate_panel_capacity(path));
+        let mut index = Self {
+            sites: HashMap::with_capacity(estimate_panel_capacity(path)),
+            chrom_order,
+            ..Self::default()
+        };
         let mut record_count = 0u64;
 
         let mut record = vcf::Record::default();
@@ -100,24 +144,28 @@ impl PanelIndex {
                 .map(|a| a.map(|s| s.to_string()))
                 .collect::<std::io::Result<Vec<_>>>()?;
 
-            let site = PanelSite {
-                chrom: chrom.clone(),
+            let (alt_counts, allele_number) =
+                allele_counts(&record.info(), &header, alt_alleles.len());
+
+            index.insert(PanelSite {
+                chrom,
                 pos,
                 id: None,
                 ref_allele,
                 alt_alleles,
-            };
-
-            sites.insert((chrom, pos), site);
+                alt_counts,
+                allele_number,
+            });
 
             if record_count.is_multiple_of(1_000_000) {
                 tracing::info!("Loaded {} panel sites...", record_count);
             }
         }
 
-        tracing::info!("Loaded {} panel sites total", sites.len());
+        index.finish();
+        tracing::info!("Loaded {} panel sites total", index.len());
 
-        Ok(Self { sites, chrom_order })
+        Ok(index)
     }
 
     fn load_bcf<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -131,7 +179,11 @@ impl PanelIndex {
 
         let chrom_order: Vec<String> = header.contigs().keys().map(|k| k.to_string()).collect();
 
-        let mut sites = HashMap::with_capacity(estimate_panel_capacity(path.as_ref()));
+        let mut index = Self {
+            sites: HashMap::with_capacity(estimate_panel_capacity(path.as_ref())),
+            chrom_order,
+            ..Self::default()
+        };
         let mut record_count = 0u64;
 
         let string_maps = vcf::header::StringMaps::try_from(&header)?;
@@ -156,60 +208,186 @@ impl PanelIndex {
                 .map(|a| a.map(|s| s.to_string()))
                 .collect::<std::io::Result<Vec<_>>>()?;
 
-            let site = PanelSite {
-                chrom: chrom.clone(),
+            let (alt_counts, allele_number) =
+                allele_counts(&record.info(), &header, alt_alleles.len());
+
+            index.insert(PanelSite {
+                chrom,
                 pos,
                 id: None,
                 ref_allele,
                 alt_alleles,
-            };
-
-            sites.insert((chrom, pos), site);
+                alt_counts,
+                allele_number,
+            });
 
             if record_count.is_multiple_of(1_000_000) {
                 tracing::info!("Loaded {} panel sites...", record_count);
             }
         }
 
-        tracing::info!("Loaded {} panel sites total", sites.len());
+        index.finish();
+        tracing::info!("Loaded {} panel sites total", index.len());
 
-        Ok(Self { sites, chrom_order })
+        Ok(index)
     }
 
-    /// Look up a site by chromosome and position.
-    pub fn get(&self, chrom: &str, pos: u64) -> Option<&PanelSite> {
-        // Try exact match first
-        if let Some(site) = self.sites.get(&(chrom.to_string(), pos)) {
-            return Some(site);
+    /// Build an index from records (tests and library callers).
+    pub fn from_sites(sites: impl IntoIterator<Item = PanelSite>) -> Self {
+        let mut index = Self::default();
+        for site in sites {
+            if !index.chrom_order.contains(&site.chrom) {
+                index.chrom_order.push(site.chrom.clone());
+            }
+            index.insert(site);
         }
-        // Try with/without 'chr' prefix
-        let alt_chrom = if chrom.starts_with("chr") {
-            chrom.strip_prefix("chr").unwrap().to_string()
-        } else {
-            format!("chr{}", chrom)
-        };
-        self.sites.get(&(alt_chrom, pos))
+        index.finish();
+        index
+    }
+
+    fn insert(&mut self, site: PanelSite) {
+        self.record_count += 1;
+        self.positions
+            .entry(site.chrom.clone())
+            .or_default()
+            .push(site.pos);
+        self.sites
+            .entry((site.chrom.clone(), site.pos))
+            .or_default()
+            .push(site);
+    }
+
+    fn finish(&mut self) {
+        for positions in self.positions.values_mut() {
+            positions.sort_unstable();
+            positions.dedup();
+        }
+    }
+
+    /// The panel's own name for `chrom`, trying it with and without a `chr` prefix.
+    pub fn resolve_chrom(&self, chrom: &str) -> Option<&str> {
+        if let Some((name, _)) = self.positions.get_key_value(chrom) {
+            return Some(name.as_str());
+        }
+        let alt_chrom = alternate_chrom_name(chrom);
+        self.positions
+            .get_key_value(alt_chrom.as_str())
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// Every panel record at a position, in panel file order (empty if none).
+    pub fn get_all(&self, chrom: &str, pos: u64) -> &[PanelSite] {
+        if let Some(records) = self.sites.get(&(chrom.to_string(), pos)) {
+            return records;
+        }
+        self.sites
+            .get(&(alternate_chrom_name(chrom), pos))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The first panel record at a position, if any.
+    pub fn get(&self, chrom: &str, pos: u64) -> Option<&PanelSite> {
+        self.get_all(chrom, pos).first()
     }
 
     /// Check if a site exists at the given position.
     pub fn contains(&self, chrom: &str, pos: u64) -> bool {
-        self.get(chrom, pos).is_some()
+        !self.get_all(chrom, pos).is_empty()
     }
 
-    /// Get the number of sites in the index.
+    /// Sorted record positions on a chromosome (empty if the panel lacks it).
+    pub fn positions(&self, chrom: &str) -> &[u64] {
+        self.resolve_chrom(chrom)
+            .and_then(|name| self.positions.get(name))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Number of panel records in the index (split records count separately).
     pub fn len(&self) -> usize {
-        self.sites.len()
+        self.record_count
     }
 
     /// Check if the index is empty.
     pub fn is_empty(&self) -> bool {
-        self.sites.is_empty()
+        self.record_count == 0
     }
 
     /// Get chromosome order from the panel header.
     pub fn chrom_order(&self) -> &[String] {
         &self.chrom_order
     }
+}
+
+/// Per-site outcome counts of harmonizing an input against the panel: the
+/// Michigan-style match / strand-flip / mismatch / palindrome tally, plus what
+/// the absent-genotype fill wrote. Serialized as the report's `panel_qc` block.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct PanelQc {
+    /// Strand-flip prior the palindrome policy used (from the input header).
+    pub strand_flip_prior: f64,
+    /// True when absent panel sites were written as homozygous reference.
+    pub absent_genotypes_hom_ref: bool,
+    pub snv_match: usize,
+    pub snv_flip_resolved: usize,
+    pub snv_flip_unresolved: usize,
+    pub snv_allele_mismatch: usize,
+    pub snv_reference_mismatch: usize,
+    pub palindrome_het: usize,
+    pub palindrome_kept: usize,
+    pub palindrome_flipped: usize,
+    pub palindrome_ambiguous: usize,
+    pub palindrome_unresolved: usize,
+    pub multiallelic_match: usize,
+    pub multiallelic_mismatch: usize,
+    /// A heterozygote whose two ALTs live on different split panel records.
+    pub split_record_het: usize,
+    pub no_call: usize,
+    pub indel_exact: usize,
+    pub indel_unmatched: usize,
+    pub absent_from_panel: usize,
+    pub fill_hom_ref: usize,
+    pub fill_missing_no_call: usize,
+    pub fill_missing_overlap: usize,
+}
+
+impl PanelQc {
+    pub fn count(&mut self, class: crate::harmonize::SiteClass) {
+        use crate::harmonize::SiteClass as C;
+        let slot = match class {
+            C::Match => &mut self.snv_match,
+            C::FlipResolved => &mut self.snv_flip_resolved,
+            C::FlipUnresolved => &mut self.snv_flip_unresolved,
+            C::AlleleMismatch => &mut self.snv_allele_mismatch,
+            C::PalindromeHet => &mut self.palindrome_het,
+            C::PalindromeKept => &mut self.palindrome_kept,
+            C::PalindromeFlipped => &mut self.palindrome_flipped,
+            C::PalindromeAmbiguous => &mut self.palindrome_ambiguous,
+            C::PalindromeUnresolved => &mut self.palindrome_unresolved,
+            C::MultiAllelicMatch => &mut self.multiallelic_match,
+            C::MultiAllelicMismatch => &mut self.multiallelic_mismatch,
+        };
+        *slot += 1;
+    }
+}
+
+/// What the input said about one chromosome, for writing the panel sites it did
+/// not mention. Positions are 1-based; spans are inclusive.
+#[derive(Debug, Default)]
+pub struct ChromClaims {
+    /// Contig name the output uses for this chromosome (the input's, after
+    /// standardization), so filled records sort and index with the rest.
+    pub output_name: String,
+    /// Positions with an SNV call: the called alleles after harmonization, or
+    /// `None` when the call is missing or could not be placed on the panel.
+    pub snv_calls: HashMap<u64, Option<Vec<String>>>,
+    /// Panel records the input already wrote: (pos, REF, ALTs joined by ',').
+    pub emitted: std::collections::HashSet<(u64, String, String)>,
+    /// Bases altered by a called non-SNV variant (deleted or substituted).
+    pub altered_spans: Vec<(u64, u64)>,
+    /// No-call blocks (gVCF-style records with END and a missing genotype).
+    pub no_call_spans: Vec<(u64, u64)>,
 }
 
 /// Tracks modifications to the panel (novel alleles and sites).
@@ -220,6 +398,10 @@ pub struct PaddedPanel {
     added_alts: HashMap<(String, u64), Vec<String>>,
     /// Entirely novel sites not in original panel
     novel_sites: Vec<PanelSite>,
+    /// Harmonization outcome counts.
+    pub qc: PanelQc,
+    /// Per-chromosome claims, keyed by the panel's chromosome name.
+    pub claims: HashMap<String, ChromClaims>,
 }
 
 impl PaddedPanel {
@@ -229,7 +411,20 @@ impl PaddedPanel {
             original,
             added_alts: HashMap::new(),
             novel_sites: Vec::new(),
+            qc: PanelQc::default(),
+            claims: HashMap::new(),
         }
+    }
+
+    /// The claims for `chrom` (input naming), created on first use. `None` when
+    /// the panel does not carry the chromosome.
+    pub fn claims_for(&mut self, chrom: &str, output_name: &str) -> Option<&mut ChromClaims> {
+        let panel_chrom = self.original.resolve_chrom(chrom)?.to_string();
+        let claims = self.claims.entry(panel_chrom).or_default();
+        if claims.output_name.is_empty() {
+            claims.output_name = output_name.to_string();
+        }
+        Some(claims)
     }
 
     /// Get the original panel site, if any.
@@ -302,6 +497,8 @@ impl PaddedPanel {
                 id: None,
                 ref_allele: ref_base.to_string(),
                 alt_alleles,
+                alt_counts: Vec::new(),
+                allele_number: None,
             };
 
             tracing::debug!(
@@ -342,6 +539,11 @@ impl PaddedPanel {
         &self.original
     }
 
+    /// The original panel and the QC counters, borrowed together.
+    pub fn original_and_qc(&mut self) -> (&PanelIndex, &mut PanelQc) {
+        (&self.original, &mut self.qc)
+    }
+
     /// Get the added ALTs for a site.
     /// Performs chr-prefix normalization to handle mismatched naming conventions.
     pub fn added_alts(&self, chrom: &str, pos: u64) -> Option<&Vec<String>> {
@@ -350,18 +552,56 @@ impl PaddedPanel {
             return Some(v);
         }
         // Try with/without 'chr' prefix
-        let alt_chrom = if chrom.starts_with("chr") {
-            chrom.strip_prefix("chr").unwrap().to_string()
-        } else {
-            format!("chr{}", chrom)
-        };
-        self.added_alts.get(&(alt_chrom, pos))
+        self.added_alts.get(&(alternate_chrom_name(chrom), pos))
     }
 
     /// Iterate over all novel sites.
     pub fn novel_sites(&self) -> impl Iterator<Item = &PanelSite> {
         self.novel_sites.iter()
     }
+}
+
+/// `chr1` <-> `1`.
+fn alternate_chrom_name(chrom: &str) -> String {
+    match chrom.strip_prefix("chr") {
+        Some(bare) => bare.to_string(),
+        None => format!("chr{chrom}"),
+    }
+}
+
+/// Read INFO/AC (one per ALT) and INFO/AN from a panel record, when present.
+///
+/// Missing or malformed values yield `None` rather than an error: allele
+/// frequency only informs the palindromic-SNP policy, and a panel without it
+/// is still a valid panel.
+fn allele_counts(
+    info: &dyn noodles::vcf::variant::record::Info,
+    header: &vcf::Header,
+    n_alts: usize,
+) -> (Vec<Option<u32>>, Option<u32>) {
+    use noodles::vcf::variant::record::info::field::Value;
+    use noodles::vcf::variant::record::info::field::value::Array;
+
+    let to_u32 = |n: i32| u32::try_from(n).ok();
+    let allele_number = match info.get(header, "AN") {
+        Some(Ok(Some(Value::Integer(n)))) => to_u32(n),
+        _ => None,
+    };
+    let mut alt_counts = vec![None; n_alts];
+    match info.get(header, "AC") {
+        Some(Ok(Some(Value::Integer(n)))) => {
+            if let Some(slot) = alt_counts.first_mut() {
+                *slot = to_u32(n);
+            }
+        }
+        Some(Ok(Some(Value::Array(Array::Integer(values))))) => {
+            for (slot, value) in alt_counts.iter_mut().zip(values.iter()) {
+                *slot = value.ok().flatten().and_then(to_u32);
+            }
+        }
+        _ => {}
+    }
+    (alt_counts, allele_number)
 }
 
 fn estimate_panel_capacity(path: &Path) -> usize {
@@ -383,13 +623,7 @@ mod tests {
 
     #[test]
     fn panel_site_allele_index() {
-        let site = PanelSite {
-            chrom: "1".to_string(),
-            pos: 1000,
-            id: None,
-            ref_allele: "A".to_string(),
-            alt_alleles: vec!["G".to_string(), "T".to_string()],
-        };
+        let site = PanelSite::new("1", 1000, "A", &["G", "T"]);
 
         assert_eq!(site.allele_index("A"), Some(0));
         assert_eq!(site.allele_index("a"), Some(0)); // Case insensitive
@@ -400,16 +634,43 @@ mod tests {
 
     #[test]
     fn panel_site_has_allele() {
-        let site = PanelSite {
-            chrom: "1".to_string(),
-            pos: 1000,
-            id: None,
-            ref_allele: "A".to_string(),
-            alt_alleles: vec!["G".to_string()],
-        };
+        let site = PanelSite::new("1", 1000, "A", &["G"]);
 
         assert!(site.has_allele("A"));
         assert!(site.has_allele("G"));
         assert!(!site.has_allele("T"));
+    }
+
+    #[test]
+    fn split_multiallelic_records_are_all_kept() {
+        // bcftools norm -m- writes A>C and A>G as two records at one POS. Both
+        // must survive loading; the last one used to overwrite the first.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panel.vcf");
+        std::fs::write(
+            &path,
+            concat!(
+                "##fileformat=VCFv4.3\n",
+                "##contig=<ID=chr1,length=10000>\n",
+                "##INFO=<ID=AC,Number=A,Type=Integer,Description=\"ALT count\">\n",
+                "##INFO=<ID=AN,Number=1,Type=Integer,Description=\"Allele number\">\n",
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+                "chr1\t1500\t.\tA\tC\t.\tPASS\tAC=30;AN=100\n",
+                "chr1\t1500\t.\tA\tG\t.\tPASS\tAC=5;AN=100\n",
+                "chr1\t1600\t.\tT\tA\t.\tPASS\t.\n",
+            ),
+        )
+        .unwrap();
+
+        let index = PanelIndex::load(&path).unwrap();
+        assert_eq!(index.len(), 3);
+        let at_1500 = index.get_all("1", 1500);
+        assert_eq!(at_1500.len(), 2, "both split records are kept");
+        assert_eq!(at_1500[0].alt_alleles, vec!["C".to_string()]);
+        assert_eq!(at_1500[1].alt_alleles, vec!["G".to_string()]);
+        assert_eq!(at_1500[0].alt_frequency(0), Some(0.3));
+        assert_eq!(at_1500[1].alt_frequency(0), Some(0.05));
+        assert_eq!(index.get_all("chr1", 1600)[0].alt_frequency(0), None);
+        assert_eq!(index.positions("1"), &[1500, 1600]);
     }
 }

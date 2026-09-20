@@ -564,10 +564,7 @@ mod tests {
         // Colons and other punctuation that the VCF ID grammar allows are kept
         // (synthetic IDs use ':' as a separator).
         assert_eq!(
-            parse_record("1:100:A:G\t1\t100\tAA")
-                .unwrap()
-                .id
-                .as_deref(),
+            parse_record("1:100:A:G\t1\t100\tAA").unwrap().id.as_deref(),
             Some("1:100:A:G")
         );
     }

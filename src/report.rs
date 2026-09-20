@@ -41,6 +41,10 @@ pub struct RunReport {
 
     /// Conversion statistics
     pub statistics: Statistics,
+
+    /// Per-site outcome of harmonizing against the panel (panel runs only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub panel_qc: Option<crate::panel::PanelQc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,6 +179,7 @@ pub struct RunReportBuilder {
     pub sex_y_genome_density: Option<f64>,
     pub sex_x_autosome_het_ratio: Option<f64>,
     pub build_detection: Option<BuildDetection>,
+    pub panel_qc: Option<crate::panel::PanelQc>,
 }
 
 impl RunReportBuilder {
@@ -217,6 +222,7 @@ impl RunReportBuilder {
             },
             build_detection: self.build_detection,
             statistics: Statistics::from(summary),
+            panel_qc: self.panel_qc,
         }
     }
 }

@@ -791,6 +791,21 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         }
     }
 
+    let input_qc = input_header
+        .as_ref()
+        .map(crate::panel_apply::InputQcMeta::from_header)
+        .unwrap_or_default();
+    if let Some(panel) = padded_panel.as_ref() {
+        let mut panel = panel.lock();
+        panel.qc.strand_flip_prior = input_qc.strand_prior;
+        panel.qc.absent_genotypes_hom_ref = input_qc.absent_hom_ref;
+        tracing::info!(
+            strand_flip_prior = input_qc.strand_prior,
+            absent_genotypes_hom_ref = input_qc.absent_hom_ref,
+            "panel harmonization settings from the input header"
+        );
+    }
+
     let header = build_header(&config, reference.as_ref(), input_header.as_ref())?;
 
     // Instantiate Source Iterator
@@ -909,6 +924,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 config: &config,
                 panel: padded_panel.as_ref(),
                 needs_sort,
+                input_qc,
             };
             process_records(source, &mut writer, &mut summary, ctx)?;
         }
@@ -925,6 +941,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 config: &config,
                 panel: padded_panel.as_ref(),
                 needs_sort,
+                input_qc,
             };
             process_records(source, &mut writer, &mut summary, ctx)?;
         }
@@ -945,6 +962,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
                 config: &config,
                 panel: padded_panel.as_ref(),
                 needs_sort,
+                input_qc,
             };
             process_records(source, &mut writer, &mut summary, ctx)?;
         }
@@ -997,9 +1015,24 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
     // into the report builder, so the clinical-safety gate below can inspect it.
     // `None` means either no detection ran (caller asserted `--input-build`) or
     // there was no informative signal to compute a confidence from.
-    let detected_confidence = build_detection
-        .as_ref()
-        .and_then(|d| d.build_confidence);
+    let detected_confidence = build_detection.as_ref().and_then(|d| d.build_confidence);
+
+    let panel_qc = padded_panel.as_ref().map(|p| p.lock().qc.clone());
+    if let Some(qc) = &panel_qc {
+        tracing::info!(
+            snv_match = qc.snv_match,
+            flip_resolved = qc.snv_flip_resolved,
+            flip_unresolved = qc.snv_flip_unresolved,
+            allele_mismatch = qc.snv_allele_mismatch,
+            reference_mismatch = qc.snv_reference_mismatch,
+            palindrome_dropped = qc.palindrome_ambiguous + qc.palindrome_unresolved,
+            palindrome_flipped = qc.palindrome_flipped,
+            multiallelic_mismatch = qc.multiallelic_mismatch,
+            fill_hom_ref = qc.fill_hom_ref,
+            fill_missing = qc.fill_missing_no_call + qc.fill_missing_overlap,
+            "panel harmonization"
+        );
+    }
 
     let report_builder = crate::report::RunReportBuilder {
         input_path: config.input.display().to_string(),
@@ -1023,6 +1056,7 @@ pub fn convert_dtc_file(config: ConversionConfig) -> Result<ConversionSummary> {
         sex_y_genome_density,
         sex_x_autosome_het_ratio,
         build_detection,
+        panel_qc,
     };
     let report = report_builder.build(&summary);
     if let Err(e) = report.write(&config.output) {
@@ -1112,6 +1146,8 @@ struct ProcessingContext<'a> {
     config: &'a ConversionConfig,
     panel: Option<&'a parking_lot::Mutex<crate::panel::PaddedPanel>>,
     needs_sort: bool,
+    /// What the input's own header says about it (strand prior, completeness).
+    input_qc: crate::panel_apply::InputQcMeta,
 }
 
 /// Apply standardize + panel harmonization + normalize to a single record.
@@ -1123,6 +1159,20 @@ fn transform_record(
     summary: &mut crate::ConversionSummary,
     warned_unknown_chroms: &mut std::collections::HashSet<String>,
 ) -> Option<RecordBuf> {
+    if ctx.input_qc.absent_hom_ref
+        && let Some(panel_cell) = ctx.panel
+    {
+        let chrom = record.reference_sequence_name().to_string();
+        let output_name = ctx
+            .reference
+            .and_then(|r| r.resolve_contig_name(&chrom))
+            .map(str::to_string)
+            .unwrap_or(chrom);
+        if crate::panel_apply::take_block_record(&record, &mut panel_cell.lock(), &output_name) {
+            return None;
+        }
+    }
+
     let mut final_record = if ctx.config.standardize {
         match standardize_record(
             &record,
@@ -1147,114 +1197,14 @@ fn transform_record(
     };
 
     if let Some(panel_cell) = ctx.panel {
-        let chrom = final_record.reference_sequence_name().to_string();
-        let pos = final_record.variant_start().map(usize::from).unwrap_or(0) as u64;
-        let ref_base = final_record.reference_bases().to_string();
-
-        let record_alts: Vec<String> = final_record
-            .alternate_bases()
-            .as_ref()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        let mut all_input_alleles = vec![ref_base.clone()];
-        all_input_alleles.extend(record_alts.iter().cloned());
-
-        let mut panel_borrow = panel_cell.lock();
-        let harmonized_indices = match crate::harmonize::harmonize_alleles(
-            &all_input_alleles,
-            &ref_base,
-            &chrom,
-            pos,
-            &mut panel_borrow,
-        ) {
-            Ok(indices) => Some(indices),
-            Err(e) => {
-                tracing::debug!(
-                    chrom = %chrom,
-                    pos = pos,
-                    error = %e,
-                    "allele harmonization failed"
-                );
-                None
-            }
-        };
-
-        if let Some(indices) = harmonized_indices {
-            if let Some(site) = panel_borrow.get_original(&chrom, pos) {
-                let record_ref_len = final_record.reference_bases().len();
-                let panel_ref_len = site.ref_allele.len();
-                let panel_alts_same_len = site
-                    .alt_alleles
-                    .iter()
-                    .all(|alt| alt.len() == panel_ref_len);
-                let record_alts_same_len = final_record
-                    .alternate_bases()
-                    .as_ref()
-                    .iter()
-                    .all(|alt| alt.len() == record_ref_len);
-
-                let should_inject_panel_alts =
-                    panel_ref_len == record_ref_len && panel_alts_same_len && record_alts_same_len;
-
-                if should_inject_panel_alts {
-                    let merged_alts = crate::harmonize::get_merged_alts(
-                        site,
-                        panel_borrow.added_alts(&site.chrom, pos),
-                    );
-
-                    let mut mapping = std::collections::HashMap::new();
-                    for (old_idx, new_idx) in indices.iter().enumerate() {
-                        mapping.insert(old_idx, *new_idx);
-                    }
-
-                    let samples = if mapping.iter().any(|(old, new)| old != new) {
-                        remap_sample_genotypes(final_record.samples(), &mapping)
-                    } else {
-                        final_record.samples().clone()
-                    };
-
-                    let pos_val = match final_record.variant_start() {
-                        Some(p) => p,
-                        None => {
-                            summary.reference_failures += 1;
-                            return None;
-                        }
-                    };
-
-                    let mut info = final_record.info().clone();
-                    if merged_alts != record_alts {
-                        let infos = ctx.header.infos();
-                        info.as_mut().retain(|key, _| match infos.get(key) {
-                            Some(definition) => !matches!(
-                                definition.number(),
-                                Number::AlternateBases | Number::ReferenceAlternateBases
-                            ),
-                            None => true,
-                        });
-                    }
-
-                    let mut builder = RecordBuf::builder()
-                        .set_reference_sequence_name(final_record.reference_sequence_name())
-                        .set_variant_start(pos_val)
-                        .set_ids(final_record.ids().clone())
-                        .set_filters(final_record.filters().clone())
-                        .set_reference_bases(final_record.reference_bases().to_string())
-                        .set_info(info)
-                        .set_alternate_bases(
-                            noodles::vcf::variant::record_buf::AlternateBases::from(merged_alts),
-                        )
-                        .set_samples(samples);
-
-                    if let Some(qual) = final_record.quality_score() {
-                        builder = builder.set_quality_score(qual);
-                    }
-
-                    final_record = builder.build();
-                }
-            }
-        }
+        let mut panel = panel_cell.lock();
+        final_record = crate::panel_apply::apply_panel(
+            final_record,
+            &mut panel,
+            ctx.header,
+            &ctx.input_qc,
+            ctx.config.output_dir.is_some(),
+        );
     }
 
     normalize_record(&mut final_record);
@@ -1399,6 +1349,18 @@ where
                     tracing::warn!(error = %e, "failed to parse/convert input record");
                 }
             }
+        }
+    }
+
+    if ctx.input_qc.absent_hom_ref {
+        if let (Some(panel_cell), Some(sorter)) = (ctx.panel, sorter.as_mut()) {
+            let mut panel = panel_cell.lock();
+            crate::panel_apply::fill_absent_panel_records(&mut panel, |record| {
+                summary.record_emission(true);
+                sorter
+                    .push(record)
+                    .context("failed to spill filled panel records")
+            })?;
         }
     }
 
@@ -2321,7 +2283,11 @@ mod tests {
         }
     }
 
-    fn summary_with(variant_records: usize, total: usize, parse_errors: usize) -> ConversionSummary {
+    fn summary_with(
+        variant_records: usize,
+        total: usize,
+        parse_errors: usize,
+    ) -> ConversionSummary {
         let mut s = ConversionSummary::default();
         s.variant_records = variant_records;
         s.total_records = total;
@@ -2365,7 +2331,10 @@ mod tests {
         // Even with enough variants, the parse-error gate must fire first.
         let summary = summary_with(2_000, 100, 900);
         let err = enforce_clinical_safety_gates(&config, &summary, Some(0.98)).unwrap_err();
-        assert!(err.to_string().contains("failed to parse"), "unexpected: {err}");
+        assert!(
+            err.to_string().contains("failed to parse"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
@@ -2375,7 +2344,8 @@ mod tests {
         // Coordinates match neither build decisively (≈ tie).
         let err = enforce_clinical_safety_gates(&config, &summary, Some(0.50)).unwrap_err();
         assert!(
-            err.to_string().contains("could not confidently determine genome build"),
+            err.to_string()
+                .contains("could not confidently determine genome build"),
             "unexpected: {err}"
         );
     }
