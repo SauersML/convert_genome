@@ -334,7 +334,7 @@ pub fn apply_panel(
         })
         .unwrap_or_default();
     let is_snv = record_ref.len() == 1 && record_alts.iter().all(|a| a.len() == 1);
-    let panel_records: Vec<PanelSite> = panel.original().get_all(&chrom, pos).to_vec();
+    let panel_records: Vec<PanelSite> = panel.original().get_all(&chrom, pos);
 
     if panel_records.is_empty() {
         if track_padding {
@@ -668,8 +668,9 @@ pub fn fill_absent_panel_records(
     for (panel_chrom, claims) in all_claims {
         let no_call = merge_spans(claims.no_call_spans);
         let altered = merge_spans(claims.altered_spans);
-        for &pos in index.positions(&panel_chrom) {
-            for site in index.get_all(&panel_chrom, pos) {
+        for site in index.sites_on(&panel_chrom) {
+            {
+                let pos = site.pos;
                 let key = emitted_key(pos, &site.ref_allele, &site.alt_alleles);
                 if claims.emitted.contains(&key) {
                     continue;

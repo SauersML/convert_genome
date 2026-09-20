@@ -73,6 +73,73 @@ impl PanelSite {
     }
 }
 
+/// One panel record, stored compactly: a genome-wide panel holds tens of
+/// millions of these, and a pipeline process imputes several chromosomes at once.
+#[derive(Debug, Clone)]
+struct CompactRecord {
+    pos: u64,
+    /// INFO/AN, or `u32::MAX` when absent.
+    allele_number: u32,
+    /// INFO/AC of the first ALT, or `u32::MAX` when absent.
+    first_count: u32,
+    /// `REF` and the ALTs, tab then comma separated (`A\tG`, `AT\tA,ATT`).
+    alleles: Box<str>,
+    /// INFO/AC of the ALTs after the first (`u32::MAX` when absent).
+    other_counts: Option<Box<[u32]>>,
+}
+
+const MISSING_COUNT: u32 = u32::MAX;
+
+impl CompactRecord {
+    fn from_site(site: &PanelSite) -> Self {
+        let mut alleles = site.ref_allele.clone();
+        alleles.push('\t');
+        alleles.push_str(&site.alt_alleles.join(","));
+        let count = |i: usize| {
+            site.alt_counts
+                .get(i)
+                .copied()
+                .flatten()
+                .unwrap_or(MISSING_COUNT)
+        };
+        let other_counts =
+            (site.alt_alleles.len() > 1).then(|| (1..site.alt_alleles.len()).map(count).collect());
+        Self {
+            pos: site.pos,
+            allele_number: site.allele_number.unwrap_or(MISSING_COUNT),
+            first_count: count(0),
+            alleles: alleles.into_boxed_str(),
+            other_counts,
+        }
+    }
+
+    fn to_site(&self, chrom: &str) -> PanelSite {
+        let (reference, alts) = self.alleles.split_once('\t').unwrap_or((&self.alleles, ""));
+        let alt_alleles: Vec<String> = if alts.is_empty() {
+            Vec::new()
+        } else {
+            alts.split(',').map(str::to_string).collect()
+        };
+        let known = |c: u32| (c != MISSING_COUNT).then_some(c);
+        let mut alt_counts = Vec::with_capacity(alt_alleles.len());
+        if !alt_alleles.is_empty() {
+            alt_counts.push(known(self.first_count));
+        }
+        if let Some(rest) = &self.other_counts {
+            alt_counts.extend(rest.iter().map(|&c| known(c)));
+        }
+        PanelSite {
+            chrom: chrom.to_string(),
+            pos: self.pos,
+            id: None,
+            ref_allele: reference.to_string(),
+            alt_alleles,
+            alt_counts,
+            allele_number: known(self.allele_number),
+        }
+    }
+}
+
 /// Index of panel records for lookup by position.
 ///
 /// A position can hold several records: panels built with `bcftools norm -m-`
@@ -81,11 +148,13 @@ impl PanelSite {
 /// in file order. Keying on position alone and letting the last record win lost
 /// the other ALTs, and harmonization then "rescued" a true A/C call onto the kept
 /// A>G record.
+///
+/// Records are held per chromosome, sorted by position (stably, so records at
+/// one position keep file order), and found by binary search.
 #[derive(Default)]
 pub struct PanelIndex {
-    sites: HashMap<(String, u64), Vec<PanelSite>>,
-    /// Sorted, de-duplicated record positions per chromosome (panel naming).
-    positions: HashMap<String, Vec<u64>>,
+    /// Chromosome name (panel naming) -> its records, sorted by position.
+    records: HashMap<String, Vec<CompactRecord>>,
     /// Chromosome order from the panel header for sorting output
     chrom_order: Vec<String>,
     record_count: usize,
@@ -117,7 +186,6 @@ impl PanelIndex {
         let chrom_order: Vec<String> = header.contigs().keys().map(|k| k.to_string()).collect();
 
         let mut index = Self {
-            sites: HashMap::with_capacity(estimate_panel_capacity(path)),
             chrom_order,
             ..Self::default()
         };
@@ -180,7 +248,6 @@ impl PanelIndex {
         let chrom_order: Vec<String> = header.contigs().keys().map(|k| k.to_string()).collect();
 
         let mut index = Self {
-            sites: HashMap::with_capacity(estimate_panel_capacity(path.as_ref())),
             chrom_order,
             ..Self::default()
         };
@@ -247,61 +314,69 @@ impl PanelIndex {
 
     fn insert(&mut self, site: PanelSite) {
         self.record_count += 1;
-        self.positions
-            .entry(site.chrom.clone())
-            .or_default()
-            .push(site.pos);
-        self.sites
-            .entry((site.chrom.clone(), site.pos))
-            .or_default()
-            .push(site);
+        let compact = CompactRecord::from_site(&site);
+        match self.records.get_mut(site.chrom.as_str()) {
+            Some(records) => records.push(compact),
+            None => {
+                self.records.insert(site.chrom, vec![compact]);
+            }
+        }
     }
 
     fn finish(&mut self) {
-        for positions in self.positions.values_mut() {
-            positions.sort_unstable();
-            positions.dedup();
+        for records in self.records.values_mut() {
+            // Stable: records at one position keep their file order.
+            records.sort_by_key(|r| r.pos);
+            records.shrink_to_fit();
         }
     }
 
     /// The panel's own name for `chrom`, trying it with and without a `chr` prefix.
     pub fn resolve_chrom(&self, chrom: &str) -> Option<&str> {
-        if let Some((name, _)) = self.positions.get_key_value(chrom) {
+        if let Some((name, _)) = self.records.get_key_value(chrom) {
             return Some(name.as_str());
         }
         let alt_chrom = alternate_chrom_name(chrom);
-        self.positions
+        self.records
             .get_key_value(alt_chrom.as_str())
             .map(|(name, _)| name.as_str())
     }
 
+    fn chrom_records(&self, chrom: &str) -> Option<(&str, &[CompactRecord])> {
+        let name = self.resolve_chrom(chrom)?;
+        self.records.get(name).map(|r| (name, r.as_slice()))
+    }
+
     /// Every panel record at a position, in panel file order (empty if none).
-    pub fn get_all(&self, chrom: &str, pos: u64) -> &[PanelSite] {
-        if let Some(records) = self.sites.get(&(chrom.to_string(), pos)) {
-            return records;
-        }
-        self.sites
-            .get(&(alternate_chrom_name(chrom), pos))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+    pub fn get_all(&self, chrom: &str, pos: u64) -> Vec<PanelSite> {
+        let Some((name, records)) = self.chrom_records(chrom) else {
+            return Vec::new();
+        };
+        let start = records.partition_point(|r| r.pos < pos);
+        records[start..]
+            .iter()
+            .take_while(|r| r.pos == pos)
+            .map(|r| r.to_site(name))
+            .collect()
     }
 
     /// The first panel record at a position, if any.
-    pub fn get(&self, chrom: &str, pos: u64) -> Option<&PanelSite> {
-        self.get_all(chrom, pos).first()
+    pub fn get(&self, chrom: &str, pos: u64) -> Option<PanelSite> {
+        self.get_all(chrom, pos).into_iter().next()
     }
 
     /// Check if a site exists at the given position.
     pub fn contains(&self, chrom: &str, pos: u64) -> bool {
-        !self.get_all(chrom, pos).is_empty()
+        self.chrom_records(chrom).is_some_and(|(_, records)| {
+            let i = records.partition_point(|r| r.pos < pos);
+            records.get(i).is_some_and(|r| r.pos == pos)
+        })
     }
 
-    /// Sorted record positions on a chromosome (empty if the panel lacks it).
-    pub fn positions(&self, chrom: &str) -> &[u64] {
-        self.resolve_chrom(chrom)
-            .and_then(|name| self.positions.get(name))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+    /// Every record on a chromosome in position order (file order within a position).
+    pub fn sites_on(&self, chrom: &str) -> impl Iterator<Item = PanelSite> + '_ {
+        let (name, records) = self.chrom_records(chrom).unwrap_or(("", &[]));
+        records.iter().map(move |r| r.to_site(name))
     }
 
     /// Number of panel records in the index (split records count separately).
@@ -428,7 +503,7 @@ impl PaddedPanel {
     }
 
     /// Get the original panel site, if any.
-    pub fn get_original(&self, chrom: &str, pos: u64) -> Option<&PanelSite> {
+    pub fn get_original(&self, chrom: &str, pos: u64) -> Option<PanelSite> {
         self.original.get(chrom, pos)
     }
 
@@ -604,19 +679,6 @@ fn allele_counts(
     (alt_counts, allele_number)
 }
 
-fn estimate_panel_capacity(path: &Path) -> usize {
-    let default_capacity = 1_000_000usize;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return default_capacity;
-    };
-    let len = meta.len();
-    if len == 0 {
-        return default_capacity;
-    }
-    let estimated = (len / 80) as usize;
-    estimated.clamp(100_000, 8_000_000)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +733,7 @@ mod tests {
         assert_eq!(at_1500[0].alt_frequency(0), Some(0.3));
         assert_eq!(at_1500[1].alt_frequency(0), Some(0.05));
         assert_eq!(index.get_all("chr1", 1600)[0].alt_frequency(0), None);
-        assert_eq!(index.positions("1"), &[1500, 1600]);
+        let positions: Vec<u64> = index.sites_on("1").map(|s| s.pos).collect();
+        assert_eq!(positions, vec![1500, 1500, 1600]);
     }
 }
