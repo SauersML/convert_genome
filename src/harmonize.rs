@@ -103,6 +103,9 @@ pub enum SiteClass {
     /// Several panel ALTs at the position and the call does not fit them
     /// directly. Never strand-rescued.
     MultiAllelicMismatch,
+    /// Several panel ALTs, a strand-uncertain input, and a call that fits the
+    /// panel on both strands as different genotypes: dropped.
+    MultiAllelicAmbiguous,
 }
 
 /// Decide one SNV site.
@@ -133,11 +136,22 @@ pub fn resolve_snv(
     let direct = called.iter().all(|a| in_panel(a));
 
     if panel_alts.len() > 1 {
-        return if direct {
-            (Resolution::Keep, SiteClass::MultiAllelicMatch)
-        } else {
-            (Resolution::Missing, SiteClass::MultiAllelicMismatch)
-        };
+        if !direct {
+            return (Resolution::Missing, SiteClass::MultiAllelicMismatch);
+        }
+        // On a strand-uncertain input a call that fits the panel on both
+        // strands (G/G at an A>C, A>G site reads C/C when reversed) cannot be
+        // placed; one that reads the same either way (a C/G het) can.
+        let complemented: Vec<String> = called.iter().map(|a| complement_seq(a)).collect();
+        let fits_reversed = complemented.iter().all(|a| in_panel(a));
+        let mut as_called = called.clone();
+        let mut as_reversed = complemented;
+        as_called.sort();
+        as_reversed.sort();
+        if strand_prior >= FLIP_RESOLVE_MIN_PRIOR && fits_reversed && as_called != as_reversed {
+            return (Resolution::Missing, SiteClass::MultiAllelicAmbiguous);
+        }
+        return (Resolution::Keep, SiteClass::MultiAllelicMatch);
     }
 
     let palindromic = panel_alts.len() == 1 && complement_seq(&panel_ref) == panel_alts[0];
@@ -250,6 +264,26 @@ mod tests {
         assert_eq!(
             resolve_snv(&s(&["A", "C"]), "A", &s(&["G"]), None, 0.08),
             (Resolution::Missing, SiteClass::AlleleMismatch)
+        );
+        // A strand-uncertain input: G/G fits the split site on both strands
+        // (reversed it reads C/C), so it cannot be placed; A/G can (T/C does
+        // not fit), and so can the strand-invariant C/G het.
+        assert_eq!(
+            resolve_snv(&s(&["G", "G"]), "A", &s(&["C", "G"]), None, 0.08),
+            (Resolution::Missing, SiteClass::MultiAllelicAmbiguous)
+        );
+        assert_eq!(
+            resolve_snv(&s(&["A", "G"]), "A", &s(&["C", "G"]), None, 0.08),
+            (Resolution::Keep, SiteClass::MultiAllelicMatch)
+        );
+        assert_eq!(
+            resolve_snv(&s(&["C", "G"]), "A", &s(&["C", "G"]), None, 0.08),
+            (Resolution::Keep, SiteClass::MultiAllelicMatch)
+        );
+        // On a reference-oriented input the G/G is kept.
+        assert_eq!(
+            resolve_snv(&s(&["G", "G"]), "A", &s(&["C", "G"]), None, 0.0002),
+            (Resolution::Keep, SiteClass::MultiAllelicMatch)
         );
         // Several panel ALTs and a call that fits only after complementing:
         // never strand-rescued.

@@ -416,6 +416,7 @@ pub struct PanelQc {
     pub palindrome_unresolved: usize,
     pub multiallelic_match: usize,
     pub multiallelic_mismatch: usize,
+    pub multiallelic_ambiguous: usize,
     /// A heterozygote whose two ALTs live on different split panel records.
     pub split_record_het: usize,
     pub no_call: usize,
@@ -442,6 +443,7 @@ impl PanelQc {
             C::PalindromeUnresolved => &mut self.palindrome_unresolved,
             C::MultiAllelicMatch => &mut self.multiallelic_match,
             C::MultiAllelicMismatch => &mut self.multiallelic_mismatch,
+            C::MultiAllelicAmbiguous => &mut self.multiallelic_ambiguous,
         };
         *slot += 1;
     }
