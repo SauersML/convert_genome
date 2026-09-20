@@ -118,6 +118,13 @@ pub struct Statistics {
     pub invalid_genotypes: usize,
     pub symbolic_allele_records: usize,
     pub parse_errors: usize,
+    /// Records dropped by liftover, by reason. A caller gates on these: a file
+    /// whose sites mostly fail to lift is not in the build it was detected as.
+    pub liftover_unmapped: usize,
+    pub liftover_ambiguous: usize,
+    pub liftover_incompatible: usize,
+    pub liftover_straddled: usize,
+    pub liftover_contig_missing: usize,
 }
 
 impl From<&ConversionSummary> for Statistics {
@@ -134,6 +141,11 @@ impl From<&ConversionSummary> for Statistics {
             invalid_genotypes: s.invalid_genotypes,
             symbolic_allele_records: s.symbolic_allele_records,
             parse_errors: s.parse_errors,
+            liftover_unmapped: s.liftover_unmapped,
+            liftover_ambiguous: s.liftover_ambiguous,
+            liftover_incompatible: s.liftover_incompatible,
+            liftover_straddled: s.liftover_straddled,
+            liftover_contig_missing: s.liftover_contig_missing,
         }
     }
 }

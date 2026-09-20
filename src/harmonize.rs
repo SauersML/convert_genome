@@ -22,9 +22,12 @@
 pub const FLIP_RESOLVE_MIN_PRIOR: f64 = 0.01;
 
 /// Minor-allele frequency at and above which an A/T or C/G homozygote on a
-/// strand-uncertain input is dropped outright. Near 0.5 the two strands give
-/// almost the same genotype likelihood, and a global panel frequency is not
-/// precise enough across ancestries to tell them apart.
+/// strand-uncertain input (a strand prior of at least
+/// [`FLIP_RESOLVE_MIN_PRIOR`]: a Forward or TOP-derived export) is dropped
+/// outright. Near 0.5 the two strands give almost the same genotype
+/// likelihood, and a global panel frequency is not precise enough across
+/// ancestries to tell them apart. On a reference-oriented input the posterior
+/// alone decides, and keeps these.
 pub const PALINDROME_AMBIGUITY_MAF: f64 = 0.40;
 
 /// A palindromic homozygote is kept (or complemented) only when the posterior
@@ -166,7 +169,7 @@ pub fn resolve_snv(
     let Some(p) = alt_frequency.filter(|p| p.is_finite() && (0.0..=1.0).contains(p)) else {
         return (Resolution::Missing, SiteClass::PalindromeUnresolved);
     };
-    if p.min(1.0 - p) >= PALINDROME_AMBIGUITY_MAF {
+    if strand_prior >= FLIP_RESOLVE_MIN_PRIOR && p.min(1.0 - p) >= PALINDROME_AMBIGUITY_MAF {
         return (Resolution::Missing, SiteClass::PalindromeAmbiguous);
     }
     let observed_is_alt = called.first().is_some_and(|a| *a == panel_alts[0]);
@@ -293,6 +296,12 @@ mod tests {
         assert_eq!(
             resolve_snv(&s(&["A", "A"]), "A", &s(&["T"]), Some(0.45), 0.08),
             (Resolution::Missing, SiteClass::PalindromeAmbiguous)
+        );
+        // A reference-oriented vendor table (a pseudo-count prior): the band
+        // does not apply, and a common homozygote is kept on its posterior.
+        assert_eq!(
+            resolve_snv(&s(&["A", "A"]), "A", &s(&["T"]), Some(0.45), 0.0002),
+            (Resolution::Keep, SiteClass::PalindromeKept)
         );
         // Common homozygote on a Forward-like input (8% reversed): kept.
         assert_eq!(
